@@ -20,7 +20,13 @@ type LogEnds m = Shard m                                -- same shape; dual seat
   `turn`, `hasPending`, `loop`, `session`, `tape`, `selfrec`, `shard`, `logEnds`,
   `prefixIn`, plus shard combinators `prefixShard`, `suffixShard`,
   `codecShard`, `composeShard`, `>:>`.
-- Process / Comm / Framing / Turn — absorbed process-port layer.
+- Agent as Shard — `AgentSeat`, `feedAgent`, `agentShard`, `runAgentShard`
+  (change of base: pure Moore → `Ends (Kleisli m) [Post] [Post]`).
+- Token seat — `Port`, `batchEnds` / `unbatchEnds` / `portShard` (parser
+  stream coalgebra around a list shard → `Ends Post Post`); queue ends
+  re-exported (`Queue`, `openSTM`, `openIO`).
+- Process / Framing / Turn — process dual seats (`ProcessSeat`: shared `In`,
+  stdout + stderr `Ends`); framing; turn runners.
 
 ## What is not here
 

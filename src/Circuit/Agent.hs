@@ -7,7 +7,8 @@
 -- @
 --
 -- Free carrier @s@ is required by the pretense (tape vs summary).  The common
--- log case is @Agent [Post]@ — state is the received stream.
+-- log case is @Agent [Post]@ — state is the received stream.  That carrier is
+-- a parse of the tape: each committed @Post@ is one token.
 --
 -- Effectful boundary (preferred pin):
 --
@@ -20,8 +21,25 @@
 -- (@prefixIn@).  'LogEnds' is the same shape (dual seat on the log).
 -- Opacity is commit\/emit only; no interior.
 --
--- Design card: @coffee\/loom\/agent.md@.  Sketch witnesses:
--- @circuits-poly\/examples\/agent-sketch.md@.
+-- Change of base (circuits-parser sense): 'agentShard' reinterprets a pure
+-- 'Agent' at @Kleisli m@ ends — same Moore citizen, effectful interface.
+-- Direct shards (hermes session, muster-agent) skip the pure coalgebra and
+-- inhabit 'Shard' only.
+--
+-- Token seat around a list shard (parser dual): stream @f = [Post]@, token
+-- @s = Post@.  'batchEnds' snocs tokens into a stream (build @f@); 'unbatchEnds'
+-- peels with the same coalgebra as parser 'Uncons' on lists.  Compose with the
+-- shard via @('>:>')@:
+--
+-- @
+-- portShard = batchEnds … >:> shard >:> unbatchEnds …
+--   :: Ends (Kleisli m) Post Post
+-- @
+--
+-- Queue ends ('openSTM' \/ 'openIO') are the effectful token wire of the same
+-- shape when you need a bare @Post@\/@Post@ channel without a shard.
+--
+-- Design card: @coffee\/loom\/agent.md@.
 module Circuit.Agent
   ( -- * Posts and the log
     Post (..),
@@ -37,6 +55,21 @@ module Circuit.Agent
     LogEnds,
     shard,
     logEnds,
+
+    -- * Agent as Shard (change of base into Kleisli)
+    AgentSeat (..),
+    feedAgent,
+    flushOutbox,
+    agentShard,
+    runAgentShard,
+
+    -- * Token seat (stream buffers around a Shard)
+    Port,
+    peel,
+    snocPost,
+    batchEnds,
+    unbatchEnds,
+    portShard,
 
     -- * Forces
     watch,
@@ -56,6 +89,9 @@ module Circuit.Agent
     close,
     endsK,
     prefixIn,
+    Queue (..),
+    openSTM,
+    openIO,
 
     -- * Shard combinators
     prefixShard,
@@ -68,11 +104,14 @@ where
 
 import Circuit
   ( Ends (..),
+    Queue (..),
     close,
     composeEnds,
     dimapEnds,
     endsK,
     lmapEnds,
+    openIO,
+    openSTM,
     prefixIn,
     rmapEnds,
     (>:>),
@@ -200,10 +239,190 @@ setSeen :: Text -> [Post] -> [(Text, [Post])] -> [(Text, [Post])]
 setSeen name seen = map (\(n, s) -> if n == name then (n, seen) else (n, s))
 
 -- | Run a monomial system for one step.
+--
+-- Consume @i@, then extract the output from the successor state (Process /
+-- 'iterateSystem' timing).
 run1 :: System s (Mono o i) -> s -> i -> (o, s)
 run1 sys s i =
   let s' = snd (runSystem sys s) i
-   in (fst (runSystem sys s'), s')
+      (o, _) = runSystem sys s'
+   in (o, s')
+
+-- ---------------------------------------------------------------------------
+-- Agent as Shard — change of base into Kleisli Ends
+-- ---------------------------------------------------------------------------
+
+-- | State behind an 'agentShard': free carrier plus a pending emit queue.
+--
+-- Commit parses inputs into the carrier and enqueues one output 'Post' per
+-- input (the Moore step).  Emit flushes the queue — empty means quiet.
+data AgentSeat s = AgentSeat
+  { asState :: s,
+    -- | Pending outputs, oldest first.
+    asOutbox :: [Post]
+  }
+  deriving (Show, Eq)
+
+-- | Pure parse step: fold committed posts through the coalgebra.
+feedAgent :: Agent s -> [Post] -> AgentSeat s -> AgentSeat s
+feedAgent sys ins (AgentSeat s0 outs0) =
+  let (outs1, s1) =
+        foldl'
+          ( \(outs, s) i ->
+              let (o, s') = run1 sys s i
+               in (outs ++ [o], s')
+          )
+          ([], s0)
+          ins
+   in AgentSeat s1 (outs0 ++ outs1)
+
+-- | Take the outbox; leave carrier unchanged.
+flushOutbox :: AgentSeat s -> ([Post], AgentSeat s)
+flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
+
+-- | Reinterpret a pure 'Agent' as a 'Shard'.
+--
+-- @
+-- agentShard get put sys  ::  Shard m
+-- @
+--
+-- is the change of base from @(->)@ (the Moore coalgebra) into
+-- @Kleisli m@ ends: commit = parse inputs, emit = flush replies.  The
+-- interior stays opaque at the 'Shard' boundary — only @[Post]@ in and out.
+--
+-- @get@ \/ @put@ hold the 'AgentSeat' (e.g. 'Data.IORef' in @IO@, or
+-- @State@ in tests).  Example — reply agent over @State@:
+--
+-- @
+-- let sys = tape (\\hist -> (peek hist) { author = \"j\", addr = author (peek hist), body = \"ack: \" <> body (peek hist) })
+--     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post]))
+-- in  evalState (runKleisli (close (conjoint sh) (companion sh)) [humanPost]) (AgentSeat [] [])
+-- @
+agentShard ::
+  (Monad m) =>
+  m (AgentSeat s) ->
+  (AgentSeat s -> m ()) ->
+  Agent s ->
+  Shard m
+agentShard getSeat putSeat sys =
+  shard
+    ( \ins -> do
+        seat <- getSeat
+        putSeat (feedAgent sys ins seat)
+    )
+    ( do
+        seat <- getSeat
+        let (outs, seat') = flushOutbox seat
+        putSeat seat'
+        pure outs
+    )
+
+-- | One closed turn of an agent-as-shard: commit @ins@, emit replies, new seat.
+--
+-- Pure form of @close@ on 'agentShard' without choosing a monad:
+--
+-- @runAgentShard sys seat ins = runState (closeShard (agentShard get put sys) ins) seat@
+runAgentShard :: Agent s -> AgentSeat s -> [Post] -> ([Post], AgentSeat s)
+runAgentShard sys seat ins =
+  let seat1 = feedAgent sys ins seat
+      (outs, seat2) = flushOutbox seat1
+   in (outs, seat2)
+
+-- ---------------------------------------------------------------------------
+-- Token seat — stream coalgebra around a list Shard (parser dual)
+-- ---------------------------------------------------------------------------
+
+-- | Single-post ends: keyboard \/ one-out seat.
+--
+-- Obtained by buffering a list 'Shard' on both sides, or by a bare queue
+-- ('openSTM' \/ 'openIO').
+--
+-- A /tool call/ from an agent is just a 'Post': @addr@ names the tool,
+-- @body@ carries the arguments. No extra type — emit that 'Post' on a
+-- 'Port' (or post it on the log for the tool agent to 'watch').
+type Port m = Ends (Kleisli m) Post Post
+
+-- | Peel one token from a stream — the list instance of parser @Uncons@.
+--
+-- @
+-- peel []       = Nothing          -- That  (empty \/ quiet)
+-- peel [x]      = Just (x, [])     -- This  (final)
+-- peel (x:xs)   = Just (x, xs)     -- These (more)
+-- @
+peel :: [a] -> Maybe (a, [a])
+peel [] = Nothing
+peel (x : xs) = Just (x, xs)
+
+-- | Snoc a token onto a stream (oldest-first buffer). Dual of 'peel'.
+snocPost :: [Post] -> Post -> [Post]
+snocPost xs p = xs ++ [p]
+
+-- | @Ends Post [Post]@: commit snocs a token; emit flushes the whole stream
+-- (parser @takeRest@ — drain policy is \"the stream\", not a count).
+--
+-- @get@ \/ @put@ hold the stream buffer.
+batchEnds ::
+  (Monad m) =>
+  m [Post] ->
+  ([Post] -> m ()) ->
+  Ends (Kleisli m) Post [Post]
+batchEnds getBuf putBuf =
+  endsK
+    ( \p -> do
+        xs <- getBuf
+        putBuf (snocPost xs p)
+    )
+    ( do
+        xs <- getBuf
+        putBuf []
+        pure xs
+    )
+
+-- | @Ends [Post] Post@: commit appends a stream; emit peels one token
+-- (parser @next@ \/ 'peel').  Empty stream is a programming error at emit —
+-- quiet belongs at the list 'Shard' layer (@[]@), not at the token seat.
+--
+-- @get@ \/ @put@ hold the stream buffer.
+unbatchEnds ::
+  (Monad m) =>
+  m [Post] ->
+  ([Post] -> m ()) ->
+  Ends (Kleisli m) [Post] Post
+unbatchEnds getBuf putBuf =
+  endsK
+    ( \ps -> do
+        xs <- getBuf
+        putBuf (xs ++ ps)
+    )
+    ( do
+        xs <- getBuf
+        case peel xs of
+          Nothing ->
+            error "unbatchEnds: empty stream (no token to emit)"
+          Just (p, rest) -> do
+            putBuf rest
+            pure p
+    )
+
+-- | Token seat around a list 'Shard': buffer on both ends via stream coalgebra.
+--
+-- @
+-- portShard getIn putIn getOut putOut sh
+--   = batchEnds getIn putIn >:> sh >:> unbatchEnds getOut putOut
+-- @
+--
+-- Flush\/drain is not a separate policy knob — it /is/ build-stream ('snocPost')
+-- and peel-stream ('peel'), the same syntax as parsers over @[s]@.
+portShard ::
+  (Monad m) =>
+  m [Post] ->
+  ([Post] -> m ()) ->
+  m [Post] ->
+  ([Post] -> m ()) ->
+  Shard m ->
+  Port m
+portShard getIn putIn getOut putOut sh =
+  batchEnds getIn putIn >:> sh >:> unbatchEnds getOut putOut
 
 -- ---------------------------------------------------------------------------
 -- Shard combinators

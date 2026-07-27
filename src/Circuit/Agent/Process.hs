@@ -19,6 +19,11 @@ module Circuit.Agent.Process
     openProcessPorts,
     attachProcessPorts,
     openPtyProcessPorts,
+    -- * Ends / seat view (client-facing)
+    ProcessSeat (..),
+    stdioEnds,
+    stderrEnds,
+    openProcessSeat,
     portsEnds,
   )
 where
@@ -231,6 +236,58 @@ openPtyProcessPorts cfg = do
           killThread pumpTid
 
   pure ProcessPorts { peIn = peIn_, peOut = peOut_, peErr = peErr_, peClose = closeAction }
+
+-- | Stdin commit + stdout emit as matched 'Ends'.
+--
+-- Shares 'peIn' with 'stderrEnds': two seats, one commit port.
+--
+-- >>> ref <- newIORef ([] :: [Text])
+-- >>> let cin = In $ \o -> Kleisli $ \ts -> writeIORef ref ts >> runKleisli (emit o cin) ts
+-- >>> let cout = Out $ \_ -> Kleisli $ \_ -> readIORef ref
+-- >>> let pp = ProcessPorts { peIn = cin, peOut = cout, peErr = cout, peClose = pure () }
+-- >>> let e = stdioEnds pp
+-- >>> runKleisli (commit (conjoint e) (companion (open :: Ends (Kleisli IO) () ()))) ["hi"]
+-- ()
+-- >>> runKleisli (emit (companion e) (conjoint (open :: Ends (Kleisli IO) () ()))) ()
+-- ["hi"]
+stdioEnds :: ProcessPorts a b c -> Ends (Kleisli IO) a b
+stdioEnds pp = Ends (peIn pp) (peOut pp)
+
+-- | Stdin commit + stderr emit as matched 'Ends'.
+--
+-- Same conjoint as 'stdioEnds' ('peIn'); independent companion ('peErr').
+stderrEnds :: ProcessPorts a b c -> Ends (Kleisli IO) a c
+stderrEnds pp = Ends (peIn pp) (peErr pp)
+
+-- | Client view of a process: two 'Ends' sharing stdin, plus resource close.
+--
+-- @
+--   psOut = Ends peIn peOut   -- commit commands, poll stdout
+--   psErr = Ends peIn peErr   -- same commit port, poll stderr
+-- @
+--
+-- Commit through either conjoint reaches the process once (shared 'In').
+-- Prefer a single commit path in a turn (usually 'psOut') so lines are not
+-- double-written; emit on both. 'psClose' is process lifecycle — not the
+-- categorical counit of 'Ends'.
+--
+-- 'ProcessPorts' remains the splayed store / open plumbing.
+data ProcessSeat a b c = ProcessSeat
+  { psOut :: Ends (Kleisli IO) a b,
+    psErr :: Ends (Kleisli IO) a c,
+    psClose :: IO ()
+  }
+
+-- | Open a process and return the dual-seat client view.
+openProcessSeat :: ReplConfig -> IO (ProcessSeat [Text] [Text] [Text])
+openProcessSeat cfg = do
+  pp <- openProcessPorts cfg
+  pure
+    ProcessSeat
+      { psOut = stdioEnds pp,
+        psErr = stderrEnds pp,
+        psClose = peClose pp
+      }
 
 -- | The wire view of 'ProcessPorts': one nested 'par' morphism.
 --

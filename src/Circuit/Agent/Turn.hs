@@ -1,20 +1,20 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Named runner circuits that tie a 'ProcessPorts' free dual ends into a turn.
+-- | Named runner circuits that tie free dual ends into a turn.
 --
--- A turn is a /runner/ observation: it commits input, then polls stdout
--- until a boundary predicate is satisfied or a timeout expires.  The commit
--- and emit ends themselves live in 'Circuit.Agent.Process' and need only
--- 'Tensor'; the tying schedule lives here, outside the core library.
+-- A turn is a /runner/ observation: it commits input, then polls the emit
+-- end until a boundary predicate is satisfied or a timeout expires.  The
+-- ends themselves live elsewhere (e.g. 'stdioEnds'); the tying schedule
+-- lives here.
 --
 -- @
---   closeOnce cfg pp  :: Loop (,) (Kleisli IO) [Text] (Maybe [Text])
---   turnUntil cfg p pp :: Loop (,) (Kleisli IO) [Text] (Maybe [Text])
+--   closeOnce cfg e  :: Loop (,) (Kleisli IO) [Text] (Maybe [Text])
+--   turnUntil cfg p e :: Loop (,) (Kleisli IO) [Text] (Maybe [Text])
 -- @
 --
 -- Both return 'Nothing' when the timeout expires before the boundary is
--- reached.  Partial output is discarded on timeout (runner choice); use
--- 'emitOut' directly if you need every line.
+-- reached.  Partial output is discarded on timeout (runner choice); use a
+-- raw poll emit if you need every line.
 module Circuit.Agent.Turn
   ( -- * Turn configuration
     TurnConfig (..),
@@ -27,8 +27,7 @@ module Circuit.Agent.Turn
 where
 
 import Circuit (Loop (..))
-import Circuit.Agent.Process (ProcessPorts (..))
-import Circuit.Ends (Ends (..), HasUnit (..), In (..), Out (..), commit, emit, open)
+import Circuit.Ends (Ends (..), HasUnit (..), commit, emit, open)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (threadDelay)
 import Data.Text (Text)
@@ -55,20 +54,20 @@ defaultTurnConfig =
 -- predicate succeeds or the timeout expires.
 --
 -- Agent endomorphism @[Text] -> Maybe [Text]@ — matches the free dual
--- on stdin commit / stdout emit.
+-- on commit / emit.
 turnUntil ::
   TurnConfig ->
   (Text -> Bool) ->
-  ProcessPorts [Text] [Text] c ->
+  Ends (Kleisli IO) [Text] [Text] ->
   Loop (,) (Kleisli IO) [Text] (Maybe [Text])
-turnUntil cfg isBoundary pp = Lift $ Kleisli $ \cmds -> do
-  runKleisli (commit (peIn pp) outU) cmds
+turnUntil cfg isBoundary e = Lift $ Kleisli $ \cmds -> do
+  runKleisli (commit (conjoint e) outU) cmds
   poll 0 [] 10_000
   where
     Ends _ outU = open :: Ends (Kleisli IO) () ()
     timeoutUs = turnTimeoutUs cfg
     poll elapsed acc delay = do
-      news <- runKleisli (emit (peOut pp) inU) ()
+      news <- runKleisli (emit (companion e) inU) ()
       let acc' = acc <> news
       if any isBoundary news
         then pure (Just acc')
@@ -86,6 +85,6 @@ turnUntil cfg isBoundary pp = Lift $ Kleisli $ \cmds -> do
 -- emitted stream.
 closeOnce ::
   TurnConfig ->
-  ProcessPorts [Text] [Text] c ->
+  Ends (Kleisli IO) [Text] [Text] ->
   Loop (,) (Kleisli IO) [Text] (Maybe [Text])
 closeOnce cfg = turnUntil cfg (T.isInfixOf (turnEofTag cfg))

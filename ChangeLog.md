@@ -1,5 +1,10 @@
 # Revision history for circuits-agent
 
+## unreleased
+
+- Retired `Circuit.Agent.Comm` (cat-FIFO channel); product bus lives in muster.
+- `ProcessSeat`: dual `Ends` sharing stdin (`psOut` / `psErr`); `stderrEnds`.
+
 ## 0.1.0.0 — 2026-07-27
 
 - Type pin (`coffee/loom/agent.md`):
