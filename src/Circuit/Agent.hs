@@ -28,7 +28,7 @@
 --
 -- Token seat around a list shard (parser dual): stream @f = [Post]@, token
 -- @s = Post@.  'batchEnds' snocs tokens into a stream (build @f@); 'unbatchEnds'
--- peels with the same coalgebra as parser 'Uncons' on lists.  Compose with the
+-- peels with the same coalgebra as 'Uncons' on lists.  Compose with the
 -- shard via @('>:>')@:
 --
 -- @
@@ -120,7 +120,7 @@ import Circuit
     rmapEnds,
     (>:>),
   )
-import Circuit.Parser (These (..), Uncons (..))
+import Circuit.Stream (These (..), Snoc (..), Uncons (..))
 import Circuit.Poly (Eval (..), Mono, System)
 import Circuit.Poly.Process (runSystem)
 import Control.Arrow (Kleisli (..))
@@ -347,21 +347,7 @@ runAgentShard sys seat ins =
 -- 'Port' (or post it on the log for the tool agent to 'watch').
 type Port m = Ends (Kleisli m) Post Post
 
--- | Construct a stream by snoc-ing tokens. Dual of 'Uncons'.
---
--- This is the parser-stream construction class; 'Uncons' (from
--- 'Circuit.Parser') is the deconstruction class. Together they let the token
--- seat move back and forth between tokens and streams using the same coalgebra
--- that parsers use.
-class Snoc f s where
-  -- | Append one token to the right of a stream.
-  snoc :: f -> s -> f
-  -- | The empty stream.
-  snocNil :: f
-
-instance Snoc [a] a where
-  snoc xs x = xs ++ [x]
-  snocNil = []
+-- 'Snoc' is re-exported from 'Circuit.Stream' (construction dual of 'Uncons').
 
 -- | Snoc a 'Post' onto a post stream. Specialized alias for 'snoc'.
 snocPost :: [Post] -> Post -> [Post]

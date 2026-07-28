@@ -4,6 +4,9 @@
 
 - Retired `Circuit.Agent.Comm` (cat-FIFO channel); product bus lives in muster.
 - `ProcessSeat`: dual `Ends` sharing stdin (`psOut` / `psErr`); `stderrEnds`.
+- Stream coalgebra (`These`, `Uncons`, `Snoc`) now imported from `Circuit.Stream`
+  (`circuits-parser`); local `peel` and local `Snoc` class removed. API unchanged
+  for consumers.
 
 ## 0.1.0.0 — 2026-07-27
 

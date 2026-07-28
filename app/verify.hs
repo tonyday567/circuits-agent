@@ -3,7 +3,7 @@
 module Main (main) where
 
 import Circuit.Agent
-import Circuit.Parser (These (..), uncons)
+import Circuit.Stream (These (..), uncons)
 import Circuit.Poly (Eval (..), Mono, System)
 import Circuit.Poly.Process (iterateSystem)
 import Control.Arrow (Kleisli (..), runKleisli)
