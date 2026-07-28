@@ -150,26 +150,27 @@ type Log = [Post]
 -- Common log case: @Agent [Post]@ (state = received stream).
 type Agent s = System s (Mono Post Post)
 
--- | Opaque effectful ends: lists both ways.
+-- | Opaque effectful ends: stream @f@ both ways.
 --
--- Pipeline speaks @[Post]@ on commit and emit.  Keyboard one-shot:
+-- Common case: @Shard m [Post]@.  Pipeline speaks a stream on commit and
+-- emit.  Keyboard one-shot:
 --
 -- @
 -- prefixIn (:[])  -- Post -> [Post] on the conjoint
 -- @
 --
 -- Emit is an onslaught of posts (empty = quiet \/ done for that poll).
-type Shard m = Ends (Kleisli m) [Post] [Post]
+type Shard m f = Ends (Kleisli m) f f
 
 -- | Same ends shape as 'Shard' — dual seat on the log (journal 013).
-type LogEnds m = Shard m
+type LogEnds m f = Shard m f
 
 -- | Build a 'Shard' from monadic commit and emit actions.
-shard :: (Monad m) => ([Post] -> m ()) -> m [Post] -> Shard m
+shard :: (Monad m) => (f -> m ()) -> m f -> Shard m f
 shard = endsK
 
 -- | Build log ends (same as 'shard'; dual seat).
-logEnds :: (Monad m) => ([Post] -> m ()) -> m [Post] -> LogEnds m
+logEnds :: (Monad m) => (f -> m ()) -> m f -> LogEnds m f
 logEnds = endsK
 
 -- | Born empty, conses each received input onto its history.
@@ -285,10 +286,10 @@ feedAgent sys ins (AgentSeat s0 outs0) =
 flushOutbox :: AgentSeat s -> ([Post], AgentSeat s)
 flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 
--- | Reinterpret a pure 'Agent' as a 'Shard'.
+-- | Reinterpret a pure 'Agent' as a list 'Shard'.
 --
 -- @
--- agentShard get put sys  ::  Shard m
+-- agentShard get put sys  ::  Shard m [Post]
 -- @
 --
 -- is the change of base from @(->)@ (the Moore coalgebra) into
@@ -300,7 +301,7 @@ flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 --
 -- @
 -- let sys = tape (\\hist -> (peek hist) { author = "j", addr = author (peek hist), body = "ack: " <> body (peek hist) })
---     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post]))
+--     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post])) [Post]
 -- in  evalState (runKleisli (close (conjoint sh) (companion sh)) [humanPost]) (AgentSeat [] [])
 -- @
 agentShard ::
@@ -308,7 +309,7 @@ agentShard ::
   m (AgentSeat s) ->
   (AgentSeat s -> m ()) ->
   Agent s ->
-  Shard m
+  Shard m [Post]
 agentShard getSeat putSeat sys =
   shard
     ( \ins -> do
@@ -420,7 +421,7 @@ portShard ::
   ([Post] -> m ()) ->
   m [Post] ->
   ([Post] -> m ()) ->
-  Shard m ->
+  Shard m [Post] ->
   Port m
 portShard getIn putIn getOut putOut sh =
   batchEnds getIn putIn >:> sh >:> unbatchEnds getOut putOut
@@ -434,21 +435,21 @@ portShard getIn putIn getOut putOut sh =
 -- Transform the @[Post]@ before it is committed.  One common use is
 -- session assembly: @prefixShard session@ changes the payload that the
 -- shard posts.
-prefixShard :: (Monad m) => ([Post] -> [Post]) -> Shard m -> Shard m
+prefixShard :: (Monad m) => (f -> f) -> Shard m f -> Shard m f
 prefixShard f = lmapEnds (Kleisli $ pure . f)
 
 -- | Adapt a shard on the emit side (covariant).
 --
--- Transform the @[Post]@ after it is emitted.  One common use is a
+-- Transform the stream after it is emitted.  One common use is a
 -- transport envelope: @suffixShard (map addHeader)@ decorates every
 -- emitted post.
-suffixShard :: (Monad m) => ([Post] -> [Post]) -> Shard m -> Shard m
+suffixShard :: (Monad m) => (f -> f) -> Shard m f -> Shard m f
 suffixShard g = rmapEnds (Kleisli $ pure . g)
 
 -- | Adapt both sides of a shard at once.
 --
 -- @codecShard f g = prefixShard f . suffixShard g@.
-codecShard :: (Monad m) => ([Post] -> [Post]) -> ([Post] -> [Post]) -> Shard m -> Shard m
+codecShard :: (Monad m) => (f -> f) -> (f -> f) -> Shard m f -> Shard m f
 codecShard f g = dimapEnds (Kleisli $ pure . f) (Kleisli $ pure . g)
 
 -- | Sequential composition of shards.
@@ -456,5 +457,5 @@ codecShard f g = dimapEnds (Kleisli $ pure . f) (Kleisli $ pure . g)
 -- The output stream of the first shard feeds the input stream of the
 -- second.  This is the same shape as connecting two effectful agents
 -- in series.
-composeShard :: (Monad m) => Shard m -> Shard m -> Shard m
+composeShard :: (Monad m) => Shard m f -> Shard m f -> Shard m f
 composeShard = composeEnds

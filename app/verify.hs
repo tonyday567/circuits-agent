@@ -178,14 +178,14 @@ main = do
   do
     let p1 = mkPost "human" "j" "alpha" "hi"
         p2 = mkPost "j" "human" "alpha" "ack"
-        fixedShard :: Shard Identity
+        fixedShard :: Shard Identity [Post]
         fixedShard = endsK (\_ -> pure ()) (pure [p2])
         coded = codecShard (map (\p -> p {body = "in:" <> body p})) (map (\p -> p {body = body p <> ":out"})) fixedShard
         out = runIdentity (runKleisli (close (conjoint coded) (companion coded)) [p1])
     assert "codec transforms commit and emit" $
       map body out == ["ack:out"]
 
-    let accumShard :: Shard (State [Post])
+    let accumShard :: Shard (State [Post]) [Post]
         accumShard = endsK (\ps -> modify (ps ++)) get
         composed = composeShard accumShard (suffixShard (map (\p -> p {body = body p <> "!"})) accumShard)
         (out2, st) = runState (runKleisli (close (conjoint composed) (companion composed)) [p1]) []
@@ -206,7 +206,7 @@ main = do
       map body outs == ["ack: hi"] && length (asState seat) == 1
 
     -- same citizen as Ends (Kleisli State) — commit/emit only at the boundary
-    let sh :: Shard (State (AgentSeat [Post]))
+    let sh :: Shard (State (AgentSeat [Post])) [Post]
         sh = agentShard get put ack
         (outs2, seat2) =
           runState
@@ -229,7 +229,7 @@ main = do
         ack = tape (reply "j")
         pIn = mkPost "human" "j" "alpha" "hi"
         -- agent as list shard, then token seat via stream buffers
-        sh :: Shard (State (AgentSeat [Post], [Post], [Post]))
+        sh :: Shard (State (AgentSeat [Post], [Post], [Post])) [Post]
         sh =
           agentShard
             (gets (\(seat, _, _) -> seat))
@@ -290,7 +290,7 @@ main = do
         _ -> False
 
     -- example: Port (Ends Post Post) — one token in, tool-call token out
-    let sh :: Shard (State (AgentSeat [Post], [Post], [Post]))
+    let sh :: Shard (State (AgentSeat [Post], [Post], [Post])) [Post]
         sh =
           agentShard
             (gets (\(s, _, _) -> s))
