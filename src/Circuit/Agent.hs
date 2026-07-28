@@ -48,6 +48,7 @@ module Circuit.Agent
   ( -- * Posts and the log
     Post (..),
     Log,
+    emptyLog,
 
     -- * Pure agents
     Agent,
@@ -122,7 +123,7 @@ import Circuit
     rmapEnds,
     (>:>),
   )
-import Circuit.Stream (These (..), Snoc (..), Uncons (..))
+import Circuit.Stream (Cons (..), These (..), Snoc (..), Uncons (..))
 import Circuit.Poly (Eval (..), Mono, System)
 import Circuit.Poly.Process (runSystem)
 import Control.Arrow (Kleisli (..))
@@ -144,7 +145,11 @@ data Post = Post
   deriving (Show, Eq)
 
 -- | The shared append-only log, newest first.
-type Log = [Post]
+--
+-- The log is a stream of 'Post's.  Common case: @Log [Post]@.  Generalizing to
+-- any @f@ with 'Cons' and 'Uncons' lets the same delivery machinery run over
+-- other stream representations while keeping the addressed read as a list.
+type Log f = f
 
 -- | Pure agent: a Moore machine over posts, free carrier.
 --
@@ -206,28 +211,43 @@ data AgentState s = AgentState
 emptyAgentState :: forall s. (Snoc s Post) => AgentState s
 emptyAgentState = AgentState (snocNil @s @Post) 0
 
+-- | Empty log.
+emptyLog :: forall f. (Cons f Post) => Log f
+emptyLog = consNil @f @Post
+
 -- | Read end of the log: all posts addressed to @who@, oldest first.
-watch :: Text -> Log -> [Post]
-watch who t = reverse (filter ((== who) . addr) t)
+--
+-- Traversal is newest-to-oldest; matching posts are prepended, so the
+-- accumulator is already oldest-first.
+watch :: (Uncons f Post) => Text -> Log f -> [Post]
+watch who t = go t []
+  where
+    go stream acc =
+      case uncons stream of
+        That _ -> acc
+        This p -> if addr p == who then p : acc else acc
+        These p rest -> go rest (if addr p == who then p : acc else acc)
 
 -- | Write end of the log: commit a post.
-post :: Post -> Log -> Log
-post = (:)
+post :: (Cons f Post) => Post -> Log f -> Log f
+post = cons
 
 -- | Per-agent session assembly: the bodies an agent actually sees.
-session :: Text -> Log -> [Text]
+session :: (Uncons f Post) => Text -> Log f -> [Text]
 session who = map body . watch who
 
 -- | One delivery round: 'watch' unread posts, step the machine, 'post' each output.
 --
 -- The 'AgentState' carries the free carrier @s@ and a count of already-received
--- posts.  Only 'Snoc' is required on @s@, so the carrier need not be a list.
+-- posts.  Only 'Snoc' is required on the carrier; the log only needs 'Cons' and
+-- 'Uncons'.
 turn ::
+  (Cons f Post, Uncons f Post) =>
   Text ->
   Agent s ->
   AgentState s ->
-  Log ->
-  (AgentState s, Log)
+  Log f ->
+  (AgentState s, Log f)
 turn who sys (AgentState seen n) log0 =
   foldl'
     ( \(AgentState seen' n', log') i ->
@@ -240,7 +260,7 @@ turn who sys (AgentState seen n) log0 =
 -- | Whether @who@ has addressed posts not yet consumed.
 --
 -- Matches 'turn''s delivery bookkeeping: unread = drop (asSeen st) (watch who lg).
-hasPending :: Text -> AgentState s -> Log -> Bool
+hasPending :: (Uncons f Post) => Text -> AgentState s -> Log f -> Bool
 hasPending who st lg = not (null (drop (asSeen st) (watch who lg)))
 
 -- | Round-robin turn-loop until no agent has pending deliveries (quiescence).
@@ -249,11 +269,11 @@ hasPending who st lg = not (null (drop (asSeen st) (watch who lg)))
 -- still has pending work at its slot.  Passes repeat until a pass starts with
 -- nobody pending.  Carriers start empty for every name.
 loop ::
-  forall s.
-  (Snoc s Post) =>
+  forall s f.
+  (Snoc s Post, Cons f Post, Uncons f Post) =>
   [(Text, Agent s)] ->
-  Log ->
-  ([(Text, AgentState s)], Log)
+  Log f ->
+  ([(Text, AgentState s)], Log f)
 loop roster log0 = go [(n, emptyAgentState @s) | (n, _) <- roster] log0
   where
     go states lg

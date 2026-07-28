@@ -7,6 +7,10 @@
 - Stream coalgebra (`These`, `Uncons`, `Snoc`) now imported from `Circuit.Stream`
   (`circuits-parser`); local `peel` and local `Snoc` class removed. API unchanged
   for consumers.
+- Generalized `Log` from `[Post]` to `Log f`; delivery (`watch`, `post`, `turn`,
+  `loop`, `hasPending`, `session`) now works over any stream with `Cons f Post`
+  and `Uncons f Post`.
+- Added `emptyLog` as the polymorphic empty `Log f`.
 
 ## 0.1.0.0 — 2026-07-27
 

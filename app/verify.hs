@@ -130,7 +130,7 @@ main = do
     assert "loop tool chain length" $
       length tCalc == 4
 
-    let (_emptyStates, tEmpty) = loop roster []
+    let (_emptyStates, tEmpty) = loop roster ([] :: [Post])
     assert "loop on empty log is identity" $ null tEmpty
 
   -------------------------------------------------------------------------
