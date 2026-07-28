@@ -51,10 +51,12 @@ module Circuit.Agent
 
     -- * Pure agents
     Agent,
+    AgentState (..),
+    emptyAgentState,
     tape,
     selfrec,
 
-    -- * Effectful ends (symmetric lists)
+    -- * Effectful ends (symmetric streams)
     Shard,
     LogEnds,
     shard,
@@ -187,6 +189,23 @@ tape f hist = EP (EK (f hist), EE (: hist))
 selfrec :: ([i] -> i) -> System [i] (Mono i i)
 selfrec f hist = EP (EK (f hist), EE (\i -> let h' = i : hist in f h' : h'))
 
+-- | State for a pure agent in delivery: free carrier plus a count of posts
+-- already received from the log.
+--
+-- The carrier @s@ is opaque to the delivery bookkeeping; only 'Snoc' is needed
+-- to append each newly delivered post.  The count keeps the cursor into the
+-- addressed stream without requiring the carrier to be a list.
+data AgentState s = AgentState
+  { asCarrier :: s,
+    -- | Number of posts addressed to this agent already consumed from the log.
+    asSeen :: Int
+  }
+  deriving (Show, Eq)
+
+-- | Empty carrier and zero seen count.
+emptyAgentState :: forall s. (Snoc s Post) => AgentState s
+emptyAgentState = AgentState (snocNil @s @Post) 0
+
 -- | Read end of the log: all posts addressed to @who@, oldest first.
 watch :: Text -> Log -> [Post]
 watch who t = reverse (filter ((== who) . addr) t)
@@ -201,48 +220,58 @@ session who = map body . watch who
 
 -- | One delivery round: 'watch' unread posts, step the machine, 'post' each output.
 --
--- The first component of the input pair is the agent's received stream so
--- far; the second is the shared log.  The force tracks delivery by counting
--- already-received posts.  Specialized to the received-stream carrier.
-turn :: Text -> Agent [Post] -> ([Post], Log) -> ([Post], Log)
-turn who sys (seen, log0) =
+-- The 'AgentState' carries the free carrier @s@ and a count of already-received
+-- posts.  Only 'Snoc' is required on @s@, so the carrier need not be a list.
+turn ::
+  Text ->
+  Agent s ->
+  AgentState s ->
+  Log ->
+  (AgentState s, Log)
+turn who sys (AgentState seen n) log0 =
   foldl'
-    (\(seen', log') i -> let (o, seen'') = run1 sys seen' i in (seen'', post o log'))
-    (seen, log0)
-    (drop (length seen) (watch who log0))
+    ( \(AgentState seen' n', log') i ->
+        let (o, seen'') = run1 sys seen' i
+         in (AgentState seen'' (n' + 1), post o log')
+    )
+    (AgentState seen n, log0)
+    (drop n (watch who log0))
 
--- | Whether @who@ has addressed posts not yet in @seen@.
+-- | Whether @who@ has addressed posts not yet consumed.
 --
--- Matches 'turn''s delivery bookkeeping: unread = drop (length seen) (watch who lg).
-hasPending :: Text -> [Post] -> Log -> Bool
-hasPending who seen lg = not (null (drop (length seen) (watch who lg)))
+-- Matches 'turn''s delivery bookkeeping: unread = drop (asSeen st) (watch who lg).
+hasPending :: Text -> AgentState s -> Log -> Bool
+hasPending who st lg = not (null (drop (asSeen st) (watch who lg)))
 
 -- | Round-robin turn-loop until no agent has pending deliveries (quiescence).
 --
 -- Roster order is the schedule.  Each pass runs 'turn' for every agent that
 -- still has pending work at its slot.  Passes repeat until a pass starts with
--- nobody pending.  Received streams start empty for every name.
---
--- Pure v0: only 'Agent' [@Post@]; shards join later.
-loop :: [(Text, Agent [Post])] -> Log -> ([(Text, [Post])], Log)
-loop roster log0 = go [(n, []) | (n, _) <- roster] log0
+-- nobody pending.  Carriers start empty for every name.
+loop ::
+  forall s.
+  (Snoc s Post) =>
+  [(Text, Agent s)] ->
+  Log ->
+  ([(Text, AgentState s)], Log)
+loop roster log0 = go [(n, emptyAgentState @s) | (n, _) <- roster] log0
   where
-    go seens lg
-      | not (any (\(n, s) -> hasPending n s lg) seens) = (seens, lg)
+    go states lg
+      | not (any (\(n, st) -> hasPending n st lg) states) = (states, lg)
       | otherwise =
-          let (seens', lg') = foldl' step (seens, lg) roster
-           in go seens' lg'
-    step (seens, lg) (name, agent) =
-      case lookup name seens of
-        Nothing -> (seens, lg)
-        Just seen
-          | hasPending name seen lg ->
-              let (seen', lg') = turn name agent (seen, lg)
-               in (setSeen name seen' seens, lg')
-          | otherwise -> (seens, lg)
+          let (states', lg') = foldl' step (states, lg) roster
+           in go states' lg'
+    step (states, lg) (name, agent) =
+      case lookup name states of
+        Nothing -> (states, lg)
+        Just st
+          | hasPending name st lg ->
+              let (st', lg') = turn name agent st lg
+               in (setSeen name st' states, lg')
+          | otherwise -> (states, lg)
 
-setSeen :: Text -> [Post] -> [(Text, [Post])] -> [(Text, [Post])]
-setSeen name seen = map (\(n, s) -> if n == name then (n, seen) else (n, s))
+setSeen :: Text -> AgentState s -> [(Text, AgentState s)] -> [(Text, AgentState s)]
+setSeen name st = map (\(n, s) -> if n == name then (n, st) else (n, s))
 
 -- | Run a monomial system for one step.
 --

@@ -57,17 +57,17 @@ main = do
           [ mkPost "human" "k" "beta" "hi k",
             mkPost "human" "j" "alpha" "hi j"
           ]
-    let (sj1, t1) = turn "j" (tape (reply "j")) ([], t0)
-    let (sk1, t2) = turn "k" (tape (reply "k")) ([], t1)
+    let (stJ1, t1) = turn "j" (tape (reply "j")) (emptyAgentState @[Post]) t0
+    let (stK1, t2) = turn "k" (tape (reply "k")) (emptyAgentState @[Post]) t1
     assert "j receives only its addressed posts" $
-      map body (reverse sj1) == ["hi j"]
+      map body (reverse (asCarrier stJ1)) == ["hi j"]
     assert "k receives only its addressed posts" $
-      map body (reverse sk1) == ["hi k"]
+      map body (reverse (asCarrier stK1)) == ["hi k"]
 
     let t3 = post (mkPost "human" "j" "alpha" "again") t2
-    let (sj2, _t4) = turn "j" (tape (reply "j")) (sj1, t3)
+    let (stJ2, _t4) = turn "j" (tape (reply "j")) (AgentState (asCarrier stJ1) (length (asCarrier stJ1))) t3
     assert "j sees the new post, no redelivery" $
-      map body (reverse sj2) == ["hi j", "again"]
+      map body (reverse (asCarrier stJ2)) == ["hi j", "again"]
 
   -------------------------------------------------------------------------
   -- Compaction invariance: summary-insensitive folds survive it.
@@ -92,9 +92,9 @@ main = do
   putStrLn "turn integrity"
   do
     let t0 = [mkPost "human" "j" "alpha" "calc:1 2 3"]
-    let (sj1, t1) = turn "j" (tape llmJ) ([], t0)
-    let (_sc1, t2) = turn "calc" (tape calc) ([], t1)
-    let (_sj2, t3) = turn "j" (tape llmJ) (sj1, t2)
+    let (stJ1, t1) = turn "j" (tape llmJ) (emptyAgentState @[Post]) t0
+    let (_stCalc, t2) = turn "calc" (tape calc) (emptyAgentState @[Post]) t1
+    let (_stJ2, t3) = turn "j" (tape llmJ) (AgentState (asCarrier stJ1) (length (asCarrier stJ1))) t2
     assert "tool-call chain produces expected final post" $
       body (peek t3) == "final: 6"
     assert "turn appends exactly one post per input" $
@@ -113,24 +113,24 @@ main = do
           [ mkPost "human" "k" "beta" "hi k",
             mkPost "human" "j" "alpha" "hi j"
           ]
-    let (seens, t1) = loop roster t0
+    let (states, t1) = loop roster t0
     assert "loop delivers both agents" $
-      map body (reverse (maybe [] id (lookup "j" seens))) == ["hi j"]
-        && map body (reverse (maybe [] id (lookup "k" seens))) == ["hi k"]
+      map body (reverse (maybe [] asCarrier (lookup "j" states))) == ["hi j"]
+        && map body (reverse (maybe [] asCarrier (lookup "k" states))) == ["hi k"]
     assert "loop posts both acks" $
       length t1 == 4
     assert "loop reaches quiescence (no pending)" $
-      all (\(n, s) -> not (hasPending n s t1)) seens
+      all (\(n, st) -> not (hasPending n st t1)) states
 
     let roster2 = [("j", tape llmJ), ("calc", tape calc)]
     let tCalc0 = [mkPost "human" "j" "alpha" "calc:1 2 3"]
-    let (_seens2, tCalc) = loop roster2 tCalc0
+    let (_states2, tCalc) = loop roster2 tCalc0
     assert "loop runs tool-call chain to final" $
       body (peek tCalc) == "final: 6"
     assert "loop tool chain length" $
       length tCalc == 4
 
-    let (_emptySeens, tEmpty) = loop roster []
+    let (_emptyStates, tEmpty) = loop roster []
     assert "loop on empty log is identity" $ null tEmpty
 
   -------------------------------------------------------------------------
@@ -157,10 +157,10 @@ main = do
         -- seed: human addresses worker
         t0 = [mkPost "human" "worker" chan "start"]
         step (sw, sn, lg) =
-          let (sw', lg1) = turn "worker" worker (sw, lg)
-              (sn', lg2) = turn "nudge" nudge (sn, lg1)
+          let (sw', lg1) = turn "worker" worker sw lg
+              (sn', lg2) = turn "nudge" nudge sn lg1
            in (sw', sn', lg2)
-        (_, _, tF) = iterate step ([], [], t0) !! rounds
+        (_, _, tF) = iterate step (emptyAgentState @[Post], emptyAgentState @[Post], t0) !! rounds
         -- newest first: take dialogue posts (exclude seed)
         dialogue = take (2 * rounds) tF
     assert "multi-round: log grew by 2 posts per round" $
