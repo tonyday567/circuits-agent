@@ -40,6 +40,10 @@
 -- shape when you need a bare @Post@\/@Post@ channel without a shard.
 --
 -- Design card: @coffee\/loom\/agent.md@.
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
 module Circuit.Agent
   ( -- * Posts and the log
     Post (..),
@@ -65,7 +69,7 @@ module Circuit.Agent
 
     -- * Token seat (stream buffers around a Shard)
     Port,
-    peel,
+    Snoc (..),
     snocPost,
     batchEnds,
     unbatchEnds,
@@ -116,6 +120,7 @@ import Circuit
     rmapEnds,
     (>:>),
   )
+import Circuit.Parser (These (..), Uncons (..))
 import Circuit.Poly (Eval (..), Mono, System)
 import Circuit.Poly.Process (runSystem)
 import Control.Arrow (Kleisli (..))
@@ -294,7 +299,7 @@ flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 -- @State@ in tests).  Example — reply agent over @State@:
 --
 -- @
--- let sys = tape (\\hist -> (peek hist) { author = \"j\", addr = author (peek hist), body = \"ack: \" <> body (peek hist) })
+-- let sys = tape (\\hist -> (peek hist) { author = "j", addr = author (peek hist), body = "ack: " <> body (peek hist) })
 --     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post]))
 -- in  evalState (runKleisli (close (conjoint sh) (companion sh)) [humanPost]) (AgentSeat [] [])
 -- @
@@ -342,66 +347,76 @@ runAgentShard sys seat ins =
 -- 'Port' (or post it on the log for the tool agent to 'watch').
 type Port m = Ends (Kleisli m) Post Post
 
--- | Peel one token from a stream — the list instance of parser @Uncons@.
+-- | Construct a stream by snoc-ing tokens. Dual of 'Uncons'.
 --
--- @
--- peel []       = Nothing          -- That  (empty \/ quiet)
--- peel [x]      = Just (x, [])     -- This  (final)
--- peel (x:xs)   = Just (x, xs)     -- These (more)
--- @
-peel :: [a] -> Maybe (a, [a])
-peel [] = Nothing
-peel (x : xs) = Just (x, xs)
+-- This is the parser-stream construction class; 'Uncons' (from
+-- 'Circuit.Parser') is the deconstruction class. Together they let the token
+-- seat move back and forth between tokens and streams using the same coalgebra
+-- that parsers use.
+class Snoc f s where
+  -- | Append one token to the right of a stream.
+  snoc :: f -> s -> f
+  -- | The empty stream.
+  snocNil :: f
 
--- | Snoc a token onto a stream (oldest-first buffer). Dual of 'peel'.
+instance Snoc [a] a where
+  snoc xs x = xs ++ [x]
+  snocNil = []
+
+-- | Snoc a 'Post' onto a post stream. Specialized alias for 'snoc'.
 snocPost :: [Post] -> Post -> [Post]
-snocPost xs p = xs ++ [p]
+snocPost = snoc
 
--- | @Ends Post [Post]@: commit snocs a token; emit flushes the whole stream
--- (parser @takeRest@ — drain policy is \"the stream\", not a count).
+-- | @Ends s f@: commit snocs a token; emit flushes the whole stream
+-- (parser @takeRest@ — drain policy is "the stream", not a count).
 --
 -- @get@ \/ @put@ hold the stream buffer.
 batchEnds ::
-  (Monad m) =>
-  m [Post] ->
-  ([Post] -> m ()) ->
-  Ends (Kleisli m) Post [Post]
+  forall f s m.
+  (Monad m, Snoc f s) =>
+  m f ->
+  (f -> m ()) ->
+  Ends (Kleisli m) s f
 batchEnds getBuf putBuf =
   endsK
-    ( \p -> do
+    ( \x -> do
         xs <- getBuf
-        putBuf (snocPost xs p)
+        putBuf (snoc xs x)
     )
     ( do
         xs <- getBuf
-        putBuf []
+        putBuf (snocNil @f @s)
         pure xs
     )
 
--- | @Ends [Post] Post@: commit appends a stream; emit peels one token
--- (parser @next@ \/ 'peel').  Empty stream is a programming error at emit —
+-- | @Ends f s@: commit appends a stream; emit peels one token
+-- (parser @next@ \/ 'uncons'). Empty stream is a programming error at emit —
 -- quiet belongs at the list 'Shard' layer (@[]@), not at the token seat.
 --
 -- @get@ \/ @put@ hold the stream buffer.
 unbatchEnds ::
-  (Monad m) =>
-  m [Post] ->
-  ([Post] -> m ()) ->
-  Ends (Kleisli m) [Post] Post
+  forall f s m.
+  (Monad m, Semigroup f, Uncons f s) =>
+  m f ->
+  (f -> m ()) ->
+  Ends (Kleisli m) f s
 unbatchEnds getBuf putBuf =
   endsK
-    ( \ps -> do
+    ( \ys -> do
         xs <- getBuf
-        putBuf (xs ++ ps)
+        putBuf (xs <> ys)
     )
     ( do
         xs <- getBuf
-        case peel xs of
-          Nothing ->
+        case uncons xs of
+          That _ ->
             error "unbatchEnds: empty stream (no token to emit)"
-          Just (p, rest) -> do
+          This x -> do
+            putBuf (nil @f @s)
+            pure x
+          These x rest -> do
             putBuf rest
-            pure p
+            pure x
     )
 
 -- | Token seat around a list 'Shard': buffer on both ends via stream coalgebra.
@@ -411,8 +426,8 @@ unbatchEnds getBuf putBuf =
 --   = batchEnds getIn putIn >:> sh >:> unbatchEnds getOut putOut
 -- @
 --
--- Flush\/drain is not a separate policy knob — it /is/ build-stream ('snocPost')
--- and peel-stream ('peel'), the same syntax as parsers over @[s]@.
+-- Flush\/drain is not a separate policy knob — it /is/ build-stream ('snoc')
+-- and peel-stream ('uncons'), the same syntax as parsers over @[s]@.
 portShard ::
   (Monad m) =>
   m [Post] ->

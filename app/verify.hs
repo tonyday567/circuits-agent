@@ -3,6 +3,7 @@
 module Main (main) where
 
 import Circuit.Agent
+import Circuit.Parser (These (..), uncons)
 import Circuit.Poly (Eval (..), Mono, System)
 import Circuit.Poly.Process (iterateSystem)
 import Control.Arrow (Kleisli (..), runKleisli)
@@ -259,10 +260,12 @@ main = do
     assert "port keeps agent carrier across token turns" $
       body pOut2 == "ack: again" && length (asState seat2) == 2
 
-    assert "peel matches Uncons on lists" $
-      peel ([] :: [Int]) == Nothing
-        && peel [1 :: Int] == Just (1, [])
-        && peel [1, 2, 3 :: Int] == Just (1, [2, 3])
+    assert "uncons matches Uncons on lists" $
+      let u :: [Int] -> These Int [Int]
+          u = uncons
+       in u [] == That []
+            && u [1] == This 1
+            && u [1, 2, 3] == These 1 [2, 3]
 
   -------------------------------------------------------------------------
   -- Tool call: for an Agent, a tool call is a Post (addr = tool, body = args).
