@@ -5,7 +5,7 @@
 Design card: `coffee/loom/agent.md`.
 
 ```haskell
-type Agent s   = System s (Mono Post Post)              -- pure Moore agent
+type Agent s   = System s (Mono [Post] Post)            -- pure Moore agent
 type Shard m   = Ends (Kleisli m) [Post] [Post]         -- effectful ends (lists both ways)
 type LogEnds m = Shard m                                -- same shape; dual seat on the log
 ```
@@ -16,9 +16,9 @@ type LogEnds m = Shard m                                -- same shape; dual seat
 
 ## What is here
 
-- `Circuit.Agent` — `Post`, `Log`, `Agent`, `Shard`, `LogEnds`, `watch`, `post`,
-  `turn`, `hasPending`, `loop`, `session`, `tape`, `selfrec`, `shard`, `logEnds`,
-  `prefixIn`, plus shard combinators `prefixShard`, `suffixShard`,
+- `Circuit.Agent` — `Post`, `Log`, `Agent`, `Inbox`, `AgentState`, `Shard`, `LogEnds`,
+  `watch`, `post`, `turn`, `hasPending`, `loop`, `session`, `tape`, `selfrec`,
+  `shard`, `logEnds`, `prefixIn`, plus shard combinators `prefixShard`, `suffixShard`,
   `codecShard`, `composeShard`, `>:>`.
 - Agent as Shard — `AgentSeat`, `feedAgent`, `agentShard`, `runAgentShard`
   (change of base: pure Moore → `Ends (Kleisli m) [Post] [Post]`).

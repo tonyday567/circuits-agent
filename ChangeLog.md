@@ -15,7 +15,8 @@
 ## 0.1.0.0 — 2026-07-27
 
 - Type pin (`coffee/loom/agent.md`):
-  - `type Agent s = System s (Mono Post Post)` — free carrier; turn uses `Agent [Post]`
+  - `type Agent s = System s (Mono [Post] Post)` — free carrier; output is a list of posts per input
+  - `Inbox` replaces the `Int` cursor; per-agent unread stream with `emptyInbox`, `appendInbox`, `unconsInbox`, `inboxWho`
   - `type Shard m = Ends (Kleisli m) [Post] [Post]` — symmetric lists both ways
   - `type LogEnds m = Shard m` — same shape; dual seat
   - one-post reality via `prefixIn (:[])` (re-exported)
