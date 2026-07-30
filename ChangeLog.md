@@ -2,6 +2,8 @@
 
 ## unreleased
 
+- Moved population churn (`Circuit.Agent.Population`) to package `agent-evolve`
+  (`Agent.Evolve.Population`). Kernel is fixed-roster meetings only.
 - Retired `Circuit.Agent.Comm` (cat-FIFO channel); product bus lives in muster.
 - `ProcessSeat`: dual `Ends` sharing stdin (`psOut` / `psErr`); `stderrEnds`.
 - Stream coalgebra (`These`, `Uncons`, `Snoc`) now imported from `Circuit.Stream`

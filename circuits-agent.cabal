@@ -59,7 +59,6 @@ library
     Circuit.Agent
     Circuit.Agent.Delivery
     Circuit.Agent.Framing
-    Circuit.Agent.Population
     Circuit.Agent.Process
     Circuit.Agent.Turn
     Cursor
@@ -81,11 +80,11 @@ library
     unix >=2.8 && <2.9,
     vector >=0.13 && <0.14,
 
-executable circuits-agent-verify
+executable circuits-agent-axioma
   import: ghc-options-stanza
   import: ghc2024-stanza
   hs-source-dirs: app
-  main-is: verify.hs
+  main-is: axioma.hs
   build-depends:
     base >=4.18 && <5,
     circuits >=0.3 && <0.4,
