@@ -9,10 +9,10 @@ import Circuit.Agent.Delivery
     matrixPowers,
     topologyMatrix,
   )
-import Circuit.Stream (These (..), Uncons, uncons)
+import Circuit.Layer (run)
 import Circuit.Poly (Eval (..), Mono, System (..), fromEvalSystem, monoDir)
 import Circuit.Poly.Process (iterateSystem, runSystem)
-import Circuit.Layer (run)
+import Circuit.Stream (These (..), Uncons, uncons)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad.State (State, get, gets, modify, put, runState)
 import Data.Functor.Identity (Identity (..))
@@ -30,7 +30,7 @@ assert msg ok =
       putStrLn ("  FAIL " ++ msg)
       exitFailure
 
-mkPost :: Text -> Text -> Text -> Text -> Post
+mkPost :: Text -> [Text] -> Text -> Post
 mkPost = Post
 
 peek :: [Post] -> Post
@@ -39,7 +39,7 @@ peek (p : _) = p
 
 reply :: Text -> [Post] -> [Post]
 reply name hist =
-  [mkPost name (author (peek hist)) (channel (peek hist)) ("ack: " <> body (peek hist))]
+  [mkPost name [from (peek hist)] ("ack: " <> body (peek hist))]
 
 -- | New posts in @new@ compared to @old@, oldest first.
 diffLog :: [Post] -> [Post] -> [Post]
@@ -48,7 +48,7 @@ diffLog old new = reverse (take (length new - length old) new)
 -- | Route one post to a state's inbox if it is addressed to the owner.
 routeToInbox :: Post -> AgentState [Post] [Post] -> AgentState [Post] [Post]
 routeToInbox p st =
-  if addr p == inboxWho (asInbox st)
+  if deliversTo p (inboxSubs (asInbox st))
     then st {asInbox = appendInbox p (asInbox st)}
     else st
 
@@ -57,11 +57,11 @@ feedState :: [Post] -> AgentState [Post] [Post] -> AgentState [Post] [Post]
 feedState posts st = foldl' (flip routeToInbox) st posts
 
 -- | Seed an agent state from the addressed posts in a log.
-seedState :: Text -> [Post] -> AgentState [Post] [Post]
+seedState :: [Text] -> [Post] -> AgentState [Post] [Post]
 seedState who lg = feedState (watch who lg) (emptyAgentState who)
 
 -- | Addressed posts for @who@ in @lg@ that are not already in the carrier.
-newFor :: Text -> [Post] -> AgentState [Post] [Post] -> [Post]
+newFor :: [Text] -> [Post] -> AgentState [Post] [Post] -> [Post]
 newFor who lg st = filter (`notElem` asCarrier st) (watch who lg)
 
 -- | Parallel reduction: every agent runs against the *same* input log, and
@@ -70,7 +70,7 @@ newFor who lg st = filter (`notElem` asCarrier st) (watch who lg)
 runParallel :: [(Text, Agent [Post])] -> [Post] -> [Post]
 runParallel roster lg = foldl' (flip post) lg outputs
   where
-    outputs = concatMap (\(who, agent) -> beh agent [] (watch who lg)) roster
+    outputs = concatMap (\(who, agent) -> beh agent [] (watch [who] lg)) roster
 
 main :: IO ()
 main = do
@@ -101,9 +101,9 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "O2: coalgebra homomorphism"
   do
-    let p1 = mkPost "human" "j" "alpha" "one"
-        p2 = mkPost "human" "j" "alpha" "two"
-        p3 = mkPost "human" "j" "alpha" "three"
+    let p1 = mkPost "human" ["j"] "one"
+        p2 = mkPost "human" ["j"] "two"
+        p3 = mkPost "human" ["j"] "three"
         ins = [p1, p2, p3]
         f = reply "j"
         h = take 1
@@ -119,9 +119,9 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "S3: behaviour functoriality"
   do
-    let p1 = mkPost "human" "j" "alpha" "one"
-        p2 = mkPost "human" "j" "alpha" "two"
-        p3 = mkPost "human" "j" "alpha" "three"
+    let p1 = mkPost "human" ["j"] "one"
+        p2 = mkPost "human" ["j"] "two"
+        p3 = mkPost "human" ["j"] "three"
         xs = [p1, p2]
         ys = [p3]
         agent :: Agent [Post]
@@ -137,28 +137,28 @@ main = do
   putStrLn "delivery"
   do
     let t0 =
-          [ mkPost "human" "k" "beta" "hi k",
-            mkPost "human" "j" "alpha" "hi j"
+          [ mkPost "human" ["k"] "hi k",
+            mkPost "human" ["j"] "hi j"
           ]
-    let (stJ1, t1, _) = turn (tape (reply "j")) (seedState "j" t0) t0
-    let (stK1, t2, _) = turn (tape (reply "k")) (seedState "k" t1) t1
+    let (stJ1, t1, _) = turn (tape (reply "j")) (seedState ["j"] t0) t0
+    let (stK1, t2, _) = turn (tape (reply "k")) (seedState ["k"] t1) t1
     assert "j receives only its addressed posts" $
       map body (reverse (asCarrier stJ1)) == ["hi j"]
     assert "k receives only its addressed posts" $
       map body (reverse (asCarrier stK1)) == ["hi k"]
 
     assert "unicast post delivers only to addressee" $
-      deliversTo (mkPost "human" "j" "alpha" "hi") "j"
-        && not (deliversTo (mkPost "human" "j" "alpha" "hi") "k")
-    assert "broadcast post delivers to every recipient" $
-      deliversTo (mkPost "human" "nobody" "broadcast" "hi") "j"
-        && deliversTo (mkPost "human" "nobody" "broadcast" "hi") "k"
-    assert "empty channel keeps unicast semantics" $
-      deliversTo (mkPost "human" "j" "" "hi") "j"
-        && not (deliversTo (mkPost "human" "j" "" "hi") "k")
+      deliversTo (mkPost "human" ["j"] "hi") ["j"]
+        && not (deliversTo (mkPost "human" ["j"] "hi") ["k"])
+    assert "multi-cast post delivers to every named recipient" $
+      deliversTo (mkPost "human" ["j", "k"] "hi") ["j"]
+        && deliversTo (mkPost "human" ["j", "k"] "hi") ["k"]
+    assert "post not addressed to agent does not deliver" $
+      deliversTo (mkPost "human" ["j"] "hi") ["j"]
+        && not (deliversTo (mkPost "human" ["j"] "hi") ["k"])
 
-    let t3 = post (mkPost "human" "j" "alpha" "again") t2
-    let (stJ2, _t4, _) = turn (tape (reply "j")) (feedState (newFor "j" t3 stJ1) stJ1) t3
+    let t3 = post (mkPost "human" ["j"] "again") t2
+    let (stJ2, _t4, _) = turn (tape (reply "j")) (feedState (newFor ["j"] t3 stJ1) stJ1) t3
     assert "j sees the new post, no redelivery" $
       map body (reverse (asCarrier stJ2)) == ["hi j", "again"]
 
@@ -170,10 +170,11 @@ main = do
     -- G2 · boolean semiring reproduces today's FinRel delivery exactly.
     let agents = ["j", "k"] :: [Text]
         posts =
-          [ ("j", "alpha"), -- unicast to j
-            ("nobody", "broadcast"), -- broadcast
-            ("k", "") -- unicast to k with empty channel
-          ] :: [(Text, Text)]
+          [ ["j"], -- unicast to j
+            ["j", "k"], -- multi-cast to both
+            ["k"] -- unicast to k
+          ] ::
+            [[Text]]
         m = deliveryMatrix agents posts
         expected = [[True, False], [True, True], [False, True]]
     assert "G2 boolean delivery matrix matches FinRel" $
@@ -185,7 +186,7 @@ main = do
     -- DAG: j -> k only. The topology matrix is strictly upper-triangular,
     -- hence nilpotent.
     let agentsDag = ["j", "k"] :: [Text]
-        postsDag = [("j", "k", "alpha")] :: [(Text, Text, Text)]
+        postsDag = [("j", ["k"])] :: [(Text, [Text])]
         dag = topologyMatrix agentsDag postsDag :: Matrix Bool
     assert "G3 DAG topology is nilpotent" $ isNilpotent dag
 
@@ -194,10 +195,10 @@ main = do
     -- so no power is zero.
     let agentsCycle = ["j", "k"] :: [Text]
         postsCycle =
-          [ ("j", "k", "alpha"),
-            ("k", "j", "beta")
+          [ ("j", ["k"]),
+            ("k", ["j"])
           ] ::
-          [(Text, Text, Text)]
+            [(Text, [Text])]
         cyclic = topologyMatrix agentsCycle postsCycle :: Matrix Bool
     assert "G3 cyclic topology is not nilpotent" $ not (isNilpotent cyclic)
 
@@ -206,10 +207,10 @@ main = do
     -- I + D + D^2 + ... + D^(n-1).
     let agents = ["j", "k", "l"] :: [Text]
         posts =
-          [ ("j", "k", "alpha"),
-            ("k", "l", "beta")
+          [ ("j", ["k"]),
+            ("k", ["l"])
           ] ::
-          [(Text, Text, Text)]
+            [(Text, [Text])]
         d = topologyMatrix agents posts :: Matrix Bool
         n = 3
         eye = fromLists [[True, False, False], [False, True, False], [False, False, True]]
@@ -276,7 +277,7 @@ main = do
                 [ value
                     * sum
                       [ p * utility agent (value, sender)
-                        | (p, agent) <- zip (softmax row) agents
+                      | (p, agent) <- zip (softmax row) agents
                       ]
                 | (row, (value, sender)) <- zip rows posts
                 ]
@@ -286,8 +287,8 @@ main = do
                   us = map (\agent -> utility agent (value, sender)) agents
                   lrow = sum (zipWith (*) ps us)
                in zipWith (\p u -> p * (u - lrow)) ps us
-              | (row, (value, sender)) <- zip (chunks (length agents) ws) posts
-              ]
+            | (row, (value, sender)) <- zip (chunks (length agents) ws) posts
+            ]
         ws0 = [0.2, -0.1, 0.5, 0.3, -0.4, 0.1] :: [Double]
         eps = 1e-5
         fd k =
@@ -320,10 +321,10 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "turn integrity"
   do
-    let t0 = [mkPost "human" "j" "alpha" "calc:1 2 3"]
-    let (stJ1, t1, _) = turn (tape llmJ) (seedState "j" t0) t0
-    let (_stCalc, t2, _) = turn (tape calc) (seedState "calc" t1) t1
-    let (_stJ2, t3, _) = turn (tape llmJ) (feedState (newFor "j" t2 stJ1) stJ1) t2
+    let t0 = [mkPost "human" ["j"] "calc:1 2 3"]
+    let (stJ1, t1, _) = turn (tape llmJ) (seedState ["j"] t0) t0
+    let (_stCalc, t2, _) = turn (tape calc) (seedState ["calc"] t1) t1
+    let (_stJ2, t3, _) = turn (tape llmJ) (feedState (newFor ["j"] t2 stJ1) stJ1) t2
     assert "tool-call chain produces expected final post" $
       body (peek t3) == "final: 6"
     assert "turn appends exactly one post per input" $
@@ -339,8 +340,8 @@ main = do
             ("k", tape (reply "k"))
           ]
     let t0 =
-          [ mkPost "human" "k" "beta" "hi k",
-            mkPost "human" "j" "alpha" "hi j"
+          [ mkPost "human" ["k"] "hi k",
+            mkPost "human" ["j"] "hi j"
           ]
     let (states, t1, derivs) = loop roster t0
     assert "loop delivers both agents" $
@@ -355,8 +356,8 @@ main = do
     assert "derivation agent names match roster" $
       sort (map dAgent derivs) == ["j", "k"]
 
-    let pToJ = mkPost "human" "j" "alpha" "hi j"
-        expectedAckJ = mkPost "j" "human" "alpha" "ack: hi j"
+    let pToJ = mkPost "human" ["j"] "hi j"
+        expectedAckJ = mkPost "j" ["human"] "ack: hi j"
         jDeriv = find (\d -> dAgent d == "j") derivs
     assert "reply derivation records input, outputs, and agent" $
       case jDeriv of
@@ -364,7 +365,7 @@ main = do
         Nothing -> False
 
     let roster2 = [("j", tape llmJ), ("calc", tape calc)]
-    let tCalc0 = [mkPost "human" "j" "alpha" "calc:1 2 3"]
+    let tCalc0 = [mkPost "human" ["j"] "calc:1 2 3"]
     let (_states2, tCalc, derivs2) = loop roster2 tCalc0
     assert "loop runs tool-call chain to final" $
       body (peek tCalc) == "final: 6"
@@ -378,7 +379,7 @@ main = do
     assert "loop on empty log records no derivations" $ null emptyDerivs
 
     -- S0a: the meeting is a 'Loop Either (->)' value; 'run' agrees with 'loopWith'.
-    let states0 = [(n, feedState (watch n t0) (emptyAgentState n)) | (n, _) <- roster]
+    let states0 = [(n, feedState (watch [n] t0) (emptyAgentState [n])) | (n, _) <- roster]
         bundle0 = (states0, t0, [])
     assert "meetingLoop run agrees with loopWith" $
       run (meetingLoop roster) bundle0 == loopWith roster states0 t0
@@ -397,8 +398,8 @@ main = do
             ("k", tape (reply "k"))
           ]
         t0Ind =
-          [ mkPost "human" "k" "beta" "hi k",
-            mkPost "human" "j" "alpha" "hi j"
+          [ mkPost "human" ["k"] "hi k",
+            mkPost "human" ["j"] "hi j"
           ]
         (_, loopInd, derivsInd) = loop rosterInd t0Ind
         parallelInd = runParallel rosterInd t0Ind
@@ -408,14 +409,14 @@ main = do
       length derivsInd == 2
 
     let forwardTo target hist =
-          [mkPost "j" target (channel (peek hist)) ("fwd: " <> body (peek hist))]
+          [mkPost "j" [target] ("fwd: " <> body (peek hist))]
         ackToHuman hist =
-          [mkPost "k" "human" (channel (peek hist)) ("ack: " <> body (peek hist))]
+          [mkPost "k" ["human"] ("ack: " <> body (peek hist))]
         rosterDep =
           [ ("j", tape (forwardTo "k")),
             ("k", tape ackToHuman)
           ]
-        t0Dep = [mkPost "human" "j" "alpha" "tell k"]
+        t0Dep = [mkPost "human" ["j"] "tell k"]
         (_, loopDep, derivsDep) = loop rosterDep t0Dep
         parallelDep = runParallel rosterDep t0Dep
     assert "O8: dependent-address counterexample recorded (loop /= parallel)" $
@@ -430,46 +431,45 @@ main = do
   putStrLn "multi-round pure (two Moore agents)"
   do
     let rounds = 3 :: Int
-        chan = "mr" :: Text
         nudge :: Agent [Post]
         nudge =
           tape
-            ( \_ ->
-                [mkPost "nudge" "worker" chan "tell me more."]
+            ( const
+                [mkPost "nudge" ["worker"] "tell me more."]
             )
         worker :: Agent [Post]
         worker =
           tape
             ( \hist ->
                 let p = peek hist
-                 in [mkPost "worker" "nudge" chan ("ack:" <> body p)]
+                 in [mkPost "worker" ["nudge"] ("ack:" <> body p)]
             )
         -- seed: human addresses worker
-        t0 = [mkPost "human" "worker" chan "start"]
+        t0 = [mkPost "human" ["worker"] "start"]
         step (sw, sn, lg) =
           let (sw', lg1, _) = turn worker sw lg
               sn' = feedState (diffLog lg lg1) sn
               (sn'', lg2, _) = turn nudge sn' lg1
               sw'' = feedState (diffLog lg1 lg2) sw'
            in (sw'', sn'', lg2)
-        (_, _, tF) = iterate step (seedState "worker" t0, seedState "nudge" t0, t0) !! rounds
+        (_, _, tF) = iterate step (seedState ["worker"] t0, seedState ["nudge"] t0, t0) !! rounds
         -- newest first: take dialogue posts (exclude seed)
         dialogue = take (2 * rounds) tF
     assert "multi-round: log grew by 2 posts per round" $
       length tF == 1 + 2 * rounds
     assert "multi-round: worker and nudge both posted" $
-      any ((== "worker") . author) dialogue
-        && any ((== "nudge") . author) dialogue
+      any ((== "worker") . from) dialogue
+        && any ((== "nudge") . from) dialogue
     assert "multi-round: nudge bodies constant" $
-      all (\p -> author p /= "nudge" || body p == "tell me more.") tF
+      all (\p -> from p /= "nudge" || body p == "tell me more.") tF
 
   -------------------------------------------------------------------------
   -- Shard combinators: composition and codec adapters on Ends.
   -------------------------------------------------------------------------
   putStrLn "shard combinators"
   do
-    let p1 = mkPost "human" "j" "alpha" "hi"
-        p2 = mkPost "j" "human" "alpha" "ack"
+    let p1 = mkPost "human" ["j"] "hi"
+        p2 = mkPost "j" ["human"] "ack"
         fixedShard :: Shard Identity [Post]
         fixedShard = endsK (\_ -> pure ()) (pure [p2])
         coded = codecShard (map (\p -> p {body = "in:" <> body p})) (map (\p -> p {body = body p <> ":out"})) fixedShard
@@ -491,7 +491,7 @@ main = do
   do
     let ack :: Agent [Post]
         ack = tape (reply "j")
-        pIn = mkPost "human" "j" "alpha" "hi"
+        pIn = mkPost "human" ["j"] "hi"
         -- pure closed form
         (outs, seat) = runAgentShard ack (AgentSeat [] []) [pIn]
     assert "runAgentShard one ack" $
@@ -507,7 +507,7 @@ main = do
     assert "agentShard close matches runAgentShard" $
       outs2 == outs && asState seat2 == asState seat
 
-    let pIn2 = mkPost "human" "j" "alpha" "again"
+    let pIn2 = mkPost "human" ["j"] "again"
         (outs3, seat3) = runAgentShard ack seat [pIn2]
     assert "agentShard keeps carrier across turns" $
       map body outs3 == ["ack: again"] && length (asState seat3) == 2
@@ -522,12 +522,12 @@ main = do
           tape
             ( \hist ->
                 let n = length hist
-                 in [ mkPost "bot" "human" "alpha" ("x" <> T.pack (show n))
+                 in [ mkPost "bot" ["human"] ("x" <> T.pack (show n))
                     | _ <- [1 .. n]
                     ]
             )
-        pIn = mkPost "human" "j" "alpha" "a"
-        pIn2 = mkPost "human" "j" "alpha" "b"
+        pIn = mkPost "human" ["j"] "a"
+        pIn2 = mkPost "human" ["j"] "b"
         (outs, _) = runAgentShard arityBreaker (AgentSeat [] []) [pIn, pIn2]
     assert "O5: Agent now emits a list per input, so input length /= output length" $
       length [pIn, pIn2] /= length outs
@@ -553,22 +553,22 @@ main = do
         echoOnly = tape (reply "j")
         branchy :: Agent (Bool, [Post])
         branchy = branchAgent fst (liftAgent calcOnly) (liftAgent echoOnly)
-        pCalc = mkPost "human" "j" "alpha" "1 2 3"
-        pEcho = mkPost "human" "j" "alpha" "hello"
+        pCalc = mkPost "human" ["j"] "1 2 3"
+        pEcho = mkPost "human" ["j"] "hello"
 
     -- Mode True selects the calc branch.
     let (outsCalc, seatCalc) = runAgentShard branchy (AgentSeat (True, []) []) [pCalc]
     assert "branch agent mode True -> calc output" $
       map body outsCalc == ["6"]
     assert "branch agent mode True preserves tag" $
-      fst (asState seatCalc) == True
+      fst (asState seatCalc)
 
     -- Mode False selects the echo branch.
     let (outsEcho, seatEcho) = runAgentShard branchy (AgentSeat (False, []) []) [pEcho]
     assert "branch agent mode False -> echo output" $
       map body outsEcho == ["ack: hello"]
     assert "branch agent mode False preserves tag" $
-      fst (asState seatEcho) == False
+      not (fst (asState seatEcho))
 
   -------------------------------------------------------------------------
   -- Port: batch >:> shard >:> unbatch (parser stream coalgebra around Shard)
@@ -577,7 +577,7 @@ main = do
   do
     let ack :: Agent [Post]
         ack = tape (reply "j")
-        pIn = mkPost "human" "j" "alpha" "hi"
+        pIn = mkPost "human" ["j"] "hi"
         -- agent as list shard, then token seat via stream buffers
         sh :: Shard (State (AgentSeat [Post], [Post], [Post])) [Post]
         sh =
@@ -602,7 +602,7 @@ main = do
     assert "port drains stream buffers on close" $
       null inB && null outB && length (asState seat') == 1
 
-    let pIn2 = mkPost "human" "j" "alpha" "again"
+    let pIn2 = mkPost "human" ["j"] "again"
         (pOut2, (seat2, _, _)) =
           runState
             (runKleisli (close (conjoint port) (companion port)) pIn2)
@@ -618,25 +618,25 @@ main = do
             && u [1, 2, 3] == These 1 [2, 3]
 
   -------------------------------------------------------------------------
-  -- Tool call: for an Agent, a tool call is a Post (addr = tool, body = args).
+  -- Tool call: for an Agent, a tool call is a Post (to = [tool], body = args).
   -- Type / code / example — not related to withhold.
   -------------------------------------------------------------------------
   putStrLn "tool call"
   do
     -- type: tool call ≡ Post addressed to the tool
     let call :: Post
-        call = toolCall "j" "calc" "alpha" "1 2 3"
-    assert "tool call addr is the tool" $ addr call == "calc"
+        call = toolCall "j" "calc" "1 2 3"
+    assert "tool call addr is the tool" $ to call == ["calc"]
     assert "tool call body is the args" $ body call == "1 2 3"
 
     -- code: pure Agent that emits a tool-call Post
     let caller :: Agent [Post]
         caller = tape callCalc
-        human = mkPost "human" "j" "alpha" "please sum 1 2 3"
+        human = mkPost "human" ["j"] "please sum 1 2 3"
         (outs, _) = runAgentShard caller (AgentSeat [] []) [human]
     assert "agent emits one tool-call post" $
       case outs of
-        [p] -> addr p == "calc" && body p == "1 2 3"
+        [p] -> to p == ["calc"] && body p == "1 2 3"
         _ -> False
 
     -- example: Port (Ends Post Post) — one token in, tool-call token out
@@ -659,7 +659,7 @@ main = do
             (runKleisli (close (conjoint port) (companion port)) human)
             (AgentSeat [] [], [], [])
     assert "port example: human Post in → tool-call Post out" $
-      author pOut == "j" && addr pOut == "calc" && body pOut == "1 2 3"
+      from pOut == "j" && to pOut == ["calc"] && body pOut == "1 2 3"
     assert "port carrier saw the human input" $
       length (asState seatPort) == 1
 
@@ -669,13 +669,13 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "withhold"
   do
-    let secret = mkPost "ops" "j" "alpha" "bus emergency — do not show yet"
-        public = mkPost "human" "j" "alpha" "hi j"
+    let secret = mkPost "ops" ["j"] "bus emergency — do not show yet"
+        public = mkPost "human" ["j"] "hi j"
         held = [secret, public] -- store exists; not all of it is delivered
         agent = tape (reply "j") :: Agent [Post]
 
         -- release only public (withhold secret)
-        released = filter ((== "human") . author) held
+        released = filter ((== "human") . from) held
         (outs, seat) = runAgentShard agent (AgentSeat [] []) released
 
     assert "withhold: only released posts enter the carrier" $
@@ -696,11 +696,11 @@ main = do
 
   putStrLn "All tests passed"
   where
-    -- | Tool call as data: author = caller, addr = tool, body = args.
-    toolCall :: Text -> Text -> Text -> Text -> Post
-    toolCall from tool chan args = mkPost from tool chan args
+    -- \| Tool call as data: from = caller, to = [tool], body = args.
+    toolCall :: Text -> Text -> Text -> Post
+    toolCall from tool = mkPost from [tool]
 
-    -- | Agent policy: on a "please sum …" human, emit a calc tool call.
+    -- \| Agent policy: on a "please sum …" human, emit a calc tool call.
     callCalc :: [Post] -> [Post]
     callCalc hist =
       let p = peek hist
@@ -708,18 +708,17 @@ main = do
             if "please sum " `T.isPrefixOf` body p
               then T.drop (T.length "please sum ") (body p)
               else body p
-       in [toolCall "j" "calc" (channel p) args]
+       in [toolCall "j" "calc" args]
 
     llmJ :: [Post] -> [Post]
     llmJ hist =
       let p = peek hist
        in [ if "calc:" `T.isPrefixOf` body p
-              then mkPost "j" "calc" (channel p) (T.drop 5 (body p))
+              then mkPost "j" ["calc"] (T.drop 5 (body p))
               else
                 mkPost
                   "j"
-                  (author (peek (dropWhile ((== "calc") . author) hist)))
-                  (channel p)
+                  [from (peek (dropWhile ((== "calc") . from) hist))]
                   ("final: " <> body p)
           ]
 
@@ -728,7 +727,6 @@ main = do
       let p = peek hist
        in [ mkPost
               "calc"
-              (author p)
-              (channel p)
+              [from p]
               (T.pack (show (sum [read (T.unpack w) :: Int | w <- T.words (body p)])))
           ]

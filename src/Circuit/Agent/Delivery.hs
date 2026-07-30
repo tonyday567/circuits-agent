@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 -- | Semiring delivery matrices for addressed posts.
 --
 -- 'deliversTo' in 'Circuit.Agent' is the boolean predicate that gates delivery.
@@ -11,9 +9,9 @@
 -- * Real / probability: weighted delivery for gradient-based routing.
 -- * Path-counting: number of delivery paths (useful for G3).
 --
--- A post delivers to a recipient when its address matches the recipient or its
--- 'channel' is @"broadcast"@.  The 'author' field is treated as the sender when
--- building agent-to-agent topology matrices.
+-- A post delivers to a recipient when the recipient appears in the post's 'to'
+-- list.  The 'from' field is treated as the sender when building agent-to-agent
+-- topology matrices.
 module Circuit.Agent.Delivery
   ( -- * Semiring predicate
     deliversToSemiring,
@@ -34,24 +32,21 @@ import Harpie.Array qualified as A
 import Harpie.NumHask.Matrix (Matrix (..), fromLists, matTimes, toLists)
 import NumHask.Algebra.Additive (Additive (..))
 import NumHask.Algebra.Multiplicative (Multiplicative (..))
-import Prelude hiding ((+), (*))
+import Prelude hiding ((*), (+))
 
 -- | Semiring-generalised delivery predicate.
 --
--- A post delivers with the semiring's 'one' when its address matches or when
--- the channel is broadcast; otherwise it delivers with 'zero'.
+-- A post delivers with the semiring's 'one' when @who@ is in the recipient
+-- list; otherwise it delivers with 'zero'.
 deliversToSemiring ::
   (Additive r, Multiplicative r) =>
+  -- | Recipients on the post.
+  [Text] ->
+  -- | Recipient name.
   Text ->
-  -- ^ Address on the post.
-  Text ->
-  -- ^ Channel on the post.
-  Text ->
-  -- ^ Recipient name.
   r
-deliversToSemiring addr channel who
-  | channel == "broadcast" = one
-  | addr == who = one
+deliversToSemiring recipients who
+  | who `elem` recipients = one
   | otherwise = zero
 
 -- | Delivery matrix for a fixed list of posts and a roster of agents.
@@ -60,13 +55,13 @@ deliversToSemiring addr channel who
 -- given), and entry @(p, a)@ is the delivery weight of post @p@ to agent @a@.
 deliveryMatrix ::
   (Additive r, Multiplicative r) =>
+  -- | Agents (column labels).
   [Text] ->
-  -- ^ Agents (column labels).
-  [(Text, Text)] ->
-  -- ^ Posts as @(address, channel)@ pairs (row labels are implicit).
+  -- | Recipient lists for each post (row labels are implicit).
+  [[Text]] ->
   Matrix r
-deliveryMatrix agents posts =
-  fromLists [map (deliversToSemiring addr channel) agents | (addr, channel) <- posts]
+deliveryMatrix agents recipients =
+  fromLists [map (deliversToSemiring recips) agents | recips <- recipients]
 
 -- | Agent-to-agent delivery topology matrix.
 --
@@ -75,20 +70,20 @@ deliveryMatrix agents posts =
 -- aggregation uses the semiring addition ('+'), so multiple posts from the
 -- same sender to the same recipient accumulate.
 --
--- Posts are given as @(author, address, channel)@ triples.
+-- Posts are given as @(author, recipients)@ pairs.
 topologyMatrix ::
   (Additive r, Multiplicative r) =>
+  -- | Agents (row and column labels, in the same order).
   [Text] ->
-  -- ^ Agents (row and column labels, in the same order).
-  [(Text, Text, Text)] ->
-  -- ^ Posts as @(author, address, channel)@ triples.
+  -- | Posts as @(author, recipients)@ pairs.
+  [(Text, [Text])] ->
   Matrix r
 topologyMatrix agents posts =
   fromLists
-    [ [ sum' [deliversToSemiring addr channel who | (whoFrom, addr, channel) <- posts, whoFrom == fromAgent]
-        | who <- agents
+    [ [ sum' [deliversToSemiring recipients who | (whoFrom, recipients) <- posts, whoFrom == fromAgent]
+      | who <- agents
       ]
-      | fromAgent <- agents
+    | fromAgent <- agents
     ]
   where
     sum' [] = zero
@@ -116,4 +111,4 @@ isNilpotent m = any isZeroMatrix (matrixPowers (rows m) m)
     rows (Matrix a) = case VU.toList (A.shape a) of
       (r : _) -> r
       _ -> 0
-    isZeroMatrix = all (== zero) . concat . toLists
+    isZeroMatrix = all (all (== zero)) . toLists

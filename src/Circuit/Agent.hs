@@ -1,3 +1,7 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
 -- | Moore agents on a shared, addressed log; opaque shards for effects.
 --
 -- Pure agent shape:
@@ -40,11 +44,6 @@
 -- shape when you need a bare @Post\/@Post@ channel without a shard.
 --
 -- Design card: @coffee\/loom\/agent.md@.
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
-
 module Circuit.Agent
   ( -- * Posts and the log
     Post (..),
@@ -64,6 +63,7 @@ module Circuit.Agent
     appendInbox,
     unconsInbox,
     inboxWho,
+    inboxSubs,
 
     -- * Delivery
     deliversTo,
@@ -150,25 +150,31 @@ import Circuit
     trace,
     (>:>),
   )
-import Circuit.Agent.Delivery (deliversToSemiring)
 import Circuit.Loop (Loop (..))
-import Circuit.Stream (Cons (..), These (..), Snoc (..), Uncons (..))
 import Circuit.Poly (Eval (..), Mono, System (..), fromEvalSystem, monoDir)
 import Circuit.Poly.Process (after, runSystem)
+import Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import Control.Arrow (Kleisli (..))
 import Data.List (foldl')
-import Data.Text (Text)
+import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Text (Text, empty)
 
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
 -- >>> import Circuit.Poly.Process (iterateSystem)
 
+-- | Agent name on the shared log.
+type Name = Text
+
 -- | A single entry on the shared log.
+--
+-- Routing is by name list: a post delivers to every agent whose name appears
+-- in 'to'.  The default wire is a singleton @[agentName]@; multi-cast wires
+-- list several names.
 data Post = Post
-  { author :: Text,
-    addr :: Text,
-    channel :: Text,
+  { from :: Name,
+    to :: [Name],
     body :: Text
   }
   deriving (Show, Eq)
@@ -228,47 +234,52 @@ selfrec f = System $ \(hist, d) ->
 
 -- | Addressed stream of unread posts for one agent.
 --
--- The 'Inbox' owns both the agent's name and the unread stream.  Only posts
--- whose 'addr' matches the owner are peeled by 'unconsInbox'.
-newtype Inbox f = Inbox {unInbox :: (Text, f)}
+-- The 'Inbox' owns a list of subscribed names and the unread stream.  Only
+-- posts whose 'to' list intersects the subscription list are peeled by
+-- 'unconsInbox'.  The common case is a singleton subscription @[agentName]@;
+-- multi-cast wires list several names.
+newtype Inbox f = Inbox {unInbox :: ([Name], f)}
   deriving (Show, Eq)
 
--- | Owner of the inbox.
-inboxWho :: Inbox f -> Text
-inboxWho = fst . unInbox
+-- | Primary owner of the inbox (head of the subscription list).
+inboxWho :: Inbox f -> Name
+inboxWho = fromMaybe empty . listToMaybe . fst . unInbox
 
--- | Empty inbox for the named agent.
-emptyInbox :: forall f. (Uncons f Post) => Text -> Inbox f
-emptyInbox who = Inbox (who, nil @f @Post)
+-- | Full subscription list for the inbox.
+inboxSubs :: Inbox f -> [Name]
+inboxSubs = fst . unInbox
+
+-- | Empty inbox for the subscribed agent(s).
+emptyInbox :: forall f. (Uncons f Post) => [Name] -> Inbox f
+emptyInbox subs = Inbox (subs, nil @f @Post)
 
 -- | Append a post to the right of the inbox.
 appendInbox :: (Snoc f Post) => Post -> Inbox f -> Inbox f
-appendInbox p (Inbox (who, f)) = Inbox (who, snoc f p)
+appendInbox p (Inbox (subs, f)) = Inbox (subs, snoc f p)
 
 -- | Lightweight delivery predicate.
 --
--- A post delivers to @who@ when its 'addr' matches @who@.  If the post's
--- 'channel' is @\"broadcast\"@, it delivers to every recipient.  An empty
--- 'channel' keeps the unicast default.  This predicate is a small stepping
--- stone toward a relational copy/discard delivery model ('FinRel'); the full
--- wiring is future work.
-deliversTo :: Post -> Text -> Bool
-deliversTo p who = deliversToSemiring (addr p) (channel p) who
+-- A post delivers when any of the subscribed names appears in the post's 'to'
+-- list.  Multi-cast is direct: a post addressed to several names reaches each
+-- subscriber.  This predicate is a small stepping stone toward a relational
+-- copy/discard delivery model ('FinRel'); the full wiring is future work.
+deliversTo :: Post -> [Name] -> Bool
+deliversTo p = any (`elem` to p)
 
 -- | Peel the oldest addressed post from the inbox, returning the rest.
 --
 -- Non-matching posts are skipped and discarded.  An empty or exhausted inbox
 -- returns 'That' with an empty inbox.
 unconsInbox :: (Uncons f Post) => Inbox f -> These Post (Inbox f)
-unconsInbox (Inbox (who, f)) = go f
+unconsInbox (Inbox (subs, f)) = go f
   where
     go stream = case uncons stream of
-      That rest -> That (Inbox (who, rest))
+      That rest -> That (Inbox (subs, rest))
       This p
-        | deliversTo p who -> This p
-        | otherwise -> That (emptyInbox who)
+        | deliversTo p subs -> This p
+        | otherwise -> That (emptyInbox subs)
       These p rest
-        | deliversTo p who -> These p (Inbox (who, rest))
+        | deliversTo p subs -> These p (Inbox (subs, rest))
         | otherwise -> go rest
 
 -- | State for a pure agent in delivery: free carrier plus an addressed inbox.
@@ -283,7 +294,7 @@ data AgentState s f = AgentState
 -- 'dChildren' is kept flat (empty) in this pass.  Building the causal child
 -- tree from routed outputs is future work.
 data Derivation = Derivation
-  { dAgent :: Text,
+  { dAgent :: Name,
     dInput :: Post,
     dOutputs :: [Post],
     dChildren :: [Derivation]
@@ -291,41 +302,42 @@ data Derivation = Derivation
   deriving (Show, Eq)
 
 -- | Empty carrier and empty inbox for the named agent.
-emptyAgentState :: forall s f. (Snoc s Post, Uncons f Post) => Text -> AgentState s f
-emptyAgentState who = AgentState (snocNil @s @Post) (emptyInbox who)
+emptyAgentState :: forall s f. (Snoc s Post, Uncons f Post) => [Name] -> AgentState s f
+emptyAgentState subs = AgentState (snocNil @s @Post) (emptyInbox subs)
 
--- | Seed an inbox with all posts addressed to @who@ from the log, oldest first.
-seedInbox :: (Snoc f Post, Uncons f Post) => Text -> Log f -> Inbox f
-seedInbox who lg = foldl' (flip appendInbox) (emptyInbox who) (watch who lg)
+-- | Seed an inbox with all posts addressed to any subscription from the log,
+-- oldest first.
+seedInbox :: (Snoc f Post, Uncons f Post) => [Name] -> Log f -> Inbox f
+seedInbox subs lg = foldl' (flip appendInbox) (emptyInbox subs) (watch subs lg)
 
--- | Empty carrier and an inbox seeded from the log for the named agent.
-seedAgentState :: forall s f. (Snoc s Post, Snoc f Post, Uncons f Post) => Text -> Log f -> AgentState s f
-seedAgentState who lg = AgentState (snocNil @s @Post) (seedInbox who lg)
+-- | Empty carrier and an inbox seeded from the log for the subscribed agent(s).
+seedAgentState :: forall s f. (Snoc s Post, Snoc f Post, Uncons f Post) => [Name] -> Log f -> AgentState s f
+seedAgentState subs lg = AgentState (snocNil @s @Post) (seedInbox subs lg)
 
 -- | Empty log.
 emptyLog :: forall f. (Cons f Post) => Log f
 emptyLog = consNil @f @Post
 
--- | Read end of the log: all posts addressed to @who@, oldest first.
+-- | Read end of the log: all posts matching any subscription, oldest first.
 --
 -- Traversal is newest-to-oldest; matching posts are prepended, so the
 -- accumulator is already oldest-first.
-watch :: (Uncons f Post) => Text -> Log f -> [Post]
-watch who t = go t []
+watch :: (Uncons f Post) => [Name] -> Log f -> [Post]
+watch subs t = go t []
   where
     go stream acc =
       case uncons stream of
         That _ -> acc
-        This p -> if addr p == who then p : acc else acc
-        These p rest -> go rest (if addr p == who then p : acc else acc)
+        This p -> if deliversTo p subs then p : acc else acc
+        These p rest -> go rest (if deliversTo p subs then p : acc else acc)
 
 -- | Write end of the log: commit a post.
 post :: (Cons f Post) => Post -> Log f -> Log f
 post = cons
 
 -- | Per-agent session assembly: the bodies an agent actually sees.
-session :: (Uncons f Post) => Text -> Log f -> [Text]
-session who = map body . watch who
+session :: (Uncons f Post) => [Name] -> Log f -> [Text]
+session subs = map body . watch subs
 
 -- | One delivery round: peel one addressed post, step the machine, 'post' each output.
 --
@@ -341,11 +353,12 @@ turn ::
   (AgentState s f, Log f, Maybe Derivation)
 turn sys st log0 =
   let who = inboxWho (asInbox st)
+      subs = inboxSubs (asInbox st)
    in case unconsInbox (asInbox st) of
         That _ -> (st, log0, Nothing)
         This p ->
           let (os, seen') = run1 sys (asCarrier st) p
-           in (AgentState seen' (emptyInbox who), foldl' (flip post) log0 os, Just (Derivation who p os []))
+           in (AgentState seen' (emptyInbox subs), foldl' (flip post) log0 os, Just (Derivation who p os []))
         These p rest ->
           let (os, seen') = run1 sys (asCarrier st) p
            in (AgentState seen' rest, foldl' (flip post) log0 os, Just (Derivation who p os []))
@@ -356,7 +369,7 @@ hasPending st = case unconsInbox (asInbox st) of That _ -> False; _ -> True
 
 -- | Stream length via 'Uncons'.
 streamLength :: forall f a. (Uncons f a) => f -> Int
-streamLength s = go 0 s
+streamLength = go 0
   where
     go :: Int -> f -> Int
     go n stream =
@@ -386,10 +399,10 @@ takeStream n s = go n s []
 loop ::
   forall s f.
   (Snoc s Post, Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Text, Agent s)] ->
+  [(Name, Agent s)] ->
   Log f ->
-  ([(Text, AgentState s f)], Log f, [Derivation])
-loop roster log0 = loopWith roster [(n, seedAgentState @s @f n log0) | (n, _) <- roster] log0
+  ([(Name, AgentState s f)], Log f, [Derivation])
+loop roster log0 = loopWith roster [(n, seedAgentState @s @f [n] log0) | (n, _) <- roster] log0
 
 -- | Resumable 'loop': supply the initial states and inboxes.
 --
@@ -398,13 +411,13 @@ loop roster log0 = loopWith roster [(n, seedAgentState @s @f n log0) | (n, _) <-
 loopWith ::
   forall s f.
   (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Text, Agent s)] ->
-  [(Text, AgentState s f)] ->
+  [(Name, Agent s)] ->
+  [(Name, AgentState s f)] ->
   Log f ->
-  ([(Text, AgentState s f)], Log f, [Derivation])
+  ([(Name, AgentState s f)], Log f, [Derivation])
 loopWith roster states0 log0 = trace body ()
   where
-    bundle0 = (states0, log0, []) :: ([(Text, AgentState s f)], Log f, [Derivation])
+    bundle0 = (states0, log0, []) :: ([(Name, AgentState s f)], Log f, [Derivation])
     body (Right ()) =
       if any (hasPending . snd) states0
         then Left bundle0
@@ -421,8 +434,8 @@ loopWith roster states0 log0 = trace body ()
 meetingLoop ::
   forall s f.
   (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Text, Agent s)] ->
-  Loop Either (->) ([(Text, AgentState s f)], Log f, [Derivation]) ([(Text, AgentState s f)], Log f, [Derivation])
+  [(Name, Agent s)] ->
+  Loop Either (->) ([(Name, AgentState s f)], Log f, [Derivation]) ([(Name, AgentState s f)], Log f, [Derivation])
 meetingLoop roster = Knot body
   where
     body (Right bundle@(states, _, _)) =
@@ -439,9 +452,9 @@ meetingLoop roster = Knot body
 meetingPass ::
   forall s f.
   (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Text, Agent s)] ->
-  ([(Text, AgentState s f)], Log f, [Derivation]) ->
-  ([(Text, AgentState s f)], Log f, [Derivation])
+  [(Name, Agent s)] ->
+  ([(Name, AgentState s f)], Log f, [Derivation]) ->
+  ([(Name, AgentState s f)], Log f, [Derivation])
 meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roster
   where
     step (st, l, ds) (name, agent) =
@@ -462,7 +475,7 @@ meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roste
     routePost states' p =
       map
         ( \(n, st) ->
-            if deliversTo p n
+            if deliversTo p [n]
               then (n, st {asInbox = appendInbox p (asInbox st)})
               else (n, st)
         )
@@ -477,20 +490,20 @@ meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roste
 loops ::
   forall s f.
   (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Text, Agent s)] ->
-  [(Text, AgentState s f)] ->
+  [(Name, Agent s)] ->
+  [(Name, AgentState s f)] ->
   Log f ->
-  [([(Text, AgentState s f)], Log f, [Derivation])]
+  [([(Name, AgentState s f)], Log f, [Derivation])]
 loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
   where
-    go :: [(Text, AgentState s f)] -> Log f -> [Derivation] -> [([(Text, AgentState s f)], Log f, [Derivation])]
+    go :: [(Name, AgentState s f)] -> Log f -> [Derivation] -> [([(Name, AgentState s f)], Log f, [Derivation])]
     go states lg derivs
       | not (any (hasPending . snd) states) = []
       | otherwise =
           let (states', lg', derivs') = foldl' step (states, lg, derivs) roster
            in (states', lg', derivs') : go states' lg' derivs'
 
-    step :: ([(Text, AgentState s f)], Log f, [Derivation]) -> (Text, Agent s) -> ([(Text, AgentState s f)], Log f, [Derivation])
+    step :: ([(Name, AgentState s f)], Log f, [Derivation]) -> (Name, Agent s) -> ([(Name, AgentState s f)], Log f, [Derivation])
     step (states, lg, derivs) (name, agent) =
       case lookup name states of
         Nothing -> (states, lg, derivs)
@@ -504,14 +517,14 @@ loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
                in (states'', lg', derivs')
           | otherwise -> (states, lg, derivs)
 
-    updateState :: Text -> AgentState s f -> [(Text, AgentState s f)] -> [(Text, AgentState s f)]
+    updateState :: Name -> AgentState s f -> [(Name, AgentState s f)] -> [(Name, AgentState s f)]
     updateState name st' = map (\(n, s) -> if n == name then (n, st') else (n, s))
 
-    routePost :: [(Text, AgentState s f)] -> Post -> [(Text, AgentState s f)]
+    routePost :: [(Name, AgentState s f)] -> Post -> [(Name, AgentState s f)]
     routePost states p =
       map
         ( \(n, st) ->
-            if deliversTo p n
+            if deliversTo p [n]
               then (n, st {asInbox = appendInbox p (asInbox st)})
               else (n, st)
         )
@@ -522,11 +535,11 @@ loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
 loopHetero ::
   forall s f.
   (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Text, s, Agent s)] ->
+  [(Name, s, Agent s)] ->
   Log f ->
-  ([(Text, AgentState s f)], Log f, [Derivation])
+  ([(Name, AgentState s f)], Log f, [Derivation])
 loopHetero roster log0 =
-  loopWith (map (\(n, _, a) -> (n, a)) roster) (map (\(n, s, _) -> (n, AgentState s (seedInbox n log0))) roster) log0
+  loopWith (map (\(n, _, a) -> (n, a)) roster) (map (\(n, s, _) -> (n, AgentState s (seedInbox [n] log0))) roster) log0
 
 -- | Run a monomial system for one step.
 --
@@ -610,7 +623,7 @@ flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 -- @State@ in tests).  Example — reply agent over @State@:
 --
 -- @
--- let sys = tape (\\hist -> (peek hist) { author = "j", addr = author (peek hist), body = "ack: " <> body (peek hist) })
+-- let sys = tape (\\hist -> (peek hist) { from = "j", to = [from (peek hist)], body = "ack: " <> body (peek hist) })
 --     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post])) [Post]
 -- in  evalState (runKleisli (close (conjoint sh) (companion sh)) [humanPost]) (AgentSeat [] [])
 -- @
@@ -653,8 +666,8 @@ runAgentShard sys seat ins =
 -- Obtained by buffering a list 'Shard' on both sides, or by a bare queue
 -- ('openSTM' \/ 'openIO').
 --
--- A /tool call/ from an agent is just a 'Post': @addr@ names the tool,
--- @body@ carries the arguments. No extra type — emit that 'Post' on a
+-- A /tool call/ from an agent is just a 'Post': the 'to' list names the
+-- tool, 'body' carries the arguments. No extra type — emit that 'Post' on a
 -- 'Port' (or post it on the log for the tool agent to 'watch').
 type Port m = Ends (Kleisli m) Post Post
 
