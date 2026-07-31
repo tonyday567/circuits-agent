@@ -3,12 +3,19 @@
 
 module Main (main) where
 
+import Algebra.Graph.Labelled qualified as LG
 import Circuit.Agent
 import Circuit.Agent.Delivery
   ( deliveryMatrix,
     isNilpotent,
     matrixPowers,
     topologyMatrix,
+  )
+import Circuit.Agent.Graph
+  ( AgentRegistry,
+    bus,
+    runGraph,
+    star,
   )
 import Circuit.Layer (run)
 import Circuit.Poly (Eval (..), Mono, System (..), fromEvalSystem, monoDir)
@@ -18,6 +25,8 @@ import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad.State (State, get, gets, modify, put, runState)
 import Data.Functor.Identity (Identity (..))
 import Data.List (find, foldl', sort)
+import Data.Map (Map)
+import Data.Map qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Harpie.NumHask.Matrix (Matrix, fromLists, matPlus, starMatrix, toLists)
@@ -762,6 +771,67 @@ main = do
         && "hi j" `elem` map body (asState seatAll)
     assert "full commit produces a reply to the secret too" $
       length outsAll == 2
+
+  -------------------------------------------------------------------------
+  -- Agent graph wiring
+  --
+  -- Algebraic graphs over agents: vertices are names, edges are channels.
+  -------------------------------------------------------------------------
+  putStrLn "agent graph wiring"
+  do
+    let echo :: Text -> [Post] -> [Post]
+        echo name hist =
+          let p = peek hist
+           in [mkPost name [] ("ack:" <> body p)]
+        reg :: AgentRegistry
+        reg =
+          Map.fromList
+            [ ("j", tape (echo "j")),
+              ("k", tape (echo "k"))
+            ]
+        t0 = [mkPost "human" ["bus"] "hello"]
+        logBus = runGraph (bus ["j", "k"] "bus") reg t0
+    assert "bus: both agents see the shared post and reply" $
+      any ((== "j") . from) logBus && any ((== "k") . from) logBus
+
+  do
+    let summary :: [Post] -> [Post]
+        summary hist =
+          let p = peek hist
+           in [mkPost "hub" [] ("summary: " <> body p)]
+        leafEcho :: [Post] -> [Post]
+        leafEcho hist =
+          let p = peek hist
+           in [mkPost "leaf" [] ("leaf:" <> body p)]
+        reg :: AgentRegistry
+        reg =
+          Map.fromList
+            [ ("hub", tape summary),
+              ("leaf", tape leafEcho)
+            ]
+        t0 = [mkPost "human" ["leaf"] "data"]
+        logStar = runGraph (star "hub" ["leaf"] "hub" "leaf") reg t0
+    assert "star: hub posts a summary after receiving from leaf" $
+      any ((== "hub") . from) logStar
+
+  do
+    let echo :: Text -> [Post] -> [Post]
+        echo name hist =
+          let p = peek hist
+           in [mkPost name [] ("ack:" <> body p)]
+        reg :: AgentRegistry
+        reg =
+          Map.fromList
+            [ ("j", tape (echo "j")),
+              ("k", tape (echo "k"))
+            ]
+        t0 = [mkPost "human" ["bus"] "hello"]
+        g = bus ["j", "k"] "bus"
+        isolated = LG.overlay (LG.vertex "j") (LG.vertex "k")
+        logFull = runGraph g reg t0
+        logWithIsolated = runGraph (LG.overlay g isolated) reg t0
+    assert "overlay with isolated vertices is a no-op" $
+      logFull == logWithIsolated
 
   putStrLn "All tests passed"
   where

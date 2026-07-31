@@ -50,6 +50,7 @@ module Circuit.Agent
     Post (..),
     Log,
     emptyLog,
+    Name,
 
     -- * Pure agents
     Agent,
@@ -100,6 +101,7 @@ module Circuit.Agent
     loops,
     loopHetero,
     meetingLoop,
+    seedAgentState,
 
     -- * Derivations
     Derivation (..),
