@@ -5,13 +5,14 @@
 Design card: `coffee/loom/agent.md`.
 
 ```haskell
-type Agent s   = System s (Mono [Post] Post)            -- pure Moore agent
-type Shard m   = Ends (Kleisli m) [Post] [Post]         -- effectful ends (lists both ways)
-type LogEnds m = Shard m                                -- same shape; dual seat on the log
+type Agent arr s a b = System arr s (Mono a b)          -- Moore agent, polymorphic arrow
+type Shard m a b     = Ends (Kleisli m) a b             -- effectful ends
+type LogEnds m a b   = Shard m a b                      -- same shape; dual seat on the log
 ```
 
-- Pure agents: free carrier `s`; common case `Agent [Post]` (received stream).
-- Shard: commit `[Post]`, emit `[Post]`. One-post keyboard: `prefixIn (:[])`.
+- Pure agents: `Agent (->) s a b`; common addressed-log case `Agent (->) [Post] Post [Post]`.
+- Effectful agents: `Agent (Kleisli m) s a b`.
+- Shard: commit `a`, emit `b`. Common log case `Shard m [Post] [Post]`; one-post keyboard: `prefixIn (:[])`.
 - Opacity: commit/emit only; no interior.
 
 ## What is here
