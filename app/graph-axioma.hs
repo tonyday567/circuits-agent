@@ -14,10 +14,15 @@ import Circuit.Agent
   )
 import Circuit.Agent.Graph
   ( AgentGraph,
+    AgentNode (..),
     AgentRegistry,
     ChannelSet,
+    atomic,
     channel,
+    flatten,
+    nested,
     runGraph,
+    toAgent,
   )
 import Data.List (sortOn)
 import Data.Map (Map)
@@ -111,7 +116,7 @@ genRegistry :: AgentGraph -> Gen AgentRegistry
 genRegistry g = do
   let names = Set.toList (LG.vertexSet g)
   policies <- vectorOf (length names) genPolicy
-  pure (Map.fromList (zip names (map policyAgent policies)))
+  pure (Map.fromList (zip names (map (atomic . policyAgent) policies)))
 
 genPost :: Gen Post
 genPost = do
@@ -153,6 +158,27 @@ data GraphPair = GraphPair AgentGraph AgentGraph
 
 instance Arbitrary GraphPair where
   arbitrary = GraphPair <$> arbitrary <*> arbitrary
+  shrink = const []
+
+-- | A parent graph with one nested vertex containing a single inner agent.
+data NestedGraph = NestedGraph AgentGraph AgentRegistry
+
+instance Show NestedGraph where
+  show (NestedGraph g _reg) = "NestedGraph (" ++ show (LG.vertexSet g) ++ ")"
+
+instance Arbitrary NestedGraph where
+  arbitrary = do
+    innerPolicy <- genPolicy
+    outerPolicy <- genPolicy
+    let innerGraph = LG.vertex "x"
+        innerReg = Map.fromList [("x", atomic (policyAgent innerPolicy))]
+        parentGraph = LG.connect (channel "outer") (LG.vertex "nested") (LG.vertex "a")
+        parentReg =
+          Map.fromList
+            [ ("nested", nested innerGraph innerReg),
+              ("a", atomic (policyAgent outerPolicy))
+            ]
+    pure (NestedGraph parentGraph parentReg)
   shrink = const []
 
 prop_overlay_comm :: GraphPair -> Property
@@ -217,6 +243,14 @@ prop_decomposition (Triple x y z) =
           forAll genInputs $ \ins ->
             run g reg ins === run h reg ins
 
+-- | Orchestrator law: a nested vertex expands to the same behaviour as the
+-- flattened graph.
+prop_orchestrator_flatten :: NestedGraph -> Property
+prop_orchestrator_flatten (NestedGraph g reg) =
+  forAll genInputs $ \ins ->
+    let (g', reg') = flatten g reg
+     in run g reg ins === run g' reg' ins
+
 -------------------------------------------------------------------------
 -- Test runner
 -------------------------------------------------------------------------
@@ -244,7 +278,8 @@ main = do
           check "connect right identity" prop_connect_right_identity,
           check "left distributivity" prop_left_distributivity,
           check "right distributivity" prop_right_distributivity,
-          check "decomposition" prop_decomposition
+          check "decomposition" prop_decomposition,
+          check "orchestrator flattening" prop_orchestrator_flatten
         ]
   if ok
     then putStrLn "All graph-law oracles passed"

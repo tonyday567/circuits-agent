@@ -13,6 +13,7 @@ import Circuit.Agent.Delivery
   )
 import Circuit.Agent.Graph
   ( AgentRegistry,
+    atomic,
     bus,
     runGraph,
     star,
@@ -786,8 +787,8 @@ main = do
         reg :: AgentRegistry
         reg =
           Map.fromList
-            [ ("j", tape (echo "j")),
-              ("k", tape (echo "k"))
+            [ ("j", atomic (tape (echo "j"))),
+              ("k", atomic (tape (echo "k")))
             ]
         t0 = [mkPost "human" ["bus"] "hello"]
         logBus = runGraph (bus ["j", "k"] "bus") reg t0
@@ -806,8 +807,8 @@ main = do
         reg :: AgentRegistry
         reg =
           Map.fromList
-            [ ("hub", tape summary),
-              ("leaf", tape leafEcho)
+            [ ("hub", atomic (tape summary)),
+              ("leaf", atomic (tape leafEcho))
             ]
         t0 = [mkPost "human" ["leaf"] "data"]
         logStar = runGraph (star "hub" ["leaf"] "hub" "leaf") reg t0
@@ -822,8 +823,8 @@ main = do
         reg :: AgentRegistry
         reg =
           Map.fromList
-            [ ("j", tape (echo "j")),
-              ("k", tape (echo "k"))
+            [ ("j", atomic (tape (echo "j"))),
+              ("k", atomic (tape (echo "k")))
             ]
         t0 = [mkPost "human" ["bus"] "hello"]
         g = bus ["j", "k"] "bus"

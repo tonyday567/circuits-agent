@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 -- | Algebraic wiring of agent meetings.
 --
 -- Vertices are agent names; edges are labelled with sets of channels
@@ -15,6 +17,7 @@ module Circuit.Agent.Graph
   ( -- * Graph of agents
     AgentGraph,
     ChannelSet,
+    AgentNode (..),
     AgentRegistry,
     GraphAgent,
 
@@ -23,11 +26,15 @@ module Circuit.Agent.Graph
     bus,
     star,
     chain,
+    atomic,
+    nested,
 
     -- * Interpretation
     channelMap,
     toRoster,
     runGraph,
+    toAgent,
+    flatten,
   )
 where
 
@@ -63,8 +70,21 @@ type ChannelSet = Set Channel
 -- | Wiring graph: vertices are agent names, edges are sets of channels.
 type AgentGraph = LG.Graph ChannelSet Name
 
--- | Registry of pure agents, all using the common log carrier @[Post]@.
-type AgentRegistry = Map Name (Agent (->) [Post] Post [Post])
+-- | A registry entry is either an atomic pure agent or a nested subgraph.
+data AgentNode
+  = AtomicAgent (Agent (->) [Post] Post [Post])
+  | NestedAgent AgentGraph AgentRegistry
+
+-- | Registry of agents.  Names map to atomic agents or whole subgraphs.
+type AgentRegistry = Map Name AgentNode
+
+-- | Smart constructor for an atomic registry entry.
+atomic :: Agent (->) [Post] Post [Post] -> AgentNode
+atomic = AtomicAgent
+
+-- | Smart constructor for a nested registry entry.
+nested :: AgentGraph -> AgentRegistry -> AgentNode
+nested = NestedAgent
 
 -- | An agent after graph routing has been applied: the carrier holds the
 -- original history plus the output associated with the current state.
@@ -140,13 +160,41 @@ routeAgent outChs inner =
             routed = map (\p -> p {to = Set.toList outChs}) outs
          in ((asState seat', Just routed), (fromMaybe [] mout, ()))
 
+-- | Inject parent-imposed channels into a subgraph.  Every internal vertex
+-- receives the incoming channels and gains the outgoing channels, so that
+-- hierarchical interpretation (nested agent) and flattening agree.
+injectChannels :: ChannelSet -> ChannelSet -> AgentGraph -> AgentGraph
+injectChannels ins outs g =
+  LG.overlay (LG.connect ins LG.empty g) (LG.connect outs g LG.empty)
+
+-- | Interpret a graph as a single agent.  The carrier is the input history;
+-- each new post is fed to the graph and the freshly generated posts are
+-- emitted.
+toAgent :: AgentGraph -> AgentRegistry -> Agent (->) [Post] Post [Post]
+toAgent graph registry =
+  System $ \(hist, d) ->
+    case d of
+      Left _ -> (hist, ([], ()))
+      Right inp ->
+        let hist' = hist ++ [inp]
+            logBefore = runGraph graph registry hist
+            logAfter = runGraph graph registry hist'
+            newPosts = drop (length logBefore) logAfter
+         in (hist', (newPosts, ()))
+
+-- | Resolve a registry entry into a pure agent.  Nested agents are
+-- interpreted as agents over their subgraph with parent channels injected.
+resolveNode :: ChannelSet -> ChannelSet -> AgentNode -> Agent (->) [Post] Post [Post]
+resolveNode _ _ (AtomicAgent a) = a
+resolveNode ins outs (NestedAgent g r) = toAgent (injectChannels ins outs g) r
+
 -- | Build a roster from the graph by routing each agent's outputs along its
 -- outgoing edges and subscribing it to its incoming edges.
 toRoster :: AgentGraph -> AgentRegistry -> [(Name, GraphAgent)]
 toRoster graph registry =
-  [ (n, routeAgent (viOut info) inner)
+  [ (n, routeAgent (viOut info) (resolveNode (viIn info) (viOut info) node))
   | (n, info) <- Map.toList (channelMap graph),
-    Just inner <- [Map.lookup n registry]
+    Just node <- [Map.lookup n registry]
   ]
 
 -- | Seed a graph-wrapped agent state: inbox sees addressed posts, carrier is
@@ -168,3 +216,27 @@ runGraph graph registry inputs =
       states = [(n, seedGraphState (subs n) inputs) | (n, _) <- roster]
    in case loopWith roster states inputs of
         (_, log', _) -> log'
+
+-- | Map over vertex names.
+gmapVertices :: (Name -> Name) -> AgentGraph -> AgentGraph
+gmapVertices f = LG.foldg LG.empty (LG.vertex . f) LG.connect
+
+-- | Flatten a graph by expanding nested vertices into their subgraphs.
+-- Returns a graph whose vertices are all atomic and a registry of those atoms.
+-- Nested names are prefixed to avoid collisions.
+flatten :: AgentGraph -> AgentRegistry -> (AgentGraph, AgentRegistry)
+flatten graph registry = LG.foldg emptyM vertexM connectM graph
+  where
+    emptyM = (LG.empty, Map.empty)
+    vertexM name =
+      case Map.lookup name registry of
+        Just (NestedAgent g r) ->
+          let (g', r') = flatten g r
+              prefix = name <> "/"
+              g'' = gmapVertices (prefix <>) g'
+              r'' = Map.mapKeys (prefix <>) r'
+           in (g'', r'')
+        Just (AtomicAgent a) -> (LG.vertex name, Map.singleton name (AtomicAgent a))
+        Nothing -> (LG.vertex name, Map.empty)
+    connectM chs (gl, regL) (gr, regR) =
+      (LG.connect chs gl gr, Map.union regL regR)
