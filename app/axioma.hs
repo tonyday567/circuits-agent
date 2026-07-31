@@ -68,7 +68,7 @@ newFor who lg st = filter (`notElem` asCarrier st) (watch who lg)
 -- | Parallel reduction: every agent runs against the *same* input log, and
 -- all emitted posts are appended to that log.  This is the schedule-independent
 -- baseline that O8 compares against the round-robin 'loop'.
-runParallel :: [(Text, Agent [Post] Post [Post])] -> [Post] -> [Post]
+runParallel :: [(Text, Agent (->) [Post] Post [Post])] -> [Post] -> [Post]
 runParallel roster lg = foldl' (flip post) lg outputs
   where
     outputs = concatMap (\(who, agent) -> beh agent [] (watch [who] lg)) roster
@@ -89,7 +89,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "A0: identity agent"
   do
-    let idAgent :: Agent [Int] Int Int
+    let idAgent :: Agent (->) [Int] Int Int
         idAgent = tape head
     assert "A0: tape head streams inputs through unchanged" $
       iterateSystem idAgent [] [1, 2, 3 :: Int] == [1, 2, 3]
@@ -103,9 +103,9 @@ main = do
         f = (+ 10)
         g :: Int -> Int
         g = (* 2)
-        fAgent :: Agent [Int] Int Int
+        fAgent :: Agent (->) [Int] Int Int
         fAgent = tape (f . head)
-        gAgent :: Agent [Int] Int Int
+        gAgent :: Agent (->) [Int] Int Int
         gAgent = tape (g . head)
         inputs = [1, 2, 3 :: Int]
         chained = iterateSystem gAgent [] (iterateSystem fAgent [] inputs)
@@ -141,9 +141,9 @@ main = do
     let xs = [1, 2, 3 :: Int]
         f hist = [head hist]
         h = take 1
-        sys1 :: Agent [Int] Int [Int]
+        sys1 :: Agent (->) [Int] Int [Int]
         sys1 = tape f
-        sys2 :: Agent [Int] Int [Int]
+        sys2 :: Agent (->) [Int] Int [Int]
         sys2 = tape (f . h)
     assert "O2: summarizer h preserves behaviour" $
       iterateSystem sys2 (h []) xs == iterateSystem sys1 [] xs
@@ -155,7 +155,7 @@ main = do
   do
     let xs = [1, 2 :: Int]
         ys = [3 :: Int]
-        agent :: Agent [Int] Int [Int]
+        agent :: Agent (->) [Int] Int [Int]
         agent = tape (\hist -> [head hist])
         s0 = [] :: [Int]
     assert "S3: beh s0 (xs ++ ys) == beh s0 xs ++ beh (after agent s0 xs) ys" $
@@ -197,9 +197,9 @@ main = do
         ins = [p1, p2, p3]
         f = reply "j"
         h = take 1
-        sys1 :: Agent [Post] Post [Post]
+        sys1 :: Agent (->) [Post] Post [Post]
         sys1 = tape f
-        sys2 :: Agent [Post] Post [Post]
+        sys2 :: Agent (->) [Post] Post [Post]
         sys2 = tape (f . h)
     assert "reply homomorphism: summarizer h preserves behaviour" $
       beh sys2 (h []) ins == beh sys1 [] ins
@@ -210,7 +210,7 @@ main = do
         p3 = mkPost "human" ["j"] "three"
         xs = [p1, p2]
         ys = [p3]
-        agent :: Agent [Post] Post [Post]
+        agent :: Agent (->) [Post] Post [Post]
         agent = tape (reply "j")
         s0 = [] :: [Post]
     assert "reply functoriality: beh s0 (xs ++ ys) == beh s0 xs ++ beh (after agent s0 xs) ys" $
@@ -500,13 +500,13 @@ main = do
   putStrLn "multi-round pure (two Moore agents)"
   do
     let rounds = 3 :: Int
-        nudge :: Agent [Post] Post [Post]
+        nudge :: Agent (->) [Post] Post [Post]
         nudge =
           tape
             ( const
                 [mkPost "nudge" ["worker"] "tell me more."]
             )
-        worker :: Agent [Post] Post [Post]
+        worker :: Agent (->) [Post] Post [Post]
         worker =
           tape
             ( \hist ->
@@ -558,7 +558,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "agent as shard"
   do
-    let ack :: Agent [Post] Post [Post]
+    let ack :: Agent (->) [Post] Post [Post]
         ack = tape (reply "j")
         pIn = mkPost "human" ["j"] "hi"
         -- pure closed form
@@ -586,7 +586,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "O5: arity change"
   do
-    let arityBreaker :: Agent [Post] Post [Post]
+    let arityBreaker :: Agent (->) [Post] Post [Post]
         arityBreaker =
           tape
             ( \hist ->
@@ -610,17 +610,17 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "branch agent"
   do
-    let liftAgent :: Agent [Post] Post [Post] -> Agent (Bool, [Post]) Post [Post]
+    let liftAgent :: Agent (->) [Post] Post [Post] -> Agent (->) (Bool, [Post]) Post [Post]
         liftAgent sys =
           System $ \((tag, hist), d) ->
             let inp = monoDir d
                 (outs, next) = runSystem sys hist
              in ((tag, next inp), (outs, ()))
-        calcOnly :: Agent [Post] Post [Post]
+        calcOnly :: Agent (->) [Post] Post [Post]
         calcOnly = tape calc
-        echoOnly :: Agent [Post] Post [Post]
+        echoOnly :: Agent (->) [Post] Post [Post]
         echoOnly = tape (reply "j")
-        branchy :: Agent (Bool, [Post]) Post [Post]
+        branchy :: Agent (->) (Bool, [Post]) Post [Post]
         branchy = branchAgent fst (liftAgent calcOnly) (liftAgent echoOnly)
         pCalc = mkPost "human" ["j"] "1 2 3"
         pEcho = mkPost "human" ["j"] "hello"
@@ -644,7 +644,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "port (token seat)"
   do
-    let ack :: Agent [Post] Post [Post]
+    let ack :: Agent (->) [Post] Post [Post]
         ack = tape (reply "j")
         pIn = mkPost "human" ["j"] "hi"
         -- agent as list shard, then token seat via stream buffers
@@ -699,7 +699,7 @@ main = do
     assert "tool call body is the args" $ body call == "1 2 3"
 
     -- code: pure Agent that emits a tool-call Post
-    let caller :: Agent [Post] Post [Post]
+    let caller :: Agent (->) [Post] Post [Post]
         caller = tape callCalc
         human = mkPost "human" ["j"] "please sum 1 2 3"
         (outs, _) = runAgentShard caller (AgentSeat [] []) [human]
@@ -741,7 +741,7 @@ main = do
     let secret = mkPost "ops" ["j"] "bus emergency — do not show yet"
         public = mkPost "human" ["j"] "hi j"
         held = [secret, public] -- store exists; not all of it is delivered
-        agent = tape (reply "j") :: Agent [Post] Post [Post]
+        agent = tape (reply "j") :: Agent (->) [Post] Post [Post]
 
         -- release only public (withhold secret)
         released = filter ((== "human") . from) held
@@ -766,7 +766,7 @@ main = do
   putStrLn "All tests passed"
   where
     -- \| Generic behaviour for Tier A agents (output lists are concatenated).
-    behA :: Agent s a [b] -> s -> [a] -> [b]
+    behA :: Agent (->) s a [b] -> s -> [a] -> [b]
     behA _sys _s0 [] = []
     behA sys s0 (i : ins) =
       let (os, s') = run1 sys s0 i

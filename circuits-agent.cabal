@@ -12,9 +12,10 @@ bug-reports: https://github.com/tonyday567/circuits-agent/issues
 synopsis: Moore agents on a shared log; opaque shards for effects.
 description:
   Core agent model for the circuits ecosystem: a shared append-only log of
-  addressed 'Post's.  Pure agents are Moore machines
-  ('Agent' s a b = 'System' ('->') s ('Mono' a b)).  Effectful boundaries
-  are opaque shards: 'Shard' m a b = 'Ends' ('Kleisli' m) a b
+  addressed 'Post's.  Agents are Moore machines polymorphic in the base arrow
+  ('Agent' arr s a b = 'System' arr s ('Mono' a b)).  The pure case is
+  @arr = '(->)'@; the effectful case is @arr = 'Kleisli' m@.  Effectful
+  boundaries are opaque shards: 'Shard' m a b = 'Ends' ('Kleisli' m) a b
   (lists both ways in the common log case; one-post commit via prefixIn (:[])).
   'LogEnds' is the same shape on the log seat.  Includes process-port plumbing
   ('Circuit.Agent.Process'), message framing ('Circuit.Agent.Framing'),
