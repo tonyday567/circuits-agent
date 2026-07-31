@@ -7,23 +7,23 @@
 -- Pure agent shape:
 --
 -- @
--- type Agent s = System s (Mono [Post] Post)
+-- type Agent s a b = System (->) s (Mono a b)
 -- @
 --
 -- Free carrier @s@ is required by the pretense (tape vs summary).  The common
--- log case is @Agent [Post]@ — state is the received stream.  That carrier is
--- a parse of the tape: each committed @Post@ is one token.
+-- log case is @Agent [Post] Post [Post]@ — state is the received stream.  That
+-- carrier is a parse of the tape: each committed @Post@ is one token.
 --
 -- Effectful boundary (preferred pin):
 --
 -- @
--- type Shard m = Ends (Kleisli m) [Post] [Post]
+-- type Shard m a b = Ends (Kleisli m) a b
 -- @
 --
--- Symmetric: commit a list of posts, emit a list of posts.  One-post reality
--- (hit enter) is not another type — lift with @(:[])@ on the commit side
--- (@prefixIn@).  'LogEnds' is the same shape (dual seat on the log).
--- Opacity is commit\/emit only; no interior.
+-- Symmetric in the common log case: commit a list of posts, emit a list of
+-- posts.  One-post reality (hit enter) is not another type — lift with @(:[])@
+-- on the commit side (@prefixIn@).  'LogEnds' is the same shape (dual seat on
+-- the log).  Opacity is commit\/emit only; no interior.
 --
 -- Change of base (circuits-parser sense): 'agentShard' reinterprets a pure
 -- 'Agent' at @Kleisli m@ ends — same Moore citizen, effectful interface.
@@ -37,7 +37,8 @@
 --
 -- @
 -- portShard = batchEnds … >:> shard >:> unbatchEnds …
---   :: Ends (Kleisli m) Post Post
+--   :: Shard m Post [Post] >:> Shard m [Post] [Post] >:> Shard m [Post] Post
+--   :: Port m
 -- @
 --
 -- Queue ends ('openSTM' \/'openIO') are the effectful token wire of the same
@@ -186,40 +187,41 @@ data Post = Post
 -- other stream representations while keeping the addressed read as a list.
 type Log f = f
 
--- | Pure agent: a Moore machine over posts, free carrier.
+-- | Pure agent: a Moore machine, free carrier.
 --
--- @System (->) s (Mono [Post] Post) ≅ s -> ([Post], Post -> s)@.
--- Common log case: @Agent [Post]@ (state = received stream).
-type Agent s = System (->) s (Mono [Post] Post)
+-- @System (->) s (Mono a b) ≅ s -> a -> (s, b)@ after collapsing unit
+-- positions.  Common log case: @Agent s Post [Post]@ (input = one post,
+-- output = list of posts).
+type Agent s a b = System (->) s (Mono a b)
 
--- | Opaque effectful ends: stream @f@ both ways.
+-- | Opaque effectful ends: commit an @a@, emit a @b@.
 --
--- Common case: @Shard m [Post]@.  Pipeline speaks a stream on commit and
--- emit.  Keyboard one-shot:
+-- Common log case: @Shard m [Post] [Post]@.  Pipeline speaks a stream on
+-- commit and emit.  Keyboard one-shot:
 --
 -- @
 -- prefixIn (:[])  -- Post -> [Post] on the conjoint
 -- @
 --
 -- Emit is an onslaught of posts (empty = quiet \/ done for that poll).
-type Shard m f = Ends (Kleisli m) f f
+type Shard m a b = Ends (Kleisli m) a b
 
 -- | Same ends shape as 'Shard' — dual seat on the log (journal 013).
-type LogEnds m f = Shard m f
+type LogEnds m a b = Shard m a b
 
 -- | Build a 'Shard' from monadic commit and emit actions.
-shard :: (Monad m) => (f -> m ()) -> m f -> Shard m f
+shard :: (Monad m) => (a -> m ()) -> m a -> Shard m a a
 shard = endsK
 
 -- | Build log ends (same as 'shard'; dual seat).
-logEnds :: (Monad m) => (f -> m ()) -> m f -> LogEnds m f
+logEnds :: (Monad m) => (a -> m ()) -> m a -> LogEnds m a a
 logEnds = endsK
 
 -- | Born empty, conses each received input onto its history.
 --
 -- >>> iterateSystem (tape length) [] [1,2,3 :: Int]
 -- [1,2,3]
-tape :: ([i] -> o) -> System (->) [i] (Mono o i)
+tape :: ([i] -> o) -> Agent [i] i o
 tape f = System $ \(hist, d) -> (monoDir d : hist, (f hist, ()))
 
 -- | Like 'tape', but also conses the agent's own output onto its history.
@@ -347,7 +349,7 @@ session subs = map body . watch subs
 -- 'Derivation' records the agent name, the input post, and the emitted outputs.
 turn ::
   (Cons f Post, Uncons f Post) =>
-  Agent s ->
+  Agent s Post [Post] ->
   AgentState s f ->
   Log f ->
   (AgentState s f, Log f, Maybe Derivation)
@@ -399,7 +401,7 @@ takeStream n s = go n s []
 loop ::
   forall s f.
   (Snoc s Post, Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, Agent s)] ->
+  [(Name, Agent s Post [Post])] ->
   Log f ->
   ([(Name, AgentState s f)], Log f, [Derivation])
 loop roster log0 = loopWith roster [(n, seedAgentState @s @f [n] log0) | (n, _) <- roster] log0
@@ -411,7 +413,7 @@ loop roster log0 = loopWith roster [(n, seedAgentState @s @f [n] log0) | (n, _) 
 loopWith ::
   forall s f.
   (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, Agent s)] ->
+  [(Name, Agent s Post [Post])] ->
   [(Name, AgentState s f)] ->
   Log f ->
   ([(Name, AgentState s f)], Log f, [Derivation])
@@ -434,7 +436,7 @@ loopWith roster states0 log0 = trace body ()
 meetingLoop ::
   forall s f.
   (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, Agent s)] ->
+  [(Name, Agent s Post [Post])] ->
   Loop Either (->) ([(Name, AgentState s f)], Log f, [Derivation]) ([(Name, AgentState s f)], Log f, [Derivation])
 meetingLoop roster = Knot body
   where
@@ -452,7 +454,7 @@ meetingLoop roster = Knot body
 meetingPass ::
   forall s f.
   (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, Agent s)] ->
+  [(Name, Agent s Post [Post])] ->
   ([(Name, AgentState s f)], Log f, [Derivation]) ->
   ([(Name, AgentState s f)], Log f, [Derivation])
 meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roster
@@ -490,7 +492,7 @@ meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roste
 loops ::
   forall s f.
   (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, Agent s)] ->
+  [(Name, Agent s Post [Post])] ->
   [(Name, AgentState s f)] ->
   Log f ->
   [([(Name, AgentState s f)], Log f, [Derivation])]
@@ -503,7 +505,7 @@ loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
           let (states', lg', derivs') = foldl' step (states, lg, derivs) roster
            in (states', lg', derivs') : go states' lg' derivs'
 
-    step :: ([(Name, AgentState s f)], Log f, [Derivation]) -> (Name, Agent s) -> ([(Name, AgentState s f)], Log f, [Derivation])
+    step :: ([(Name, AgentState s f)], Log f, [Derivation]) -> (Name, Agent s Post [Post]) -> ([(Name, AgentState s f)], Log f, [Derivation])
     step (states, lg, derivs) (name, agent) =
       case lookup name states of
         Nothing -> (states, lg, derivs)
@@ -535,7 +537,7 @@ loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
 loopHetero ::
   forall s f.
   (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, s, Agent s)] ->
+  [(Name, s, Agent s Post [Post])] ->
   Log f ->
   ([(Name, AgentState s f)], Log f, [Derivation])
 loopHetero roster log0 =
@@ -545,7 +547,7 @@ loopHetero roster log0 =
 --
 -- Consume @i@, then extract the output from the successor state (Process /
 -- 'iterateSystem' timing).
-run1 :: System (->) s (Mono o i) -> s -> i -> (o, s)
+run1 :: System (->) s (Mono i o) -> s -> i -> (o, s)
 run1 sys s i =
   let s' = snd (runSystem sys s) i
       (o, _) = runSystem sys s'
@@ -559,7 +561,7 @@ run1 sys s i =
 type Beh = [Post] -> [Post]
 
 -- | Run an agent from an initial carrier to obtain its 'Beh'aviour.
-beh :: Agent s -> s -> Beh
+beh :: Agent s Post [Post] -> s -> Beh
 beh _sys _s0 [] = []
 beh sys s0 (i : ins) =
   let (os, s') = run1 sys s0 i
@@ -572,7 +574,7 @@ beh sys s0 (i : ins) =
 -- predicate is evaluated on the carrier before the input is consumed, which
 -- is the honest Moore shape: output is a function of state, and the chosen
 -- branch's update function determines the next state.
-branchAgent :: (s -> Bool) -> Agent s -> Agent s -> Agent s
+branchAgent :: (s -> Bool) -> Agent s a b -> Agent s a b -> Agent s a b
 branchAgent cond (System left) (System right) =
   System $ \(state, d) ->
     if cond state then left (state, d) else right (state, d)
@@ -593,7 +595,7 @@ data AgentSeat s = AgentSeat
   deriving (Show, Eq)
 
 -- | Pure parse step: fold committed posts through the coalgebra.
-feedAgent :: Agent s -> [Post] -> AgentSeat s -> AgentSeat s
+feedAgent :: Agent s Post [Post] -> [Post] -> AgentSeat s -> AgentSeat s
 feedAgent sys ins (AgentSeat s0 outs0) =
   let (outs1, s1) =
         foldl'
@@ -612,7 +614,7 @@ flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 -- | Reinterpret a pure 'Agent' as a list 'Shard'.
 --
 -- @
--- agentShard get put sys  ::  Shard m [Post]
+-- agentShard get put sys  ::  Shard m [Post] [Post]
 -- @
 --
 -- is the change of base from @(->)@ (the Moore coalgebra) into
@@ -624,15 +626,15 @@ flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 --
 -- @
 -- let sys = tape (\\hist -> (peek hist) { from = "j", to = [from (peek hist)], body = "ack: " <> body (peek hist) })
---     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post])) [Post]
+--     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post])) [Post] [Post]
 -- in  evalState (runKleisli (close (conjoint sh) (companion sh)) [humanPost]) (AgentSeat [] [])
 -- @
 agentShard ::
   (Monad m) =>
   m (AgentSeat s) ->
   (AgentSeat s -> m ()) ->
-  Agent s ->
-  Shard m [Post]
+  Agent s Post [Post] ->
+  Shard m [Post] [Post]
 agentShard getSeat putSeat sys =
   shard
     ( \ins -> do
@@ -650,8 +652,8 @@ agentShard getSeat putSeat sys =
 --
 -- Pure form of @close@ on 'agentShard' without choosing a monad:
 --
--- @runAgentShard sys seat ins = runState (closeShard (agentShard get put sys) ins) seat@
-runAgentShard :: Agent s -> AgentSeat s -> [Post] -> ([Post], AgentSeat s)
+-- @runAgentShard sys seat ins = runState (close (agentShard get put sys) ins) seat@
+runAgentShard :: Agent s Post [Post] -> AgentSeat s -> [Post] -> ([Post], AgentSeat s)
 runAgentShard sys seat ins =
   let seat1 = feedAgent sys ins seat
       (outs, seat2) = flushOutbox seat1
@@ -686,7 +688,7 @@ batchEnds ::
   (Monad m, Snoc f s) =>
   m f ->
   (f -> m ()) ->
-  Ends (Kleisli m) s f
+  Shard m s f
 batchEnds getBuf putBuf =
   endsK
     ( \x -> do
@@ -712,7 +714,7 @@ unbatchEnds ::
   (Monad m, Semigroup f, Uncons f s) =>
   m f ->
   (f -> m ()) ->
-  Ends (Kleisli m) f s
+  Shard m f s
 unbatchEnds getBuf putBuf =
   endsK
     ( \ys -> do
@@ -748,7 +750,7 @@ portShard ::
   ([Post] -> m ()) ->
   m [Post] ->
   ([Post] -> m ()) ->
-  Shard m [Post] ->
+  Shard m [Post] [Post] ->
   Port m
 portShard getIn putIn getOut putOut sh =
   batchEnds getIn putIn >:> sh >:> unbatchEnds getOut putOut
@@ -759,30 +761,29 @@ portShard getIn putIn getOut putOut sh =
 
 -- | Adapt a shard on the commit side (contravariant).
 --
--- Transform the @[Post]@ before it is committed.  One common use is
+-- Transform the input before it is committed.  One common use is
 -- session assembly: @prefixShard session@ changes the payload that the
 -- shard posts.
-prefixShard :: (Monad m) => (f -> f) -> Shard m f -> Shard m f
+prefixShard :: (Monad m) => (a' -> a) -> Shard m a b -> Shard m a' b
 prefixShard f = lmapEnds (Kleisli $ pure . f)
 
 -- | Adapt a shard on the emit side (covariant).
 --
--- Transform the stream after it is emitted.  One common use is a
+-- Transform the output after it is emitted.  One common use is a
 -- transport envelope: @suffixShard (map addHeader)@ decorates every
 -- emitted post.
-suffixShard :: (Monad m) => (f -> f) -> Shard m f -> Shard m f
+suffixShard :: (Monad m) => (b -> b') -> Shard m a b -> Shard m a b'
 suffixShard g = rmapEnds (Kleisli $ pure . g)
 
 -- | Adapt both sides of a shard at once.
 --
 -- @codecShard f g = prefixShard f . suffixShard g@.
-codecShard :: (Monad m) => (f -> f) -> (f -> f) -> Shard m f -> Shard m f
+codecShard :: (Monad m) => (a' -> a) -> (b -> b') -> Shard m a b -> Shard m a' b'
 codecShard f g = dimapEnds (Kleisli $ pure . f) (Kleisli $ pure . g)
 
 -- | Sequential composition of shards.
 --
--- The output stream of the first shard feeds the input stream of the
--- second.  This is the same shape as connecting two effectful agents
--- in series.
-composeShard :: (Monad m) => Shard m f -> Shard m f -> Shard m f
+-- The output of the first shard feeds the input of the second.  This is
+-- the same shape as connecting two effectful agents in series.
+composeShard :: (Monad m) => Shard m a b -> Shard m b c -> Shard m a c
 composeShard = composeEnds
