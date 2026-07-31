@@ -121,10 +121,9 @@ channelMap = LG.foldg Map.empty singleton connectInfo
     connectInfo chs left right =
       let addOut = Map.map (\info -> info {viOut = Set.union chs (viOut info)})
           addIn = Map.map (\info -> info {viIn = Set.union chs (viIn info)})
-       in Map.unionWith
-            mergeInfo
-            (if Set.null chs then left else addOut left)
-            (if Set.null chs then right else addIn right)
+          left' = if Set.null chs || Map.null right then left else addOut left
+          right' = if Set.null chs || Map.null left then right else addIn right
+       in Map.unionWith mergeInfo left' right'
 
 -- | Wrap an agent so its emitted posts are addressed to the given channels.
 --
