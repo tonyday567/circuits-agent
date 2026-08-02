@@ -28,10 +28,15 @@ type LogEnds m a b   = Shard m a b                      -- same shape; dual seat
   re-exported (`Queue`, `openSTM`, `openIO`).
 - Process / Framing / Turn — process dual seats (`ProcessSeat`: shared `In`,
   stdout + stderr `Ends`); framing; turn runners.
+- `Circuit.Agent.Cli` — live CLI agents as `Shard IO [Post] [Post]`: the
+  invocation recipe is data (`Cli`), session ids are scraped and resumed
+  with stale fallback, prompts travel via argv/stdin (no shell quoting,
+  multi-line bodies survive); `hermesCli`, `kimiCli`, `grokCli` presets;
+  `echoShard` is the exact mock oracle.
 
 ## What is not here
 
-Live LLM as `Shard IO`, STM logs, timing → `circuits-agent-observe`.
+HTTP API hosts, STM logs, timing → `circuits-agent-observe`.
 
 ## Status
 

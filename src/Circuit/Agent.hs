@@ -113,8 +113,34 @@ module Circuit.Agent
     run1,
 
     -- * Effectful agents
-    kleisliAgent,
+    agentM,
     runAgentM,
+
+    -- * STM agents (S) and IO-bound agents (X)
+    AgentS,
+    AgentX,
+    agentX,
+    awaitS,
+    raceS,
+    raceIO,
+    stepS,
+    stepsS,
+    runAgentS,
+    readEndSTM,
+    writeEndSTM,
+    agentLoopS,
+    selfLoopS,
+    agentLoopL,
+    selfLoopL,
+
+    -- * Container dial (Bag / Seq log algebra)
+    Bag (..),
+    TurnLog,
+    emptyBag,
+    singletonBag,
+    insertBag,
+    toBag,
+    fromBag,
 
     -- * Behaviour (stream semantics)
     Beh,
@@ -123,6 +149,10 @@ module Circuit.Agent
 
     -- * Choice (level-1 grammar fragment)
     branchAgent,
+
+    -- * Seat-level tensors (product / await, coproduct / race)
+    awaitA,
+    raceA,
 
     -- * Re-exports for end construction
     Ends (..),
@@ -146,8 +176,10 @@ import Circuit
   ( Ends (..),
     Queue (..),
     close,
+    commit,
     composeEnds,
     dimapEnds,
+    emit,
     endsK,
     lmapEnds,
     openIO,
@@ -158,12 +190,21 @@ import Circuit
     (>:>),
   )
 import Circuit.Loop (Loop (..))
+import Circuit.Layer (run)
 import Circuit.Poly (Eval (..), Mono, System (..), fromEvalSystem, monoDir, monoIn)
 import Circuit.Poly.Process (after, runSystem)
 import Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import Control.Arrow (Kleisli (..))
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (async, cancel, race, wait)
+import Control.Concurrent.STM (STM, atomically, orElse)
+import Data.Foldable (traverse_)
 import Data.List (foldl')
+import Data.Map (Map)
+import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Sequence (Seq)
+import Data.Sequence qualified as Seq
 import Data.Text (Text, empty)
 
 -- $setup
@@ -184,7 +225,7 @@ data Post = Post
     to :: [Name],
     body :: Text
   }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 -- | The shared append-only log, newest first.
 --
@@ -192,6 +233,33 @@ data Post = Post
 -- any @f@ with 'Cons' and 'Uncons' lets the same delivery machinery run over
 -- other stream representations while keeping the addressed read as a list.
 type Log f = f
+
+-- | A bag: finite multiset.  Order is forgotten; multiplicity is kept.
+newtype Bag a = Bag (Map a Int)
+  deriving (Eq, Show)
+
+-- | The empty bag.
+emptyBag :: Bag a
+emptyBag = Bag Map.empty
+
+-- | One element.
+singletonBag :: a -> Bag a
+singletonBag a = Bag (Map.singleton a 1)
+
+-- | Insert one element.
+insertBag :: (Ord a) => a -> Bag a -> Bag a
+insertBag a (Bag m) = Bag (Map.insertWith (+) a 1 m)
+
+-- | Fold a list into a bag, forgetting order.
+toBag :: (Ord a) => [a] -> Bag a
+toBag = foldr insertBag emptyBag
+
+-- | Expand a bag into a list in some deterministic order.
+fromBag :: Bag a -> [a]
+fromBag (Bag m) = concatMap (\(a, n) -> replicate n a) (Map.toList m)
+
+-- | Log algebra: a sequence of bags, one bag per turn.
+type TurnLog a = Seq (Bag a)
 
 -- | Agent: a Moore machine with free carrier, polymorphic in the base arrow.
 --
@@ -564,13 +632,167 @@ run1 sys s i =
 --
 -- This is the change of base from @(->)@ to @Kleisli m@ on the agent itself:
 -- the same Moore coalgebra, but each step now lives in @m@.
-kleisliAgent :: (Applicative m) => Agent (->) s a b -> Agent (Kleisli m) s a b
-kleisliAgent (System f) = System (Kleisli (pure . f))
+agentM :: (Applicative m) => Agent (->) s a b -> Agent (Kleisli m) s a b
+agentM (System f) = System (Kleisli (pure . f))
 
 -- | Run one step of a monadic agent.
 runAgentM :: (Monad m) => Agent (Kleisli m) s a b -> s -> a -> m (b, s)
 runAgentM (System (Kleisli f)) s a =
   f (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
+
+-- | STM agent: state is handled transparently inside an STM transaction.
+type AgentS s a = Agent (Kleisli STM) s a [a]
+
+-- | IO agent: the STM boundary has been crossed; state is no longer
+-- transparently handled.
+type AgentX s a = Agent (Kleisli IO) s a [a]
+
+-- | Cross from the transparent STM world into the IO boundary.
+agentX :: AgentS s a -> AgentX s a
+agentX (System (Kleisli f)) = System (Kleisli (\(s, d) -> atomically (f (s, d))))
+
+-- | Seat-level product / await in STM.
+awaitS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
+awaitS (System (Kleisli f1)) (System (Kleisli f2)) =
+  System $ Kleisli $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- f1 (s1, d)
+    (s2', (o2, ())) <- f2 (s2, d)
+    pure ((s1', s2'), (o1 <> o2, ()))
+
+-- | Seat-level coproduct / race in STM.
+raceS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
+raceS (System (Kleisli f1)) (System (Kleisli f2)) =
+  System $ Kleisli $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- f1 (s1, d)
+    (s2', (o2, ())) <- f2 (s2, d)
+    let o = if null o1 then o2 else o1
+    pure ((s1', s2'), (o, ()))
+
+-- | Temporal race under IO: run both branches concurrently, return the first
+-- branch to emit a non-empty output, and cancel the loser. If the first branch
+-- to finish emits nothing, wait for the other branch. If both emit nothing, the
+-- right branch's (empty) result is returned.
+--
+-- This is the honest Kleisli-IO refinement of 'raceS': the winner is whichever
+-- step produces a mark first, not the left-biased deterministic rule.
+raceIO :: AgentX s1 a -> AgentX s2 a -> AgentX (s1, s2) a
+raceIO (System (Kleisli f1)) (System (Kleisli f2)) =
+  System $ Kleisli $ \((s1, s2), d) ->
+    raceFirst (f1 (s1, d)) (f2 (s2, d)) >>= \case
+      Left (s1', outs) -> pure ((s1', s2), (outs, ()))
+      Right (s2', outs) -> pure ((s1, s2'), (outs, ()))
+  where
+    raceFirst act1 act2 = do
+      a1 <- async act1
+      a2 <- async act2
+      let finishLeft s1' outs = cancel a2 >> pure (Left (s1', outs))
+          finishRight s2' outs = cancel a1 >> pure (Right (s2', outs))
+      race (wait a1) (wait a2) >>= \case
+        Left (s1', (outs1, ()))
+          | not (null outs1) -> finishLeft s1' outs1
+          | otherwise -> do
+              (s2', (outs2, ())) <- wait a2
+              finishRight s2' outs2
+        Right (s2', (outs2, ()))
+          | not (null outs2) -> finishRight s2' outs2
+          | otherwise -> do
+              (s1', (outs1, ())) <- wait a1
+              finishLeft s1' outs1
+
+-- | Run one step of an STM agent.
+stepS :: AgentS s a -> s -> a -> STM (s, [a])
+stepS (System (Kleisli f)) s i = do
+  (s', (outs, ())) <- f (s, monoIn i)
+  pure (s', outs)
+
+-- | Fold an STM agent over a bundle of inputs within one transaction.
+--
+-- This is the bundle-at-a-time step: one frame consumes a whole @[a]@ and
+-- produces the concatenated replies.  Factor of 'runAgentS' that stays in
+-- 'STM' so it can sit inside a larger transaction (e.g. a self-loop frame).
+stepsS :: AgentS s a -> s -> [a] -> STM (s, [a])
+stepsS sys s0 ins = go s0 ins
+  where
+    go s [] = pure (s, [])
+    go s (i : is) = do
+      (s', outs) <- stepS sys s i
+      (sFinal, rest) <- go s' is
+      pure (sFinal, outs ++ rest)
+
+-- | Run an STM agent over a list of inputs, crossing into IO at the boundary.
+runAgentS :: AgentS s a -> s -> [a] -> IO ([a], s)
+runAgentS sys s0 ins = (\(s, os) -> (os, s)) <$> atomically (stepsS sys s0 ins)
+
+-- | Unit ends for lifting single-token reads/writes out of an 'Ends' value.
+unitEndsSTM :: Ends (Kleisli STM) () ()
+unitEndsSTM = endsK (const (pure ())) (pure ())
+
+-- | Read one token from an STM end.
+readEndSTM :: Ends (Kleisli STM) a a -> STM a
+readEndSTM ends = runKleisli (emit (companion ends) (conjoint unitEndsSTM)) ()
+
+-- | Write one token to an STM end.
+writeEndSTM :: Ends (Kleisli STM) a a -> a -> STM ()
+writeEndSTM ends a = runKleisli (commit (conjoint ends) (companion unitEndsSTM)) a
+
+-- | Wire an STM agent between an inbox and an outbox, running until
+-- quiescence.  Quiescence is detected via 'orElse': if the inbox is empty
+-- (retry), the loop returns the current state.
+agentLoopS :: AgentS s a -> s -> Ends (Kleisli STM) a a -> Ends (Kleisli STM) a a -> STM s
+agentLoopS agent s0 inbox outbox = go s0
+  where
+    go s =
+      ( do
+          a <- readEndSTM inbox
+          (s', outs) <- stepS agent s a
+          traverse_ (writeEndSTM outbox) outs
+          go s'
+      )
+        `orElse` pure s
+
+-- | Self-loop: the agent reads from and writes to the same STM end.
+selfLoopS :: AgentS s a -> s -> Ends (Kleisli STM) a a -> STM s
+selfLoopS agent s0 ends = agentLoopS agent s0 ends ends
+
+-- | One frame of the bundle self-loop, expressed in the Either-trace halt
+-- alphabet: 'Left' = continue, 'Right' = quiesce and return this state.
+selfLoopFrame ::
+  AgentS s a ->
+  Ends (Kleisli STM) [a] [a] ->
+  Ends (Kleisli STM) [a] [a] ->
+  Kleisli STM (Either s s) (Either s s)
+selfLoopFrame agent inbox outbox = Kleisli $ \case
+  Right s -> step s
+  Left s -> step s
+  where
+    step s = do
+      mIns <- (Just <$> readEndSTM inbox) `orElse` pure Nothing
+      case mIns of
+        Nothing -> pure (Right s)
+        Just ins -> do
+          (s', outs) <- stepsS agent s ins
+          if null outs
+            then pure (Right s')
+            else do
+              writeEndSTM outbox outs
+              pure (Left s')
+
+-- | Wire an STM agent between an inbox and an outbox, running until
+-- quiescence, expressed as a 'Loop Either' value.
+agentLoopL ::
+  AgentS s a ->
+  Ends (Kleisli STM) [a] [a] ->
+  Ends (Kleisli STM) [a] [a] ->
+  Loop Either (Kleisli STM) s s
+agentLoopL agent inbox outbox = trace (Lift (selfLoopFrame agent inbox outbox))
+
+-- | Self-loop as a 'Loop Either' citizen.
+selfLoopL ::
+  AgentS s a ->
+  s ->
+  Ends (Kleisli STM) [a] [a] ->
+  STM s
+selfLoopL agent s0 ends = runKleisli (run (agentLoopL agent ends ends)) s0
 
 -- | Agent behaviour: a pure function from an input stream to an output stream.
 --
@@ -597,6 +819,31 @@ branchAgent :: (s -> Bool) -> Agent (->) s a b -> Agent (->) s a b -> Agent (->)
 branchAgent cond (System left) (System right) =
   System $ \(state, d) ->
     if cond state then left (state, d) else right (state, d)
+
+-- | Seat-level product / await: both agents run on the same input; states are
+-- paired; emits are concatenated left-to-right.
+awaitA ::
+  Agent (->) s1 Post [Post] ->
+  Agent (->) s2 Post [Post] ->
+  Agent (->) (s1, s2) Post [Post]
+awaitA sys1 sys2 = System $ \((s1, s2), d) ->
+  let dir = monoDir d
+      (o1, next1) = runSystem sys1 s1
+      (o2, next2) = runSystem sys2 s2
+   in ((next1 dir, next2 dir), (o1 <> o2, ()))
+
+-- | Seat-level coproduct / race: both agents run on the same input; states are
+-- paired; the left emit wins if non-empty, otherwise the right emit wins.
+raceA ::
+  Agent (->) s1 Post [Post] ->
+  Agent (->) s2 Post [Post] ->
+  Agent (->) (s1, s2) Post [Post]
+raceA sys1 sys2 = System $ \((s1, s2), d) ->
+  let dir = monoDir d
+      (o1, next1) = runSystem sys1 s1
+      (o2, next2) = runSystem sys2 s2
+      o = if null o1 then o2 else o1
+   in ((next1 dir, next2 dir), (o, ()))
 
 -- ---------------------------------------------------------------------------
 -- Agent as Shard — change of base into Kleisli Ends

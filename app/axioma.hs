@@ -18,20 +18,36 @@ import Circuit.Agent.Graph
     runGraph,
     star,
   )
+import Circuit.Agent.Tensor
+  ( awaitShard,
+    fanInShard,
+    fanOutShard,
+    raceShard,
+    silentShard,
+  )
 import Circuit.Layer (run)
-import Circuit.Poly (Eval (..), Mono, System (..), fromEvalSystem, monoDir)
+import Circuit.Poly (Dir, Eval (..), Mono, Pos, System (..), fromEvalSystem, monoDir, monoIn)
 import Circuit.Poly.Process (after, iterateSystem, runSystem)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Control.Arrow (Kleisli (..), runKleisli)
-import Control.Monad.State (State, get, gets, modify, put, runState)
+import Control.Category qualified as C
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.STM
+import Control.Exception (BlockedIndefinitelyOnSTM (..), SomeException, catch, fromException)
+import Control.Monad (unless)
+import Control.Monad.State (State, StateT, get, gets, modify, put, runState, runStateT)
+import Data.Foldable (traverse_)
+import Data.Function (fix)
 import Data.Functor.Identity (Identity (..))
-import Data.List (find, foldl', sort)
+import Data.List (find, foldl', nub, sort)
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Harpie.NumHask.Matrix (Matrix, fromLists, matPlus, starMatrix, toLists)
 import System.Exit (exitFailure)
+import System.Timeout (timeout)
 
 assert :: String -> Bool -> IO ()
 assert msg ok =
@@ -43,6 +59,11 @@ assert msg ok =
 
 mkPost :: Text -> [Text] -> Text -> Post
 mkPost = Post
+
+-- | Close a same-type shard once under 'StateT [Post] IO'.
+closeShardIO :: Shard (StateT [Post] IO) [Post] [Post] -> [Post] -> [Post] -> IO ([Post], [Post])
+closeShardIO sh x s0 =
+  runStateT (runKleisli (close (conjoint sh) (companion sh)) x) s0
 
 peek :: [Post] -> Post
 peek [] = error "verify: empty history"
@@ -82,6 +103,35 @@ runParallel :: [(Text, Agent (->) [Post] Post [Post])] -> [Post] -> [Post]
 runParallel roster lg = foldl' (flip post) lg outputs
   where
     outputs = concatMap (\(who, agent) -> beh agent [] (watch [who] lg)) roster
+
+-- | Pure 'orElse': left branch speaks unless it is silent, otherwise right.
+raceP :: ([Post] -> [Post]) -> ([Post] -> [Post]) -> ([Post] -> [Post])
+raceP f g hist =
+  let os = f hist
+   in if null os then g hist else os
+
+-- | Pure product / await: both branches speak; emits are concatenated
+-- left-to-right.
+awaitP :: ([Post] -> [Post]) -> ([Post] -> [Post]) -> ([Post] -> [Post])
+awaitP f g hist = f hist <> g hist
+
+-- | Silent policy: the zero of race and the unit of await.
+silent :: [Post] -> [Post]
+silent _ = []
+
+-- | Symmetric closure of 'raceP' outcomes under left/right bias.
+-- In the pure model this is the set of possible results; temporal race
+-- refines it by picking one element.
+outcomesRace :: ([Post] -> [Post]) -> ([Post] -> [Post]) -> [Post] -> [[Post]]
+outcomesRace f g hist = nub [raceP f g hist, raceP g f hist]
+
+-- | Agent that ignores its history and always emits the same list.
+constAgent :: [Post] -> Agent (->) [Post] Post [Post]
+constAgent outs = tape (const outs)
+
+-- | STM agent that ignores its history and always emits the same list.
+constAgentS :: [Post] -> AgentS [Post] Post
+constAgentS outs = agentM (tape (const outs))
 
 main :: IO ()
 main = do
@@ -834,6 +884,774 @@ main = do
     assert "overlay with isolated vertices is a no-op" $
       logFull == logWithIsolated
 
+  -------------------------------------------------------------------------
+  -- Self-loop: one seat wired to itself through a card.
+  --
+  -- Posts are addressed to a card ("xyzzy"), never to seats; the seat
+  -- subscribes to the card, so its own replies re-enter its inbox next
+  -- round.  The grammar marks are the termination language: 🟢/🔵 halt,
+  -- 🔴 escalates, silence is quiescence.  fork ⟜ id (AgentSeat is pure
+  -- data); fan-in lands its summary on the main stream as exactly one post.
+  -------------------------------------------------------------------------
+  putStrLn "self-loop"
+
+  -------------------------------------------------------------------------
+  -- A self-wired deterministic agent acks itself forever unless a halt mark
+  -- lands.  Here the policy echoes card posts back to the card and emits
+  -- "🟢 landed" after k rounds; silence follows the mark, so the loop
+  -- reaches quiescence with a bounded log.
+  -------------------------------------------------------------------------
+  putStrLn "self-loop halts on mark"
+  do
+    let k = 3 :: Int
+        roster = [("xyzzy", tape (selfLoopPolicy "xyzzy" k))]
+        t0 = [mkPost "human" ["xyzzy"] "start"]
+        (states, tF, derivs) = loop roster t0
+    assert "self-loop halts on mark: log is 1 seed + k replies + 1 halt" $
+      length tF == 1 + k + 1
+    assert "self-loop halts on mark: final post carries the 🟢 mark" $
+      "🟢" `T.isPrefixOf` body (peek tF)
+    assert "self-loop halts on mark: log stops growing after the halt post (silent last turn)" $
+      null (dOutputs (last derivs))
+    assert "self-loop halts on mark: quiescence reached" $
+      all (\(_n, st) -> not (hasPending st)) states
+
+  -------------------------------------------------------------------------
+  -- Silence is quiescence: with no new card-addressed posts the loop
+  -- machinery is identity on the log and records no derivations.
+  -------------------------------------------------------------------------
+  putStrLn "silence is quiescence"
+  do
+    let quietLog = [mkPost "human" ["someone-else"] "not addressed to the card"]
+        (_qStates, qLog, qDerivs) = loop [("xyzzy", tape (reply "xyzzy"))] quietLog
+    assert "silence is quiescence: loop with no card posts is identity on the log" $
+      qLog == quietLog
+    assert "silence is quiescence: no derivations" $
+      null qDerivs
+
+  -------------------------------------------------------------------------
+  -- fork ⟜ id: AgentSeat is pure data, so forking is copying the value.
+  -- Running both copies gives identical outputs and identical seats.
+  -------------------------------------------------------------------------
+  putStrLn "fork is id"
+  do
+    let agent = tape (reply "xyzzy") :: Agent (->) [Post] Post [Post]
+        p1 = mkPost "human" ["xyzzy"] "one"
+        p2 = mkPost "human" ["xyzzy"] "two"
+        (_outs0, seat0) = runAgentShard agent (AgentSeat [] []) [p1]
+        forked = seat0
+        (outsA, seatA) = runAgentShard agent seat0 [p2]
+        (outsB, seatB) = runAgentShard agent forked [p2]
+    assert "fork is id: duplicated seat gives identical outputs" $
+      outsA == outsB
+    assert "fork is id: duplicated seat gives identical resulting seats" $
+      seatA == seatB
+    assert "fork is id: carrier advanced on both copies" $
+      length (asState seatA) == 2
+
+  -------------------------------------------------------------------------
+  -- fan-out / fan-in: run prompt[i] through fork i, fold the fork outputs
+  -- with a pure summary into ONE card-addressed post, commit it to the main
+  -- seat.  Forks are private scratch and die; only the fan-in is public.
+  -------------------------------------------------------------------------
+  putStrLn "fan-in lands exactly one post"
+  do
+    let worker = tape (reply "xyzzy") :: Agent (->) [Post] Post [Post]
+        main0 = AgentSeat [] [] :: AgentSeat [Post]
+        prompt1 = mkPost "human" ["xyzzy"] "task one"
+        prompt2 = mkPost "human" ["xyzzy"] "task two"
+        (outs1, fork1) = runAgentShard worker main0 [prompt1]
+        (outs2, fork2) = runAgentShard worker main0 [prompt2]
+        snap1 = fork1
+        snap2 = fork2
+        summaryPosts =
+          [ mkPost
+              "xyzzy"
+              ["xyzzy"]
+              ("summary: " <> T.intercalate " + " (map body (outs1 ++ outs2)))
+          ]
+        (mainOuts, main1) = runAgentShard worker main0 summaryPosts
+    assert "fan-in: the summary is exactly one post" $
+      length summaryPosts == 1
+    assert "fan-in lands exactly one post: main carrier grew by exactly 1" $
+      length (asState main1) == length (asState main0) + 1
+    assert "fan-in lands exactly one post: main seat outputs respond to the summary only" $
+      length mainOuts == 1 && "ack: summary:" `T.isPrefixOf` body (peek mainOuts)
+    assert "fan-in lands exactly one post: forks unchanged by the main-seat commit" $
+      fork1 == snap1 && fork2 == snap2
+    assert "fan-in lands exactly one post: each fork saw only its own prompt" $
+      map body (asState fork1) == ["task one"]
+        && map body (asState fork2) == ["task two"]
+
+  -------------------------------------------------------------------------
+  -- Neutral grammar: two seats on the same card, names carry no role.
+  -- 'loop' subscribes each seat to its own name, so both seats are
+  -- hand-scheduled with ["xyzzy"] subscriptions (as in "multi-round
+  -- pure").  Swapping seat names in the schedule permutes the `from`
+  -- fields and leaves the bodies untouched.
+  -------------------------------------------------------------------------
+  putStrLn "neutral grammar: seat-name swap"
+  do
+    let seed = mkPost "human" ["xyzzy"] "start"
+        t0 = [seed]
+        agentA = tape (cardEcho "a") :: Agent (->) [Post] Post [Post]
+        agentB = tape (cardEcho "b") :: Agent (->) [Post] Post [Post]
+        -- one round: first seat turns, new card posts route to both inboxes
+        -- (self-loop: its own reply re-enters), then the second seat turns.
+        mkRound first second (stF, stS, lg) =
+          let (stF', lg1, _) = turn first stF lg
+              stS' = feedState (diffLog lg lg1) stS
+              stF'' = feedState (diffLog lg lg1) stF'
+              (stS'', lg2, _) = turn second stS' lg1
+              stF3 = feedState (diffLog lg1 lg2) stF''
+              stS3 = feedState (diffLog lg1 lg2) stS''
+           in (stF3, stS3, lg2)
+        pending (stF, stS, _) = hasPending stF || hasPending stS
+        settle round0 s0 = head (dropWhile pending (iterate round0 s0))
+        states0 = (seedState ["xyzzy"] t0, seedState ["xyzzy"] t0, t0)
+        (_, _, lgAB) = settle (mkRound agentA agentB) states0
+        (_, _, lgBA) = settle (mkRound agentB agentA) states0
+        swapName n
+          | n == "a" = "b"
+          | n == "b" = "a"
+          | otherwise = n
+    assert "seat-name swap: bounded log (1 seed + one halt reply each)" $
+      length lgAB == 3 && length lgBA == 3
+    assert "seat-name swap: same bodies in same order" $
+      map body lgAB == map body lgBA
+    assert "seat-name swap: from fields are exactly swapped" $
+      map (swapName . from) lgAB == map from lgBA
+
+  -------------------------------------------------------------------------
+  -- Race / await tensors
+  --
+  -- raceP  = pure orElse: left branch speaks unless silent, otherwise right.
+  -- awaitP = product collapse: both branches speak, emits concatenated.
+  -- silence [] is the zero of race and the unit of await.
+  -------------------------------------------------------------------------
+  putStrLn "race await tensors"
+
+  -------------------------------------------------------------------------
+  -- R0: race = orElse with silence as zero
+  -------------------------------------------------------------------------
+  putStrLn "race is orElse with silence as zero"
+  do
+    let f :: [Post] -> [Post]
+        f = const [mkPost "f" [] "f"]
+        g :: [Post] -> [Post]
+        g = const [mkPost "g" [] "g"]
+        h :: [Post] -> [Post]
+        h = const [mkPost "h" [] "h"]
+    assert "race: silent is left identity" $ raceP silent f [] == f []
+    assert "race: silent is right identity" $ raceP f silent [] == f []
+    assert "race: associativity of bias" $ raceP (raceP f g) h [] == raceP f (raceP g h) []
+    assert "race: left bias (left speaks)" $ raceP f g [] == f []
+    assert "race: fallback to right when left silent" $ raceP silent g [] == g []
+    assert "race: both silent is silent" $ null (raceP silent silent [])
+
+  -------------------------------------------------------------------------
+  -- R1: await = product with silence as unit
+  -------------------------------------------------------------------------
+  putStrLn "await is product with silence as unit"
+  do
+    let f :: [Post] -> [Post]
+        f = const [mkPost "f" [] "f"]
+        g :: [Post] -> [Post]
+        g = const [mkPost "g" [] "g"]
+        h :: [Post] -> [Post]
+        h = const [mkPost "h" [] "h"]
+    assert "await: silent is left unit" $ awaitP silent f [] == f []
+    assert "await: silent is right unit" $ awaitP f silent [] == f []
+    assert "await: associativity" $ awaitP (awaitP f g) h [] == awaitP f (awaitP g h) []
+    assert "await: order is observable (not a bag)" $ awaitP f g [] /= awaitP g f []
+
+  -------------------------------------------------------------------------
+  -- R2: race takes the whole winning branch emit
+  -------------------------------------------------------------------------
+  putStrLn "race takes the whole winning branch emit"
+  do
+    let f2 :: [Post] -> [Post]
+        f2 = const [mkPost "f" [] "f1", mkPost "f" [] "f2"]
+        g1 :: [Post] -> [Post]
+        g1 = const [mkPost "g" [] "g"]
+    assert "race: left branch whole emit wins" $ raceP f2 g1 [] == f2 []
+    assert "race: not just the first post of concat" $ raceP f2 g1 [] /= take 1 (f2 [] ++ g1 [])
+
+  -------------------------------------------------------------------------
+  -- R3: exchange probe
+  --
+  -- Pure race outcomes are the symmetric closure under left/right bias.
+  -- Correlated choice (race of awaits) yields fewer outcomes than
+  -- independent choice (await of races): the mixed pairs are reachable only
+  -- when each side may decide independently.
+  -------------------------------------------------------------------------
+  putStrLn "exchange probe"
+  do
+    let a :: [Post] -> [Post]
+        a = const [mkPost "a" [] "a"]
+        b :: [Post] -> [Post]
+        b = const [mkPost "b" [] "b"]
+        c :: [Post] -> [Post]
+        c = const [mkPost "c" [] "c"]
+        d :: [Post] -> [Post]
+        d = const [mkPost "d" [] "d"]
+        leftHand = outcomesRace (awaitP a c) (awaitP b d) []
+        rightHand = [x <> y | x <- outcomesRace a b [], y <- outcomesRace c d []]
+        isSubset xs ys = all (`elem` ys) xs
+    assert "exchange: correlated outcomes are a subset of independent outcomes" $
+      isSubset leftHand rightHand
+    assert "exchange: mixed outcome a+d exists only in independent choice" $
+      [mkPost "a" [] "a", mkPost "d" [] "d"] `elem` rightHand
+        && [mkPost "a" [] "a", mkPost "d" [] "d"] `notElem` leftHand
+
+  -------------------------------------------------------------------------
+  -- Seat-level tensors
+  -------------------------------------------------------------------------
+  putStrLn "seat-level tensors"
+
+  putStrLn "awaitA is product with silent unit"
+  do
+    let p = mkPost "test" [] "p"
+        a = constAgent [p]
+        z = constAgent []
+        ins = [mkPost "human" [] "one"]
+        (outsAZ, _) = runAgentShard (awaitA a z) (AgentSeat ([], []) []) ins
+        (outsZA, _) = runAgentShard (awaitA z a) (AgentSeat ([], []) []) ins
+        (outsA, _) = runAgentShard a (AgentSeat [] []) ins
+    assert "awaitA: silent agent is right unit (outputs)" $ outsAZ == outsA
+    assert "awaitA: silent agent is left unit (outputs)" $ outsZA == outsA
+
+  putStrLn "awaitA associativity"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        r = mkPost "test" [] "r"
+        a = constAgent [p]
+        b = constAgent [q]
+        c = constAgent [r]
+        ins = [mkPost "human" [] "one", mkPost "human" [] "two"]
+        left = awaitA (awaitA a b) c
+        right = awaitA a (awaitA b c)
+        (outsL, _) = runAgentShard left (AgentSeat (([], []), []) []) ins
+        (outsR, _) = runAgentShard right (AgentSeat ([], ([], [])) []) ins
+    assert "awaitA: associativity of outputs" $ outsL == outsR
+
+  putStrLn "raceA is coproduct with silent unit / left bias"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        a = constAgent [p]
+        b = constAgent [q]
+        z = constAgent []
+        ins = [mkPost "human" [] "one"]
+        (outsAB, _) = runAgentShard (raceA a b) (AgentSeat ([], []) []) ins
+        (outsAZ, _) = runAgentShard (raceA a z) (AgentSeat ([], []) []) ins
+        (outsZA, _) = runAgentShard (raceA z a) (AgentSeat ([], []) []) ins
+    assert "raceA: left bias (left speaks)" $ outsAB == [p]
+    assert "raceA: silent right unit" $ outsAZ == [p]
+    assert "raceA: silent left falls back to right" $ outsZA == [p]
+
+  putStrLn "raceA associativity"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        r = mkPost "test" [] "r"
+        a = constAgent [p]
+        b = constAgent [q]
+        c = constAgent [r]
+        ins = [mkPost "human" [] "one", mkPost "human" [] "two"]
+        left = raceA (raceA a b) c
+        right = raceA a (raceA b c)
+        (outsL, _) = runAgentShard left (AgentSeat (([], []), []) []) ins
+        (outsR, _) = runAgentShard right (AgentSeat ([], ([], [])) []) ins
+    assert "raceA: associativity of outputs" $ outsL == outsR
+
+  putStrLn "seat-level race agrees with policy-level race"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        f = const [p] :: [Post] -> [Post]
+        g = const [q] :: [Post] -> [Post]
+        a = constAgent [p]
+        b = constAgent [q]
+        ins = [mkPost "human" [] "one", mkPost "human" [] "two"]
+        (outsA, _) = runAgentShard (raceA a b) (AgentSeat ([], []) []) ins
+    assert "raceA outputs match raceP per input" $
+      outsA == concat (replicate (length ins) (raceP f g []))
+
+  -------------------------------------------------------------------------
+  -- STM rung
+  --
+  -- retry = silence (await), orElse = left-biased race,
+  -- BlockedIndefinitelyOnSTM = dormancy of the whole meeting.
+  -------------------------------------------------------------------------
+  putStrLn "stm rung"
+
+  putStrLn "retry is silence"
+  do
+    q <- newTQueueIO
+    -- An empty queue makes 'readTQueue' retry; timeout observes the block.
+    blocked <- timeout 100000 (atomically (readTQueue q))
+    assert "retry: empty commit blocks" $ blocked == Nothing
+    -- Once a writer fills the queue, the retry resumes.
+    let p = mkPost "stm" [] "hello"
+    _ <- forkIO $ do
+      threadDelay 100000
+      atomically (writeTQueue q p)
+    resumed <- timeout 500000 (atomically (readTQueue q))
+    assert "retry: resumes after commit" $ fmap body resumed == Just "hello"
+    -- Extensional equivalence: a retrying emit with an orElse fallback []
+    -- equals the silent agent on an empty commit.
+    commitVar <- newTVarIO ([] :: [Post])
+    let stmEmit :: STM [Post]
+        stmEmit =
+          readTVar commitVar >>= \case
+            [] -> retry
+            xs -> writeTVar commitVar [] >> pure xs
+    silentFallback <- atomically (stmEmit `orElse` pure [])
+    assert "retry: extensionally silent on empty commit" $ null silentFallback
+    atomically (writeTVar commitVar [p])
+    nonEmptyEmit <- atomically stmEmit
+    assert "retry: emits when commit is non-empty" $ nonEmptyEmit == [p]
+
+  putStrLn "orElse is lawful race"
+  do
+    leftFlag <- newTVarIO True
+    rightFlag <- newTVarIO False
+    let leftPost = mkPost "l" [] "left"
+        rightPost = mkPost "r" [] "right"
+        branch flag branchPost = do
+          ok <- readTVar flag
+          if ok then pure [branchPost] else retry
+        raceSTM = branch leftFlag leftPost `orElse` branch rightFlag rightPost
+    resA <- atomically raceSTM
+    assert "orElse: left wins when only left ready" $ resA == [leftPost]
+    atomically $ do
+      writeTVar leftFlag False
+      writeTVar rightFlag True
+    resB <- atomically raceSTM
+    assert "orElse: falls back to right when left retries" $ resB == [rightPost]
+    atomically (writeTVar leftFlag True)
+    resC <- atomically raceSTM
+    assert "orElse: left bias when both ready" $ resC == [leftPost]
+
+  putStrLn "dormancy is BlockedIndefinitelyOnSTM"
+  do
+    let isDormant =
+          catch
+            (atomically (retry `orElse` retry) >> pure False)
+            (\e -> pure (isJust (fromException @BlockedIndefinitelyOnSTM e)))
+    dormant <- isDormant
+    assert "dormancy: all-retry raises BlockedIndefinitelyOnSTM" dormant
+
+  -------------------------------------------------------------------------
+  -- Kleisli STM tensors
+  --
+  -- The same product/coproduct tensors, now effectful: state lives in STM,
+  -- composition is Kleisli sequential, and the oracles mirror the pure
+  -- seat-level ones.
+  -------------------------------------------------------------------------
+  putStrLn "S-agent tensors"
+
+  putStrLn "awaitS is product with silent unit"
+  do
+    let p = mkPost "test" [] "p"
+        a = constAgentS [p]
+        z = constAgentS []
+        ins = [mkPost "human" [] "one"]
+    (outsAZ, _) <- runAgentS (awaitS a z) ([], []) ins
+    (outsZA, _) <- runAgentS (awaitS z a) ([], []) ins
+    (outsA, _) <- runAgentS a [] ins
+    assert "awaitS: silent agent is right unit (outputs)" $ outsAZ == outsA
+    assert "awaitS: silent agent is left unit (outputs)" $ outsZA == outsA
+
+  putStrLn "awaitS associativity"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        r = mkPost "test" [] "r"
+        a = constAgentS [p]
+        b = constAgentS [q]
+        c = constAgentS [r]
+        ins = [mkPost "human" [] "one", mkPost "human" [] "two"]
+        left = awaitS (awaitS a b) c
+        right = awaitS a (awaitS b c)
+    (outsL, _) <- runAgentS left (([], []), []) ins
+    (outsR, _) <- runAgentS right ([], ([], [])) ins
+    assert "awaitS: associativity of outputs" $ outsL == outsR
+
+  putStrLn "raceS is coproduct with silent unit / left bias"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        a = constAgentS [p]
+        b = constAgentS [q]
+        z = constAgentS []
+        ins = [mkPost "human" [] "one"]
+    (outsAB, _) <- runAgentS (raceS a b) ([], []) ins
+    (outsAZ, _) <- runAgentS (raceS a z) ([], []) ins
+    (outsZA, _) <- runAgentS (raceS z a) ([], []) ins
+    assert "raceS: left bias (left speaks)" $ outsAB == [p]
+    assert "raceS: silent right unit" $ outsAZ == [p]
+    assert "raceS: silent left falls back to right" $ outsZA == [p]
+
+  putStrLn "raceS associativity"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        r = mkPost "test" [] "r"
+        a = constAgentS [p]
+        b = constAgentS [q]
+        c = constAgentS [r]
+        ins = [mkPost "human" [] "one", mkPost "human" [] "two"]
+        left = raceS (raceS a b) c
+        right = raceS a (raceS b c)
+    (outsL, _) <- runAgentS left (([], []), []) ins
+    (outsR, _) <- runAgentS right ([], ([], [])) ins
+    assert "raceS: associativity of outputs" $ outsL == outsR
+
+  putStrLn "S-agent race agrees with pure seat-level race"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        aPure = constAgent [p]
+        bPure = constAgent [q]
+        aSTM = constAgentS [p]
+        bSTM = constAgentS [q]
+        ins = [mkPost "human" [] "one", mkPost "human" [] "two"]
+        (outsPure, _) = runAgentShard (raceA aPure bPure) (AgentSeat ([], []) []) ins
+    (outsSTM, _) <- runAgentS (raceS aSTM bSTM) ([], []) ins
+    assert "raceS outputs match raceA outputs" $ outsSTM == outsPure
+
+  -------------------------------------------------------------------------
+  -- X-agent temporal race: first mark wins, losers cancelled
+  -------------------------------------------------------------------------
+  putStrLn "X-agent temporal race"
+
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        seed = mkPost "human" [] "one"
+        fastLeft = System $ Kleisli $ \(_, _) -> pure ((), ([p], ()))
+        slowRight = System $ Kleisli $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
+    (outs, _) <- runAgentM (raceIO fastLeft slowRight) ((), ()) seed
+    assert "raceIO: fast left wins" $ outs == [p]
+
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        seed = mkPost "human" [] "one"
+        slowLeft = System $ Kleisli $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
+        fastRight = System $ Kleisli $ \(_, _) -> pure ((), ([q], ()))
+    (outs, _) <- runAgentM (raceIO slowLeft fastRight) ((), ()) seed
+    assert "raceIO: fast right wins" $ outs == [q]
+
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        seed = mkPost "human" [] "one"
+        fastLeft = System $ Kleisli $ \(_, _) -> pure ((), ([p], ()))
+        fastRight = System $ Kleisli $ \(_, _) -> pure ((), ([q], ()))
+    (outs, _) <- runAgentM (raceIO fastLeft fastRight) ((), ()) seed
+    assert "raceIO: both emit -> one of them" $ outs == [p] || outs == [q]
+
+  -------------------------------------------------------------------------
+  -- Container dial: within-turn order is not observable (Bag / Seq)
+  -------------------------------------------------------------------------
+  putStrLn "Container dial"
+
+  do
+    let a = mkPost "alice" [] "a"
+        b = mkPost "bob" [] "b"
+        c = mkPost "carol" [] "c"
+        outPost x = x {body = "out:" <> body x}
+        sh = shard (\xs -> put xs) (do xs <- get; put []; pure (map outPost xs))
+        runBag sh' ins = do
+          (outs, _) <- closeShardIO sh' ins []
+          pure (toBag outs)
+    bag1 <- runBag sh [a, b, c]
+    bag2 <- runBag sh [c, a, b]
+    assert "permuting input preserves output bag" $ bag1 == bag2
+
+  -------------------------------------------------------------------------
+  -- S-agent self-loop: quiescence via orElse
+  --
+  -- The agent reads from and writes to the same STM end.  When the end is
+  -- empty the loop retries; 'orElse' catches the retry and returns the state.
+  -------------------------------------------------------------------------
+  putStrLn "S-agent self-loop"
+
+  do
+    let k = 3 :: Int
+        selfEcho :: AgentS [Post] Post
+        selfEcho = agentM $ tape $ \hist ->
+          if length hist >= k
+            then []
+            else [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1)))]
+        seed = mkPost "human" ["self"] "start"
+        drainEnd ends = go []
+          where
+            go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
+    ends <- atomically $ openSTM Unbounded
+    atomically $ writeEndSTM ends seed
+    (sFinal, remaining) <- atomically $ do
+      s' <- selfLoopS selfEcho [] ends
+      leftover <- drainEnd ends
+      pure (s', leftover)
+    assert "self-loop processed seed plus k echoes" $ length sFinal == k + 1
+    assert "self-loop reached quiescence" $ null remaining
+    assert "self-loop state carries echoes newest-first" $
+      case sFinal of
+        (lastEcho : _) -> body lastEcho == "echo:3"
+        _ -> False
+
+  -------------------------------------------------------------------------
+  -- Spikes: re-spellings of the self-loop frame
+  --
+  -- Spike A (composition): the frame as Kleisli composition; the loop is
+  -- 'fix' plus 'orElse'.  No do-notation or bind in the frame itself.
+  --
+  -- Spike B (bundles): the same composition, but the wire carries @[a]@;
+  -- the agent folds a whole bundle per frame ('stepsS').  Empty bundles
+  -- are not written — an empty bundle on the wire would circulate forever.
+  -------------------------------------------------------------------------
+  putStrLn "S-agent self-loop spikes"
+
+  do
+    let k = 3 :: Int
+        selfEcho :: AgentS [Post] Post
+        selfEcho = agentM $ tape $ \hist ->
+          if length hist >= k
+            then []
+            else [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1)))]
+        seed = mkPost "human" ["self"] "start"
+        drainEnd :: Ends (Kleisli STM) a a -> STM [a]
+        drainEnd ends = go []
+          where
+            go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
+
+        -- | orElse lifted to state-threading Kleisli arrows.
+        orElseA :: Kleisli STM s s -> Kleisli STM s s -> Kleisli STM s s
+        orElseA (Kleisli f) (Kleisli g) = Kleisli $ \s -> f s `orElse` g s
+
+        -- | Run a frame until the read end retries (quiescence).
+        quiesce :: Kleisli STM s s -> Kleisli STM s s
+        quiesce frame = fix $ \go -> (frame C.>>> go) `orElseA` C.id
+
+        -- | Spike A: one token per frame, no do/bind in the frame.
+        frameToken :: AgentS s a -> Ends (Kleisli STM) a a -> Ends (Kleisli STM) a a -> Kleisli STM s s
+        frameToken agent inbox outbox =
+          Kleisli (\s -> (s,) <$> readEndSTM inbox)
+            C.>>> Kleisli (uncurry (stepS agent))
+            C.>>> Kleisli (\(s', outs) -> s' <$ traverse_ (writeEndSTM outbox) outs)
+
+        -- | Spike B: one bundle per frame over a bundle wire.
+        frameBundle :: AgentS s a -> Ends (Kleisli STM) [a] [a] -> Ends (Kleisli STM) [a] [a] -> Kleisli STM s s
+        frameBundle agent inbox outbox =
+          Kleisli (\s -> (s,) <$> readEndSTM inbox)
+            C.>>> Kleisli (uncurry (stepsS agent))
+            C.>>> Kleisli (\(s', outs) -> s' <$ unless (null outs) (writeEndSTM outbox outs))
+
+    -- Spike A: composed token frame
+    (sTok, remTok) <- do
+      ends <- atomically $ openSTM (Unbounded :: Queue Post)
+      atomically $ writeEndSTM ends seed
+      atomically $ do
+        s' <- runKleisli (quiesce (frameToken selfEcho ends ends)) []
+        leftover <- drainEnd ends
+        pure (s', leftover)
+    assert "spike A (composed token frame) processed seed plus k echoes" $ length sTok == k + 1
+    assert "spike A reached quiescence" $ null remTok
+    assert "spike A state carries echoes newest-first" $
+      case sTok of
+        (lastEcho : _) -> body lastEcho == "echo:3"
+        _ -> False
+
+    -- Spike B: composed bundle frame
+    (sBun, remBun) <- do
+      ends <- atomically $ openSTM (Unbounded :: Queue [Post])
+      atomically $ writeEndSTM ends [seed]
+      atomically $ do
+        s' <- runKleisli (quiesce (frameBundle selfEcho ends ends)) []
+        leftover <- drainEnd ends
+        pure (s', leftover)
+    assert "spike B (bundle frame) processed seed plus k echoes" $ length sBun == k + 1
+    assert "spike B reached quiescence" $ null remBun
+    assert "spike B state carries echoes newest-first" $
+      case sBun of
+        (lastEcho : _) -> body lastEcho == "echo:3"
+        _ -> False
+
+    -- Agreement with the bind-spelled selfLoopS
+    sRef <- do
+      ends <- atomically $ openSTM (Unbounded :: Queue Post)
+      atomically $ writeEndSTM ends seed
+      atomically $ selfLoopS selfEcho [] ends
+    assert "spike A agrees with selfLoopS" $ sTok == sRef
+    assert "spike B agrees with selfLoopS" $ sBun == sRef
+    assert "spikes agree with each other" $ sTok == sBun
+
+  -------------------------------------------------------------------------
+  -- Loop self-loop: the queue self-loop as a Loop Either citizen
+  -------------------------------------------------------------------------
+  putStrLn "Loop self-loop"
+
+  do
+    let k = 3 :: Int
+        selfEcho :: AgentS [Post] Post
+        selfEcho = agentM $ tape $ \hist ->
+          if length hist >= k
+            then []
+            else [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1)))]
+        seed = mkPost "human" ["self"] "start"
+        drainEnd :: Ends (Kleisli STM) a a -> STM [a]
+        drainEnd ends = go []
+          where
+            go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
+
+    -- Loop version: bundle wire, Either-trace iteration
+    endsL <- atomically $ openSTM (Unbounded :: Queue [Post])
+    atomically $ writeEndSTM endsL [seed]
+    (sLoop, remainingL) <- atomically $ do
+      s' <- selfLoopL selfEcho [] endsL
+      leftover <- drainEnd endsL
+      pure (s', leftover)
+
+    assert "Loop self-loop processed seed plus k echoes" $ length sLoop == k + 1
+    assert "Loop self-loop reached quiescence" $ null remainingL
+    assert "Loop self-loop state carries echoes newest-first" $
+      case sLoop of
+        (lastEcho : _) -> body lastEcho == "echo:3"
+        _ -> False
+
+    -- Reference run with the bind-spelled token self-loop
+    sRef <- do
+      endsRef <- atomically $ openSTM (Unbounded :: Queue Post)
+      atomically $ writeEndSTM endsRef seed
+      atomically $ selfLoopS selfEcho [] endsRef
+    assert "Loop self-loop agrees with selfLoopS" $ sLoop == sRef
+
+  -------------------------------------------------------------------------
+  -- Shard-level tensors (StateT [Post] IO)
+  --
+  -- These are the semantic citizens that free-agent 'FreeSeat' terms fold
+  -- into.  Laws are tested directly on shards, independent of any free syntax.
+  -------------------------------------------------------------------------
+  let constShard outs =
+        shard
+          (\xs -> put xs)
+          (put [] >> pure outs)
+      tagShard suffix =
+        shard
+          (\xs -> put xs)
+          ( do
+              xs <- get
+              put []
+              pure [x {body = body x <> suffix} | x <- xs]
+          )
+
+  putStrLn "shard-level tensors"
+
+  putStrLn "silent shard"
+  do
+    let posts = [mkPost "human" ["bot"] "x"]
+    (outs, st) <- closeShardIO silentShard posts []
+    assert "silent shard emits empty" $ null outs
+    assert "silent shard clears buffer" $ null st
+
+  putStrLn "awaitShard is product with silent unit"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        a = constShard [p]
+        b = constShard [q]
+        z = silentShard
+        posts = [mkPost "human" [] "one"]
+    (outsAZ, _) <- closeShardIO (awaitShard z a) posts []
+    (outsZA, _) <- closeShardIO (awaitShard a z) posts []
+    (outsA, _) <- closeShardIO a posts []
+    (outsAB, _) <- closeShardIO (awaitShard a b) posts []
+    assert "awaitShard: silent is right unit" $ outsAZ == outsA
+    assert "awaitShard: silent is left unit" $ outsZA == outsA
+    assert "awaitShard: both branches speak" $ outsAB == [p, q]
+
+  putStrLn "awaitShard associativity"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        r = mkPost "test" [] "r"
+        a = constShard [p]
+        b = constShard [q]
+        c = constShard [r]
+        posts = [mkPost "human" [] "one"]
+        left = awaitShard (awaitShard a b) c
+        right = awaitShard a (awaitShard b c)
+    (outsL, _) <- closeShardIO left posts []
+    (outsR, _) <- closeShardIO right posts []
+    assert "awaitShard associative" $ outsL == outsR
+
+  putStrLn "raceShard is coproduct with silent unit / left bias"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        a = constShard [p]
+        b = constShard [q]
+        z = silentShard
+        posts = [mkPost "human" [] "one"]
+    (outsAB, _) <- closeShardIO (raceShard a b) posts []
+    (outsAZ, _) <- closeShardIO (raceShard a z) posts []
+    (outsZA, _) <- closeShardIO (raceShard z a) posts []
+    assert "raceShard: left bias" $ outsAB == [p]
+    assert "raceShard: silent right unit" $ outsAZ == [p]
+    assert "raceShard: silent left falls back" $ outsZA == [p]
+
+  putStrLn "raceShard associativity"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        r = mkPost "test" [] "r"
+        a = constShard [p]
+        b = constShard [q]
+        c = constShard [r]
+        posts = [mkPost "human" [] "one"]
+        left = raceShard (raceShard a b) c
+        right = raceShard a (raceShard b c)
+    (outsL, _) <- closeShardIO left posts []
+    (outsR, _) <- closeShardIO right posts []
+    assert "raceShard associative" $ outsL == outsR
+
+  putStrLn "raceShard agrees with seat-level raceA"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        posts = [mkPost "human" [] "one"]
+        (outsAgent, _) =
+          runAgentShard
+            (raceA (tape (const [p])) (tape (const [q])))
+            (AgentSeat ([], []) [])
+            posts
+    (outsShard, _) <- closeShardIO (raceShard (constShard [p]) (constShard [q])) posts []
+    assert "raceShard outputs match raceA outputs" $ outsShard == outsAgent
+
+  putStrLn "fanOutShard runs branches on copies"
+  do
+    let p = mkPost "test" [] "p"
+        q = mkPost "test" [] "q"
+        posts = [mkPost "human" [] "one"]
+    (outs, _) <- closeShardIO (fanOutShard [constShard [p], constShard [q]]) posts []
+    assert "fanOutShard: both branches see input" $ outs == [p, q]
+
+  putStrLn "fanInShard summarizes branch outputs"
+  do
+    let posts = [mkPost "human" [] "one"]
+        summary pss = [mkPost "sum" [] (T.intercalate "+" (map body (concat pss)))]
+    (outs, _) <- closeShardIO (fanInShard summary [tagShard "-a", tagShard "-b"]) posts []
+    assert "fanInShard: summary is one post" $ length outs == 1
+    assert "fanInShard: summary body collects branches" $
+      case outs of
+        [o] -> body o == "one-a+one-b"
+        _ -> False
+
   putStrLn "All tests passed"
   where
     -- \| Generic behaviour for Tier A agents (output lists are concatenated).
@@ -877,3 +1695,24 @@ main = do
               [from p]
               (T.pack (show (sum [read (T.unpack w) :: Int | w <- T.words (body p)])))
           ]
+
+    -- \| Self-loop policy: echo card posts back to the same card; after k
+    -- rounds emit the halt mark; silence once the mark is on the card.
+    selfLoopPolicy :: Text -> Int -> [Post] -> [Post]
+    selfLoopPolicy name k hist =
+      let p = peek hist
+       in if "🟢" `T.isPrefixOf` body p
+            then []
+            else
+              if length hist > k
+                then [mkPost name ["xyzzy"] "🟢 landed"]
+                else [mkPost name ["xyzzy"] ("echo: " <> body p)]
+
+    -- \| Neutral card policy: answer human posts once with a halt-marked
+    -- echo back to the card; silence on anything else (including the marks).
+    cardEcho :: Text -> [Post] -> [Post]
+    cardEcho name hist =
+      let p = peek hist
+       in if from p == "human"
+            then [mkPost name ["xyzzy"] ("🟢 echo: " <> body p)]
+            else []
