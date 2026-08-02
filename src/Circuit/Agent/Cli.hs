@@ -25,15 +25,17 @@ module Circuit.Agent.Cli
 
     -- * Shard adapters
     queryShard,
+    synthShard,
     cliShard,
     echoShard,
     runShardIO,
     sessionPrompt,
     replyPosts,
+    synthesisPosts,
   )
 where
 
-import Circuit.Agent (Ends (..), Post (..), Shard, close, replyTo, shard)
+import Circuit.Agent (Ends (..), Post (..), Shard, close, replyTo, shard, sortNub, synthesis)
 import Control.Arrow (runKleisli)
 import Control.Exception (SomeException, try)
 import Control.Monad (when)
@@ -323,12 +325,42 @@ replyPosts who ins reply =
     (Nothing, _) -> []
     (Just lastIn, r) -> [replyTo who lastIn r]
 
+-- | Build one synthesis post from a cleaned agent response.
+--
+-- The honest twin of 'replyPosts' for seats that fold /every/ input into
+-- their answer: ancestry cites every input's sender (see 'synthesis'),
+-- and the audience is every input's sender and wire name, minus self.
+-- Empty reply or no inputs → no posts (quiet).
+synthesisPosts :: Text -> [Post Text] -> Text -> [Post Text]
+synthesisPosts who ins reply =
+  case (ins, T.strip reply) of
+    (_, r) | T.null r -> []
+    ([], _) -> []
+    (_, r) ->
+      let audience = filter (/= who) (sortNub (concatMap (\p -> from p : to p) ins))
+       in [synthesis who audience ins r]
+
 -- | Opaque evaluate seat: any @Text -> IO Text@ behind list ends.
 --
 -- Commit assembles a session prompt from the input posts; emit is
 -- 'replyPosts' of the query result (empty = quiet).
 queryShard :: Text -> (Text -> IO Text) -> IO (Shard IO [Post Text] [Post Text])
-queryShard who query = do
+queryShard = queryShardWith replyPosts
+
+-- | Opaque synthesis seat: like 'queryShard', but the emit cites every
+-- input's sender as ancestry ('synthesisPosts').  For seats that fold the
+-- whole input into one answer — the honest-provenance twin of
+-- 'queryShard'.
+synthShard :: Text -> (Text -> IO Text) -> IO (Shard IO [Post Text] [Post Text])
+synthShard = queryShardWith synthesisPosts
+
+-- | 'queryShard' parameterised on the reply-to-posts builder.
+queryShardWith ::
+  (Text -> [Post Text] -> Text -> [Post Text]) ->
+  Text ->
+  (Text -> IO Text) ->
+  IO (Shard IO [Post Text] [Post Text])
+queryShardWith posts who query = do
   outbox <- newIORef []
   pure $
     shard
@@ -337,7 +369,7 @@ queryShard who query = do
             then writeIORef outbox []
             else do
               reply <- query (sessionPrompt ins)
-              writeIORef outbox (replyPosts who ins reply)
+              writeIORef outbox (posts who ins reply)
       )
       (atomicModifyIORef' outbox ([],))
 

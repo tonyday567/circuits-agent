@@ -28,6 +28,7 @@ import Circuit.Agent.Tensor
     fanOutShard,
     raceShard,
     silentShard,
+    synthesisSummary,
   )
 import Circuit.Layer (run)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos, System (..), fromEvalSystem, monoDir, monoIn)
@@ -1656,6 +1657,21 @@ main = do
       case outs of
         [o] -> body o == "one-a+one-b"
         _ -> False
+
+  putStrLn "fanInShard with synthesisSummary is honest by construction"
+  do
+    let posts = [mkPost "human" [] "one"]
+        branchA = constShard [mkPost "a" [] "x"]
+        branchB = constShard [mkPost "b" [] "y"]
+        summary = synthesisSummary "sum" ["human"] (T.intercalate "+" . map body . concat)
+    (outs, _) <- closeShardIO (fanInShard summary [branchA, branchB]) posts []
+    assert "honest fan-in: one synthesis post" $ length outs == 1
+    assert "honest fan-in: ancestry cites every branch sender" $
+      case outs of
+        [o] -> thread o == ["a", "b"] && body o == "x+y"
+        _ -> False
+    assert "honest fan-in: empty body is quiet" $
+      null (synthesisSummary "sum" [] (const "") [[mkPost "a" [] "x"]])
 
   putStrLn "All tests passed"
   where

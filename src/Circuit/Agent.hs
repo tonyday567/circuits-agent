@@ -51,7 +51,9 @@ module Circuit.Agent
     mkPost,
     replyTo,
     synthesis,
+    sortNub,
     branches,
+    cone,
     Log,
     emptyLog,
     Name,
@@ -264,7 +266,8 @@ synthesis who audience ps b =
       body = b
     }
 
--- | Sorted, duplicate-free.
+-- | Sorted, duplicate-free.  The normalised-set primitive of the thread
+-- design: parent sets, audiences, and cones are all kept in this form.
 sortNub :: (Ord a) => [a] -> [a]
 sortNub = nub . sort
 
@@ -287,6 +290,16 @@ branches prior p0 = go prior p0
       case find ((== n) . from) (reverse pre) of
         Nothing -> [[from p, n]]
         Just q -> map (from p :) (go (takeWhile (/= q) pre) q)
+
+-- | The ancestry cone: every name appearing on any branch from a post to
+-- its roots, as a normalised set — the "who contributed to this" query,
+-- free with the log.  Includes the post's own sender.
+--
+-- Cone-union law (unambiguous case — one post per sender in @prior@):
+--
+-- prop> cone prior (synthesis who aud ps b) == sortNub (who : concatMap (cone prior) ps)
+cone :: (Eq a) => [Post a] -> Post a -> [Name]
+cone prior p = sortNub (concat (branches prior p))
 
 -- | The shared append-only log, newest first.
 --

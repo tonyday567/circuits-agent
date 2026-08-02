@@ -9,7 +9,7 @@
 -- (when told) rejects --resume so the stale-fallback path is exercised.
 module Main (main) where
 
-import Circuit.Agent (Post (..), branches, mkPost, replyTo, synthesis)
+import Circuit.Agent (Post (..), branches, cone, mkPost, replyTo, sortNub, synthesis)
 import Circuit.Agent.Cli
 import Control.Monad (when)
 import Data.Text (Text)
@@ -224,6 +224,32 @@ main = do
     "branches of a synthesis continues through each parent"
     (branches [p1, p2, r1'] (synthesis "sum" [] [r1', p1] "Σ" :: Post Text)
        == [["sum", "kimi", "grok"], ["sum", "tony"]])
+
+  putStrLn "honest provenance oracles"
+  let syn2 = case synthesisPosts "sum" [p2, p1, r1'] "Σ2" of
+        [s] -> s
+        _ -> error "synthesisPosts: expected one post"
+      prior = [p2, p1, r1']
+  assert
+    "synthesisPosts ancestry cites every input sender"
+    (thread syn2 == ["grok", "kimi", "tony"])
+  assert
+    "synthesisPosts audience is senders and wires, minus self"
+    (to syn2 == ["grok", "kimi", "tony"])
+  assert "synthesisPosts is quiet on empty reply" $
+    null (synthesisPosts "sum" [p1] "  ")
+  assert "synthesisPosts is quiet on no inputs" $
+    null (synthesisPosts "sum" [] "x")
+  assert
+    "ancestry monotonicity: every parent resolves to a strictly-earlier post"
+    (all (`elem` map from prior) (thread syn2))
+  assert
+    "cone-union law: cone of a synthesis is the union of parent cones"
+    (cone prior (synthesis "sum" [] [r1', p1] "Σ")
+       == sortNub ("sum" : concatMap (cone prior) [r1', p1]))
+  assert
+    "cone of a synthesis is the contributor set"
+    (cone prior (synthesis "sum" [] [r1', p1] "Σ") == ["grok", "kimi", "sum", "tony"])
 
   putStrLn "cliQuery against fake CLI (process oracle)"
   tmp <- getTemporaryDirectory

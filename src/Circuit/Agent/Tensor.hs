@@ -11,15 +11,17 @@ module Circuit.Agent.Tensor
     raceShard,
     fanOutShard,
     fanInShard,
+    synthesisSummary,
   )
 where
 
 import Circuit (Ends (..), close, companion, conjoint, endsK)
-import Circuit.Agent (Post, Shard)
+import Circuit.Agent (Name, Post (..), Shard, synthesis)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State (StateT, get, put, runStateT)
 import Data.Text (Text)
+import Data.Text qualified as T
 
 -- | Run a child shard in isolation on the given input, discarding its
 -- residual state.  Branches in await / race / fan-out have private scratch
@@ -99,3 +101,19 @@ fanInShard summary shs =
         os <- traverse (`runSubShard` xs) shs
         pure (summary os)
     )
+
+-- | A fan-in summary honest by construction: the single output post is a
+-- 'synthesis' of everything the branches emitted, so its ancestry cites
+-- every branch-output sender.  The supplied function computes the body.
+-- No branch outputs, or an empty body → no posts (quiet).
+synthesisSummary ::
+  Name ->
+  [Name] ->
+  ([[Post Text]] -> Text) ->
+  [[Post Text]] ->
+  [Post Text]
+synthesisSummary who audience f oss =
+  case (concat oss, T.strip (f oss)) of
+    ([], _) -> []
+    (_, b) | T.null b -> []
+    (ps, b) -> [synthesis who audience ps b]
