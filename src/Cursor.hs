@@ -26,6 +26,7 @@ module Cursor
     set,
     pollLines,
     pollFile,
+    pollNumberedFile,
     seekEnd,
     seekEndFile,
   )
@@ -132,6 +133,24 @@ pollFile c path = do
   ls <- readLogLines path
   pollLines c ls
 
+-- | Like 'pollFile', but consumes only newline-terminated lines and
+-- returns absolute 1-based line numbers alongside.
+--
+-- A partial trailing line (file not ending in @\\n@) is left unconsumed:
+-- the cursor stays before it, so once completed the line is delivered
+-- exactly once, on a later poll.  This is the completeness discipline
+-- 'pollFile' leaves to the caller, made the default.  Truncation resets
+-- to 0, same as 'pollLines'.
+pollNumberedFile :: Cursor -> FilePath -> IO [(Int, Text)]
+pollNumberedFile c path = do
+  ls <- readLogLinesComplete path
+  pos <- get c
+  let total = length ls
+      pos' = if pos > total then 0 else pos
+      news = drop pos' ls
+  set c total
+  pure (zip [pos' + 1 ..] news)
+
 -- | Move the cursor to the end of the given lines without returning them.
 -- Attach pattern: start at "now" so the next poll only sees future output.
 --
@@ -175,3 +194,18 @@ readLogLines path = do
     else do
       content <- TIO.readFile path
       pure $ if T.null content then [] else T.lines content
+
+-- | 'readLogLines' restricted to newline-terminated records: a partial
+-- trailing line (content not ending in @\\n@) is excluded.
+readLogLinesComplete :: FilePath -> IO [Text]
+readLogLinesComplete path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure []
+    else do
+      content <- TIO.readFile path
+      let ls = if T.null content then [] else T.lines content
+      pure $
+        if T.isSuffixOf "\n" content
+          then ls
+          else take (length ls - 1) ls

@@ -11,6 +11,7 @@ module Main (main) where
 
 import Circuit.Agent (Post (..), branches, cone, mkPost, replyTo, sortNub, synthesis)
 import Circuit.Agent.Cli
+import Cursor (newMem, pollNumberedFile)
 import Control.Monad (when)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -250,6 +251,26 @@ main = do
   assert
     "cone of a synthesis is the contributor set"
     (cone prior (synthesis "sum" [] [r1', p1] "Σ") == ["grok", "kimi", "sum", "tony"])
+
+  putStrLn "cursor numbered poll oracles"
+  tmpC <- getTemporaryDirectory
+  let logf = tmpC </> "circuits-agent-cursor-axioma.log"
+  wipe logf
+  TIO.writeFile logf "a\nb\n"
+  cur <- newMem 0
+  r1 <- pollNumberedFile cur logf
+  assert "complete lines are numbered 1-based" (r1 == [(1, "a"), (2, "b")])
+  r2 <- pollNumberedFile cur logf
+  assert "frozen log polls empty" (null r2)
+  TIO.appendFile logf "c"
+  r3 <- pollNumberedFile cur logf
+  assert "partial trailing line is left unconsumed" (null r3)
+  TIO.appendFile logf "\n"
+  r4 <- pollNumberedFile cur logf
+  assert "completed line is delivered exactly once, with its number" (r4 == [(3, "c")])
+  TIO.writeFile logf "x\n"
+  r5 <- pollNumberedFile cur logf
+  assert "truncation resets to zero" (r5 == [(1, "x")])
 
   putStrLn "cliQuery against fake CLI (process oracle)"
   tmp <- getTemporaryDirectory
