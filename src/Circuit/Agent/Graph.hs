@@ -72,14 +72,14 @@ type AgentGraph = LG.Graph ChannelSet Name
 
 -- | A registry entry is either an atomic pure agent or a nested subgraph.
 data AgentNode
-  = AtomicAgent (Agent (->) [Post] Post [Post])
+  = AtomicAgent (Agent (->) [Post Text] (Post Text) [Post Text])
   | NestedAgent AgentGraph AgentRegistry
 
 -- | Registry of agents.  Names map to atomic agents or whole subgraphs.
 type AgentRegistry = Map Name AgentNode
 
 -- | Smart constructor for an atomic registry entry.
-atomic :: Agent (->) [Post] Post [Post] -> AgentNode
+atomic :: Agent (->) [Post Text] (Post Text) [Post Text] -> AgentNode
 atomic = AtomicAgent
 
 -- | Smart constructor for a nested registry entry.
@@ -88,7 +88,7 @@ nested = NestedAgent
 
 -- | An agent after graph routing has been applied: the carrier holds the
 -- original history plus the output associated with the current state.
-type GraphAgent = Agent (->) ([Post], Maybe [Post]) Post [Post]
+type GraphAgent = Agent (->) ([Post Text], Maybe [Post Text]) (Post Text) [Post Text]
 
 -- | A single channel as an edge label.
 channel :: Channel -> ChannelSet
@@ -150,7 +150,7 @@ channelMap = LG.foldg Map.empty singleton connectInfo
 -- The outer carrier is @(innerHistory, lastOutput)@. Moore output is read from
 -- the state, so we store the routed output produced by the most recent input
 -- and return it on the next observation.
-routeAgent :: ChannelSet -> Agent (->) [Post] Post [Post] -> GraphAgent
+routeAgent :: ChannelSet -> Agent (->) [Post Text] (Post Text) [Post Text] -> GraphAgent
 routeAgent outChs inner =
   System $ \((hist, mout), d) ->
     case d of
@@ -170,7 +170,7 @@ injectChannels ins outs g =
 -- | Interpret a graph as a single agent.  The carrier is the input history;
 -- each new post is fed to the graph and the freshly generated posts are
 -- emitted.
-toAgent :: AgentGraph -> AgentRegistry -> Agent (->) [Post] Post [Post]
+toAgent :: AgentGraph -> AgentRegistry -> Agent (->) [Post Text] (Post Text) [Post Text]
 toAgent graph registry =
   System $ \(hist, d) ->
     case d of
@@ -184,7 +184,7 @@ toAgent graph registry =
 
 -- | Resolve a registry entry into a pure agent.  Nested agents are
 -- interpreted as agents over their subgraph with parent channels injected.
-resolveNode :: ChannelSet -> ChannelSet -> AgentNode -> Agent (->) [Post] Post [Post]
+resolveNode :: ChannelSet -> ChannelSet -> AgentNode -> Agent (->) [Post Text] (Post Text) [Post Text]
 resolveNode _ _ (AtomicAgent a) = a
 resolveNode ins outs (NestedAgent g r) = toAgent (injectChannels ins outs g) r
 
@@ -199,16 +199,16 @@ toRoster graph registry =
 
 -- | Seed a graph-wrapped agent state: inbox sees addressed posts, carrier is
 -- empty.
-seedGraphState :: [Name] -> [Post] -> AgentState ([Post], Maybe [Post]) [Post]
+seedGraphState :: [Name] -> [Post Text] -> AgentState ([Post Text], Maybe [Post Text]) [Post Text]
 seedGraphState subs inputs =
-  AgentState ([], Nothing) (foldl' (flip appendInbox) (emptyInbox subs) (watch subs inputs))
+  AgentState ([], Nothing) (foldl' (flip appendInbox) (emptyInbox @Text subs) (watch @Text subs inputs))
 
 -- | Run the wired agents against an initial log.
 runGraph ::
   AgentGraph ->
   AgentRegistry ->
-  [Post] ->
-  [Post]
+  [Post Text] ->
+  [Post Text]
 runGraph graph registry inputs =
   let roster = toRoster graph registry
       info = channelMap graph

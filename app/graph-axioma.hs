@@ -92,7 +92,7 @@ instance Arbitrary AgentGraph where
 data Policy = Echo | Tag Text | Const Text
   deriving (Eq, Show)
 
-policyAgent :: Policy -> Agent (->) [Post] Post [Post]
+policyAgent :: Policy -> Agent (->) [Post Text] (Post Text) [Post Text]
 policyAgent Echo = tape $ \hist ->
   let p = head hist
    in [p {from = "agent", to = [], body = "ack:" <> body p}]
@@ -102,7 +102,7 @@ policyAgent (Tag name) = tape $ \hist ->
 policyAgent (Const txt) =
   tape $
     const
-      [Post {from = "agent", to = [], body = txt}]
+      [Post {from = "agent", to = [], thread = Nothing, body = txt}]
 
 genPolicy :: Gen Policy
 genPolicy =
@@ -118,21 +118,21 @@ genRegistry g = do
   policies <- vectorOf (length names) genPolicy
   pure (Map.fromList (zip names (map (atomic . policyAgent) policies)))
 
-genPost :: Gen Post
+genPost :: Gen (Post Text)
 genPost = do
   sender <- genName
   ch <- genChannel
   b <- elements ["one", "two", "three"]
-  pure (Post {from = sender, to = [ch], body = b})
+  pure (Post {from = sender, to = [ch], thread = Nothing, body = b})
 
-genInputs :: Gen [Post]
+genInputs :: Gen [Post Text]
 genInputs = listOf1 genPost
 
 -------------------------------------------------------------------------
 -- Running and comparing
 -------------------------------------------------------------------------
 
-run :: AgentGraph -> AgentRegistry -> [Post] -> [Post]
+run :: AgentGraph -> AgentRegistry -> [Post Text] -> [Post Text]
 run g reg ins = sortOn (\p -> (from p, body p)) (runGraph g reg ins)
 
 -------------------------------------------------------------------------

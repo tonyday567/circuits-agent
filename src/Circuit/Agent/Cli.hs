@@ -33,7 +33,7 @@ module Circuit.Agent.Cli
   )
 where
 
-import Circuit.Agent (Ends (..), Post (..), Shard, close, shard)
+import Circuit.Agent (Ends (..), Post (..), Shard, close, replyTo, shard)
 import Control.Arrow (runKleisli)
 import Control.Exception (SomeException, try)
 import Control.Monad (when)
@@ -308,31 +308,26 @@ cleanCliOut =
 --
 -- This is the discoverable side of the boundary (data).  How the CLI folds
 -- it is not.
-sessionPrompt :: [Post] -> Text
+sessionPrompt :: [Post Text] -> Text
 sessionPrompt = T.intercalate "\n" . map body
 
 -- | Build reply posts from a cleaned agent response.
 --
--- Addresses the last input's sender and preserves any other names on the
--- original wire (e.g. the bus channel).  Empty reply → no posts (quiet).
-replyPosts :: Text -> [Post] -> Text -> [Post]
+-- Addresses the last input's sender, preserves any other names on the
+-- original wire (e.g. the bus channel), and threads onto the last input's
+-- sender (see 'replyTo').  Empty reply → no posts (quiet).
+replyPosts :: Text -> [Post Text] -> Text -> [Post Text]
 replyPosts who ins reply =
   case (listToMaybe (reverse ins), T.strip reply) of
     (_, r) | T.null r -> []
     (Nothing, _) -> []
-    (Just lastIn, r) ->
-      [ Post
-          { from = who,
-            to = from lastIn : filter (/= who) (to lastIn),
-            body = r
-          }
-      ]
+    (Just lastIn, r) -> [replyTo who lastIn r]
 
 -- | Opaque evaluate seat: any @Text -> IO Text@ behind list ends.
 --
 -- Commit assembles a session prompt from the input posts; emit is
 -- 'replyPosts' of the query result (empty = quiet).
-queryShard :: Text -> (Text -> IO Text) -> IO (Shard IO [Post] [Post])
+queryShard :: Text -> (Text -> IO Text) -> IO (Shard IO [Post Text] [Post Text])
 queryShard who query = do
   outbox <- newIORef []
   pure $
@@ -349,15 +344,15 @@ queryShard who query = do
 -- | A live CLI agent as a list 'Shard'.  Session file and process stay
 -- inside @IO@ — apply-only at this boundary.  @who@ is the agent nick
 -- (from on emitted posts).
-cliShard :: Text -> Cli -> IO (Shard IO [Post] [Post])
+cliShard :: Text -> Cli -> IO (Shard IO [Post Text] [Post Text])
 cliShard who cli = queryShard who (cliQuery cli)
 
 -- | Mock seat: reply body is the session prompt (echo).
 --
 -- Demonstrates the living-agent path without a CLI.
-echoShard :: Text -> IO (Shard IO [Post] [Post])
+echoShard :: Text -> IO (Shard IO [Post Text] [Post Text])
 echoShard who = queryShard who pure
 
 -- | One closed shard turn: commit @ins@, emit replies.
-runShardIO :: Shard IO [Post] [Post] -> [Post] -> IO [Post]
+runShardIO :: Shard IO [Post Text] [Post Text] -> [Post Text] -> IO [Post Text]
 runShardIO sh = runKleisli (close (conjoint sh) (companion sh))

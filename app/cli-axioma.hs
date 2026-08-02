@@ -9,7 +9,7 @@
 -- (when told) rejects --resume so the stale-fallback path is exercised.
 module Main (main) where
 
-import Circuit.Agent (Post (..))
+import Circuit.Agent (Post (..), branch, mkPost, replyTo)
 import Circuit.Agent.Cli
 import Control.Monad (when)
 import Data.Text (Text)
@@ -37,11 +37,11 @@ assert msg ok =
       putStrLn ("  FAIL " ++ msg)
       exitFailure
 
-p1 :: Post
-p1 = Post "tony" ["kimi"] "hello"
+p1 :: Post Text
+p1 = mkPost "tony" ["kimi"] "hello"
 
-p2 :: Post
-p2 = Post "grok" ["kimi", "tony"] "line1\nline2"
+p2 :: Post Text
+p2 = mkPost "grok" ["kimi", "tony"] "line1\nline2"
 
 -- | Fake CLI whose behaviour is fully known:
 --
@@ -153,7 +153,7 @@ main = do
     (sessionPrompt [p1, p2] == "hello\nline1\nline2")
   assert
     "replyPosts addresses last sender, preserves wire"
-    (replyPosts "kimi" [p1, p2] "sure" == [Post "kimi" ["grok", "tony"] "sure"])
+    (replyPosts "kimi" [p1, p2] "sure" == [replyTo "kimi" p2 "sure"])
   assert
     "whitespace reply is quiet"
     (replyPosts "kimi" [p1] "  \n " == [])
@@ -166,13 +166,47 @@ main = do
   r1 <- runShardIO sh [p1, p2]
   assert
     "echo reply body is the session prompt"
-    (r1 == [Post "kimi" ["grok", "tony"] (sessionPrompt [p1, p2])])
+    (r1 == [replyTo "kimi" p2 (sessionPrompt [p1, p2])])
   r2 <- runShardIO sh [p1]
   assert
     "outbox drains between closes"
-    (r2 == [Post "kimi" ["tony"] "hello"])
+    (r2 == [replyTo "kimi" p1 "hello"])
   r3 <- runShardIO sh []
   assert "empty commit emits nothing" (null r3)
+
+  putStrLn "thread (ancestry) oracles"
+  assert "root post has empty thread" (thread p1 == Nothing)
+  assert
+    "reply threads onto the parent's sender"
+    (thread (replyTo "kimi" p2 "x" :: Post Text) == Just "grok")
+  assert
+    "replyPosts threads onto the last input's sender"
+    (case replyPosts "kimi" [p1, p2] "sure" of
+       [rp] -> thread rp == Just "grok"
+       _ -> False)
+  let r1' :: Post Text
+      r1' = replyTo "kimi" p2 "a"
+      r2' :: Post Text
+      r2' = replyTo "tony" r1' "b"
+  assert
+    "branch of a root is its sender"
+    (branch [p1, p2] p2 == ["grok"])
+  assert
+    "branch of a reply is pure cons"
+    (branch [p1, p2] r1' == "kimi" : branch [p1, p2] p2)
+  assert
+    "branch unfolds a three-post thread"
+    (branch [p1, p2, r1'] r2' == ["tony", "kimi", "grok"])
+  let r0 :: Post Text
+      r0 = replyTo "kimi" p1 "old"
+  assert
+    "ambiguous edge resolves to the most recent prior post"
+    (branch [p1, p2, r0, r1'] r2' == ["tony", "kimi", "grok"])
+  let dangling :: Post Text
+      dangling = (mkPost "x" ["y"] "z") {thread = Just "ghost"}
+  assert
+    "dangling thread edge keeps its label"
+    (branch [] dangling == ["x", "ghost"])
 
   putStrLn "cliQuery against fake CLI (process oracle)"
   tmp <- getTemporaryDirectory

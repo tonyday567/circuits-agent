@@ -48,6 +48,9 @@
 module Circuit.Agent
   ( -- * Posts and the log
     Post (..),
+    mkPost,
+    replyTo,
+    branch,
     Log,
     emptyLog,
     Name,
@@ -199,7 +202,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
 import Control.Concurrent.STM (STM, atomically, orElse)
 import Data.Foldable (traverse_)
-import Data.List (foldl')
+import Data.List (find, foldl')
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
@@ -215,17 +218,54 @@ import Data.Text (Text, empty)
 -- | Agent name on the shared log.
 type Name = Text
 
--- | A single entry on the shared log.
+-- | A single entry on the shared log, polymorphic in payload.
 --
 -- Routing is by name list: a post delivers to every agent whose name appears
--- in 'to'.  The default wire is a singleton @[agentName]@; multi-cast wires
--- list several names.
-data Post = Post
+-- in 'to' (the audience).  'thread' is the ancestry edge: 'Nothing' for a
+-- root post, @'Just' n@ for a reply, where @n@ is the sender of the post
+-- being replied to.  Names are labels, not identity — a thread edge resolves
+-- to a particular post by log order (most recent prior post by that name);
+-- see 'branch'.
+data Post a = Post
   { from :: Name,
     to :: [Name],
-    body :: Text
+    thread :: Maybe Name,
+    body :: a
   }
-  deriving (Show, Eq, Ord)
+  deriving (Show, Eq, Ord, Functor)
+
+-- | A fresh root post (empty thread).
+mkPost :: Name -> [Name] -> a -> Post a
+mkPost f t b = Post f t Nothing b
+
+-- | A reply: the audience is the parent's sender plus the rest of the
+-- parent's audience (minus self); the thread edge points at the parent's
+-- sender.
+replyTo :: Name -> Post a -> b -> Post b
+replyTo who p b =
+  Post
+    { from = who,
+      to = from p : filter (/= who) (to p),
+      thread = Just (from p),
+      body = b
+    }
+
+-- | The label-branch from a post to its conversation root, resolved against
+-- the posts prior to it (oldest first).  Each thread edge resolves to the
+-- most recent prior post by that name; a dangling edge keeps its label.
+-- Branches of replies are pure cons:
+--
+-- prop> branch prior (replyTo who p b) == who : branch prior p
+branch :: (Eq a) => [Post a] -> Post a -> [Name]
+branch prior p0 = go prior p0
+  where
+    go pre p =
+      from p : case thread p of
+        Nothing -> []
+        Just n ->
+          case find ((== n) . from) (reverse pre) of
+            Nothing -> [n]
+            Just q -> go (takeWhile (/= q) pre) q
 
 -- | The shared append-only log, newest first.
 --
@@ -264,7 +304,7 @@ type TurnLog a = Seq (Bag a)
 -- | Agent: a Moore machine with free carrier, polymorphic in the base arrow.
 --
 -- @System arr s (Mono a b) ≅ arr (s, a) (s, b)@ after collapsing unit
--- positions.  Common log case: @Agent (->) s Post [Post]@ (input = one post,
+-- positions.  Common log case: @Agent (->) s (Post a) [Post a]@ (input = one post,
 -- output = list of posts).  @Agent (Kleisli m) s a b@ is the monadic Moore
 -- machine.
 type Agent arr s a b = System arr s (Mono a b)
@@ -327,11 +367,11 @@ inboxSubs :: Inbox f -> [Name]
 inboxSubs = fst . unInbox
 
 -- | Empty inbox for the subscribed agent(s).
-emptyInbox :: forall f. (Uncons f Post) => [Name] -> Inbox f
-emptyInbox subs = Inbox (subs, nil @f @Post)
+emptyInbox :: forall a f. (Uncons f (Post a)) => [Name] -> Inbox f
+emptyInbox subs = Inbox (subs, nil @f @(Post a))
 
 -- | Append a post to the right of the inbox.
-appendInbox :: (Snoc f Post) => Post -> Inbox f -> Inbox f
+appendInbox :: (Snoc f (Post a)) => Post a -> Inbox f -> Inbox f
 appendInbox p (Inbox (subs, f)) = Inbox (subs, snoc f p)
 
 -- | Lightweight delivery predicate.
@@ -340,21 +380,21 @@ appendInbox p (Inbox (subs, f)) = Inbox (subs, snoc f p)
 -- list.  Multi-cast is direct: a post addressed to several names reaches each
 -- subscriber.  This predicate is a small stepping stone toward a relational
 -- copy/discard delivery model ('FinRel'); the full wiring is future work.
-deliversTo :: Post -> [Name] -> Bool
+deliversTo :: Post a -> [Name] -> Bool
 deliversTo p = any (`elem` to p)
 
 -- | Peel the oldest addressed post from the inbox, returning the rest.
 --
 -- Non-matching posts are skipped and discarded.  An empty or exhausted inbox
 -- returns 'That' with an empty inbox.
-unconsInbox :: (Uncons f Post) => Inbox f -> These Post (Inbox f)
+unconsInbox :: forall a f. (Uncons f (Post a)) => Inbox f -> These (Post a) (Inbox f)
 unconsInbox (Inbox (subs, f)) = go f
   where
     go stream = case uncons stream of
       That rest -> That (Inbox (subs, rest))
       This p
         | deliversTo p subs -> This p
-        | otherwise -> That (emptyInbox subs)
+        | otherwise -> That (emptyInbox @a subs)
       These p rest
         | deliversTo p subs -> These p (Inbox (subs, rest))
         | otherwise -> go rest
@@ -370,36 +410,36 @@ data AgentState s f = AgentState
 --
 -- 'dChildren' is kept flat (empty) in this pass.  Building the causal child
 -- tree from routed outputs is future work.
-data Derivation = Derivation
+data Derivation a = Derivation
   { dAgent :: Name,
-    dInput :: Post,
-    dOutputs :: [Post],
-    dChildren :: [Derivation]
+    dInput :: Post a,
+    dOutputs :: [Post a],
+    dChildren :: [Derivation a]
   }
   deriving (Show, Eq)
 
 -- | Empty carrier and empty inbox for the named agent.
-emptyAgentState :: forall s f. (Snoc s Post, Uncons f Post) => [Name] -> AgentState s f
-emptyAgentState subs = AgentState (snocNil @s @Post) (emptyInbox subs)
+emptyAgentState :: forall a s f. (Snoc s (Post a), Uncons f (Post a)) => [Name] -> AgentState s f
+emptyAgentState subs = AgentState (snocNil @s @(Post a)) (emptyInbox @a subs)
 
 -- | Seed an inbox with all posts addressed to any subscription from the log,
 -- oldest first.
-seedInbox :: (Snoc f Post, Uncons f Post) => [Name] -> Log f -> Inbox f
-seedInbox subs lg = foldl' (flip appendInbox) (emptyInbox subs) (watch subs lg)
+seedInbox :: forall a f. (Snoc f (Post a), Uncons f (Post a)) => [Name] -> Log f -> Inbox f
+seedInbox subs lg = foldl' (flip appendInbox) (emptyInbox @a subs) (watch @a subs lg)
 
 -- | Empty carrier and an inbox seeded from the log for the subscribed agent(s).
-seedAgentState :: forall s f. (Snoc s Post, Snoc f Post, Uncons f Post) => [Name] -> Log f -> AgentState s f
-seedAgentState subs lg = AgentState (snocNil @s @Post) (seedInbox subs lg)
+seedAgentState :: forall a s f. (Snoc s (Post a), Snoc f (Post a), Uncons f (Post a)) => [Name] -> Log f -> AgentState s f
+seedAgentState subs lg = AgentState (snocNil @s @(Post a)) (seedInbox @a subs lg)
 
 -- | Empty log.
-emptyLog :: forall f. (Cons f Post) => Log f
-emptyLog = consNil @f @Post
+emptyLog :: forall a f. (Cons f (Post a)) => Log f
+emptyLog = consNil @f @(Post a)
 
 -- | Read end of the log: all posts matching any subscription, oldest first.
 --
 -- Traversal is newest-to-oldest; matching posts are prepended, so the
 -- accumulator is already oldest-first.
-watch :: (Uncons f Post) => [Name] -> Log f -> [Post]
+watch :: forall a f. (Uncons f (Post a)) => [Name] -> Log f -> [Post a]
 watch subs t = go t []
   where
     go stream acc =
@@ -409,11 +449,11 @@ watch subs t = go t []
         These p rest -> go rest (if deliversTo p subs then p : acc else acc)
 
 -- | Write end of the log: commit a post.
-post :: (Cons f Post) => Post -> Log f -> Log f
+post :: (Cons f (Post a)) => Post a -> Log f -> Log f
 post = cons
 
 -- | Per-agent session assembly: the bodies an agent actually sees.
-session :: (Uncons f Post) => [Name] -> Log f -> [Text]
+session :: (Uncons f (Post a)) => [Name] -> Log f -> [a]
 session subs = map body . watch subs
 
 -- | One delivery round: peel one addressed post, step the machine, 'post' each output.
@@ -423,26 +463,27 @@ session subs = map body . watch subs
 -- committed newest-first via 'post'.  When a post is processed, the returned
 -- 'Derivation' records the agent name, the input post, and the emitted outputs.
 turn ::
-  (Cons f Post, Uncons f Post) =>
-  Agent (->) s Post [Post] ->
+  forall a s f.
+  (Cons f (Post a), Uncons f (Post a)) =>
+  Agent (->) s (Post a) [Post a] ->
   AgentState s f ->
   Log f ->
-  (AgentState s f, Log f, Maybe Derivation)
+  (AgentState s f, Log f, Maybe (Derivation a))
 turn sys st log0 =
   let who = inboxWho (asInbox st)
       subs = inboxSubs (asInbox st)
-   in case unconsInbox (asInbox st) of
+   in case unconsInbox @a (asInbox st) of
         That _ -> (st, log0, Nothing)
         This p ->
           let (os, seen') = run1 sys (asCarrier st) p
-           in (AgentState seen' (emptyInbox subs), foldl' (flip post) log0 os, Just (Derivation who p os []))
+           in (AgentState seen' (emptyInbox @a subs), foldl' (flip post) log0 os, Just (Derivation who p os []))
         These p rest ->
           let (os, seen') = run1 sys (asCarrier st) p
            in (AgentState seen' rest, foldl' (flip post) log0 os, Just (Derivation who p os []))
 
 -- | Whether the agent's inbox has an addressed post waiting.
-hasPending :: (Uncons f Post) => AgentState s f -> Bool
-hasPending st = case unconsInbox (asInbox st) of That _ -> False; _ -> True
+hasPending :: forall a s f. (Uncons f (Post a)) => AgentState s f -> Bool
+hasPending st = case unconsInbox @a (asInbox st) of That _ -> False; _ -> True
 
 -- | Stream length via 'Uncons'.
 streamLength :: forall f a. (Uncons f a) => f -> Int
@@ -474,34 +515,34 @@ takeStream n s = go n s []
 -- still has pending work at its slot.  Passes repeat until a pass starts with
 -- nobody pending.  Carriers start empty for every name.
 loop ::
-  forall s f.
-  (Snoc s Post, Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, Agent (->) s Post [Post])] ->
+  forall a s f.
+  (Snoc s (Post a), Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  [(Name, Agent (->) s (Post a) [Post a])] ->
   Log f ->
-  ([(Name, AgentState s f)], Log f, [Derivation])
-loop roster log0 = loopWith roster [(n, seedAgentState @s @f [n] log0) | (n, _) <- roster] log0
+  ([(Name, AgentState s f)], Log f, [Derivation a])
+loop roster log0 = loopWith roster [(n, seedAgentState @a @s @f [n] log0) | (n, _) <- roster] log0
 
 -- | Resumable 'loop': supply the initial states and inboxes.
 --
 -- Implemented as an 'Either' trace over the roster: each pass is one
 -- iteration of the feedback channel, quiescence returns a 'Right' result.
 loopWith ::
-  forall s f.
-  (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, Agent (->) s Post [Post])] ->
+  forall a s f.
+  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  [(Name, Agent (->) s (Post a) [Post a])] ->
   [(Name, AgentState s f)] ->
   Log f ->
-  ([(Name, AgentState s f)], Log f, [Derivation])
+  ([(Name, AgentState s f)], Log f, [Derivation a])
 loopWith roster states0 log0 = trace body ()
   where
-    bundle0 = (states0, log0, []) :: ([(Name, AgentState s f)], Log f, [Derivation])
+    bundle0 = (states0, log0, []) :: ([(Name, AgentState s f)], Log f, [Derivation a])
     body (Right ()) =
-      if any (hasPending . snd) states0
+      if any (hasPending @a . snd) states0
         then Left bundle0
         else Right bundle0
     body (Left bundle) =
       let bundle' = meetingPass roster bundle
-       in if any (hasPending . snd) (fst3 bundle')
+       in if any (hasPending @a . snd) (fst3 bundle')
             then Left bundle'
             else Right bundle'
     fst3 (x, _, _) = x
@@ -509,39 +550,39 @@ loopWith roster states0 log0 = trace body ()
 -- | The same meeting as a 'Loop' value: 'Knot' body over the 'Either'
 -- tensor, quiescence returned as a 'Right' payload.
 meetingLoop ::
-  forall s f.
-  (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, Agent (->) s Post [Post])] ->
-  Loop Either (->) ([(Name, AgentState s f)], Log f, [Derivation]) ([(Name, AgentState s f)], Log f, [Derivation])
+  forall a s f.
+  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  [(Name, Agent (->) s (Post a) [Post a])] ->
+  Loop Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
 meetingLoop roster = Knot body
   where
     body (Right bundle@(states, _, _)) =
-      if any (hasPending . snd) states
+      if any (hasPending @a . snd) states
         then Left bundle
         else Right bundle
     body (Left bundle) =
       let bundle'@(states', _, _) = meetingPass roster bundle
-       in if any (hasPending . snd) states'
+       in if any (hasPending @a . snd) states'
             then Left bundle'
             else Right bundle'
 
 -- | One roster pass: schedule every agent that has pending work.
 meetingPass ::
-  forall s f.
-  (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, Agent (->) s Post [Post])] ->
-  ([(Name, AgentState s f)], Log f, [Derivation]) ->
-  ([(Name, AgentState s f)], Log f, [Derivation])
+  forall a s f.
+  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  [(Name, Agent (->) s (Post a) [Post a])] ->
+  ([(Name, AgentState s f)], Log f, [Derivation a]) ->
+  ([(Name, AgentState s f)], Log f, [Derivation a])
 meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roster
   where
     step (st, l, ds) (name, agent) =
       case lookup name st of
         Nothing -> (st, l, ds)
         Just sti
-          | hasPending sti ->
+          | hasPending @a sti ->
               let (st', l', md) = turn agent sti l
-                  newCount = streamLength @f @Post l' - streamLength @f @Post l
-                  newPosts = takeStream newCount l'
+                  newCount = streamLength @f @(Post a) l' - streamLength @f @(Post a) l
+                  newPosts = takeStream @f @(Post a) newCount l'
                   st'' = foldl' routePost (updateState name st' st) newPosts
                   ds' = maybe ds (\d -> ds ++ [d]) md
                in (st'', l', ds')
@@ -565,30 +606,30 @@ meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roste
 -- element.  The third component collects one 'Derivation' for every post that
 -- was processed by 'turn' across the schedule.
 loops ::
-  forall s f.
-  (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, Agent (->) s Post [Post])] ->
+  forall a s f.
+  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  [(Name, Agent (->) s (Post a) [Post a])] ->
   [(Name, AgentState s f)] ->
   Log f ->
-  [([(Name, AgentState s f)], Log f, [Derivation])]
+  [([(Name, AgentState s f)], Log f, [Derivation a])]
 loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
   where
-    go :: [(Name, AgentState s f)] -> Log f -> [Derivation] -> [([(Name, AgentState s f)], Log f, [Derivation])]
+    go :: [(Name, AgentState s f)] -> Log f -> [Derivation a] -> [([(Name, AgentState s f)], Log f, [Derivation a])]
     go states lg derivs
-      | not (any (hasPending . snd) states) = []
+      | not (any (hasPending @a . snd) states) = []
       | otherwise =
           let (states', lg', derivs') = foldl' step (states, lg, derivs) roster
            in (states', lg', derivs') : go states' lg' derivs'
 
-    step :: ([(Name, AgentState s f)], Log f, [Derivation]) -> (Name, Agent (->) s Post [Post]) -> ([(Name, AgentState s f)], Log f, [Derivation])
+    step :: ([(Name, AgentState s f)], Log f, [Derivation a]) -> (Name, Agent (->) s (Post a) [Post a]) -> ([(Name, AgentState s f)], Log f, [Derivation a])
     step (states, lg, derivs) (name, agent) =
       case lookup name states of
         Nothing -> (states, lg, derivs)
         Just st
-          | hasPending st ->
+          | hasPending @a st ->
               let (st', lg', md) = turn agent st lg
-                  newCount = streamLength @f @Post lg' - streamLength @f @Post lg
-                  newPosts = takeStream newCount lg'
+                  newCount = streamLength @f @(Post a) lg' - streamLength @f @(Post a) lg
+                  newPosts = takeStream @f @(Post a) newCount lg'
                   states'' = foldl' routePost (updateState name st' states) newPosts
                   derivs' = maybe derivs (\d -> derivs ++ [d]) md
                in (states'', lg', derivs')
@@ -597,7 +638,7 @@ loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
     updateState :: Name -> AgentState s f -> [(Name, AgentState s f)] -> [(Name, AgentState s f)]
     updateState name st' = map (\(n, s) -> if n == name then (n, st') else (n, s))
 
-    routePost :: [(Name, AgentState s f)] -> Post -> [(Name, AgentState s f)]
+    routePost :: [(Name, AgentState s f)] -> Post a -> [(Name, AgentState s f)]
     routePost states p =
       map
         ( \(n, st) ->
@@ -610,13 +651,13 @@ loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
 -- | Resumable 'loop' with a heterogeneous roster: each agent supplies its own
 -- initial carrier, while inboxes are still seeded from the shared log.
 loopHetero ::
-  forall s f.
-  (Snoc f Post, Cons f Post, Uncons f Post) =>
-  [(Name, s, Agent (->) s Post [Post])] ->
+  forall a s f.
+  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  [(Name, s, Agent (->) s (Post a) [Post a])] ->
   Log f ->
-  ([(Name, AgentState s f)], Log f, [Derivation])
+  ([(Name, AgentState s f)], Log f, [Derivation a])
 loopHetero roster log0 =
-  loopWith (map (\(n, _, a) -> (n, a)) roster) (map (\(n, s, _) -> (n, AgentState s (seedInbox [n] log0))) roster) log0
+  loopWith (map (\(n, _, a') -> (n, a')) roster) (map (\(n, s, _) -> (n, AgentState s (seedInbox @a [n] log0))) roster) log0
 
 -- | Run a monomial system for one step.
 --
@@ -799,10 +840,10 @@ selfLoopL agent s0 ends = runKleisli (run (agentLoopL agent ends ends)) s0
 -- Each input post is stepped through the agent; the per-step output lists are
 -- concatenated into a single output stream.  This is the stream semantics of
 -- the Moore coalgebra, independent of any effectful boundary.
-type Beh = [Post] -> [Post]
+type Beh a = [Post a] -> [Post a]
 
 -- | Run an agent from an initial carrier to obtain its 'Beh'aviour.
-beh :: Agent (->) s Post [Post] -> s -> Beh
+beh :: Agent (->) s (Post a) [Post a] -> s -> Beh a
 beh _sys _s0 [] = []
 beh sys s0 (i : ins) =
   let (os, s') = run1 sys s0 i
@@ -823,9 +864,9 @@ branchAgent cond (System left) (System right) =
 -- | Seat-level product / await: both agents run on the same input; states are
 -- paired; emits are concatenated left-to-right.
 awaitA ::
-  Agent (->) s1 Post [Post] ->
-  Agent (->) s2 Post [Post] ->
-  Agent (->) (s1, s2) Post [Post]
+  Agent (->) s1 (Post a) [Post a] ->
+  Agent (->) s2 (Post a) [Post a] ->
+  Agent (->) (s1, s2) (Post a) [Post a]
 awaitA sys1 sys2 = System $ \((s1, s2), d) ->
   let dir = monoDir d
       (o1, next1) = runSystem sys1 s1
@@ -835,9 +876,9 @@ awaitA sys1 sys2 = System $ \((s1, s2), d) ->
 -- | Seat-level coproduct / race: both agents run on the same input; states are
 -- paired; the left emit wins if non-empty, otherwise the right emit wins.
 raceA ::
-  Agent (->) s1 Post [Post] ->
-  Agent (->) s2 Post [Post] ->
-  Agent (->) (s1, s2) Post [Post]
+  Agent (->) s1 (Post a) [Post a] ->
+  Agent (->) s2 (Post a) [Post a] ->
+  Agent (->) (s1, s2) (Post a) [Post a]
 raceA sys1 sys2 = System $ \((s1, s2), d) ->
   let dir = monoDir d
       (o1, next1) = runSystem sys1 s1
@@ -853,15 +894,15 @@ raceA sys1 sys2 = System $ \((s1, s2), d) ->
 --
 -- Commit parses inputs into the carrier and enqueues one output list per
 -- input (the Moore step).  Emit flushes the queue — empty means quiet.
-data AgentSeat s = AgentSeat
+data AgentSeat s a = AgentSeat
   { asState :: s,
     -- | Pending outputs, oldest first.
-    asOutbox :: [Post]
+    asOutbox :: [Post a]
   }
   deriving (Show, Eq)
 
 -- | Pure parse step: fold committed posts through the coalgebra.
-feedAgent :: Agent (->) s Post [Post] -> [Post] -> AgentSeat s -> AgentSeat s
+feedAgent :: Agent (->) s (Post a) [Post a] -> [Post a] -> AgentSeat s a -> AgentSeat s a
 feedAgent sys ins (AgentSeat s0 outs0) =
   let (outs1, s1) =
         foldl'
@@ -874,7 +915,7 @@ feedAgent sys ins (AgentSeat s0 outs0) =
    in AgentSeat s1 (outs0 ++ outs1)
 
 -- | Take the outbox; leave carrier unchanged.
-flushOutbox :: AgentSeat s -> ([Post], AgentSeat s)
+flushOutbox :: AgentSeat s a -> ([Post a], AgentSeat s a)
 flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 
 -- | Reinterpret a pure 'Agent' as a list 'Shard'.
@@ -897,10 +938,10 @@ flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 -- @
 agentShard ::
   (Monad m) =>
-  m (AgentSeat s) ->
-  (AgentSeat s -> m ()) ->
-  Agent (->) s Post [Post] ->
-  Shard m [Post] [Post]
+  m (AgentSeat s a) ->
+  (AgentSeat s a -> m ()) ->
+  Agent (->) s (Post a) [Post a] ->
+  Shard m [Post a] [Post a]
 agentShard getSeat putSeat sys =
   shard
     ( \ins -> do
@@ -919,7 +960,7 @@ agentShard getSeat putSeat sys =
 -- Pure form of @close@ on 'agentShard' without choosing a monad:
 --
 -- @runAgentShard sys seat ins = runState (close (agentShard get put sys) ins) seat@
-runAgentShard :: Agent (->) s Post [Post] -> AgentSeat s -> [Post] -> ([Post], AgentSeat s)
+runAgentShard :: Agent (->) s (Post a) [Post a] -> AgentSeat s a -> [Post a] -> ([Post a], AgentSeat s a)
 runAgentShard sys seat ins =
   let seat1 = feedAgent sys ins seat
       (outs, seat2) = flushOutbox seat1
@@ -937,12 +978,12 @@ runAgentShard sys seat ins =
 -- A /tool call/ from an agent is just a 'Post': the 'to' list names the
 -- tool, 'body' carries the arguments. No extra type — emit that 'Post' on a
 -- 'Port' (or post it on the log for the tool agent to 'watch').
-type Port m = Ends (Kleisli m) Post Post
+type Port m a = Ends (Kleisli m) (Post a) (Post a)
 
 -- 'Snoc' is re-exported from 'Circuit.Stream' (construction dual of 'Uncons').
 
 -- | Snoc a 'Post' onto a post stream. Specialized alias for 'snoc'.
-snocPost :: [Post] -> Post -> [Post]
+snocPost :: [Post a] -> Post a -> [Post a]
 snocPost = snoc
 
 -- | @Ends s f@: commit snocs a token; emit flushes the whole stream
@@ -1012,12 +1053,12 @@ unbatchEnds getBuf putBuf =
 -- and peel-stream ('uncons'), the same syntax as parsers over @[s]@.
 portShard ::
   (Monad m) =>
-  m [Post] ->
-  ([Post] -> m ()) ->
-  m [Post] ->
-  ([Post] -> m ()) ->
-  Shard m [Post] [Post] ->
-  Port m
+  m [Post a] ->
+  ([Post a] -> m ()) ->
+  m [Post a] ->
+  ([Post a] -> m ()) ->
+  Shard m [Post a] [Post a] ->
+  Port m a
 portShard getIn putIn getOut putOut sh =
   batchEnds getIn putIn >:> sh >:> unbatchEnds getOut putOut
 

@@ -1,5 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ExtendedDefaultRules #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+-- Post is polymorphic in its payload; this file pins everything at Text via
+-- the module 'default' declaration, so -Wtype-defaults would be noise.
+{-# OPTIONS_GHC -Wno-type-defaults #-}
 
 module Main (main) where
 
@@ -49,6 +53,8 @@ import Harpie.NumHask.Matrix (Matrix, fromLists, matPlus, starMatrix, toLists)
 import System.Exit (exitFailure)
 import System.Timeout (timeout)
 
+default (Text)
+
 assert :: String -> Bool -> IO ()
 assert msg ok =
   if ok
@@ -57,80 +63,77 @@ assert msg ok =
       putStrLn ("  FAIL " ++ msg)
       exitFailure
 
-mkPost :: Text -> [Text] -> Text -> Post
-mkPost = Post
-
--- | Close a same-type shard once under 'StateT [Post] IO'.
-closeShardIO :: Shard (StateT [Post] IO) [Post] [Post] -> [Post] -> [Post] -> IO ([Post], [Post])
+-- | Close a same-type shard once under 'StateT [Post Text] IO'.
+closeShardIO :: Shard (StateT [Post Text] IO) [Post Text] [Post Text] -> [Post Text] -> [Post Text] -> IO ([Post Text], [Post Text])
 closeShardIO sh x s0 =
   runStateT (runKleisli (close (conjoint sh) (companion sh)) x) s0
 
-peek :: [Post] -> Post
+peek :: [Post Text] -> Post Text
 peek [] = error "verify: empty history"
 peek (p : _) = p
 
-reply :: Text -> [Post] -> [Post]
+reply :: Text -> [Post Text] -> [Post Text]
 reply name hist =
   [mkPost name [from (peek hist)] ("ack: " <> body (peek hist))]
 
 -- | New posts in @new@ compared to @old@, oldest first.
-diffLog :: [Post] -> [Post] -> [Post]
+diffLog :: [Post Text] -> [Post Text] -> [Post Text]
 diffLog old new = reverse (take (length new - length old) new)
 
 -- | Route one post to a state's inbox if it is addressed to the owner.
-routeToInbox :: Post -> AgentState [Post] [Post] -> AgentState [Post] [Post]
+routeToInbox :: Post Text -> AgentState [Post Text] [Post Text] -> AgentState [Post Text] [Post Text]
 routeToInbox p st =
   if deliversTo p (inboxSubs (asInbox st))
     then st {asInbox = appendInbox p (asInbox st)}
     else st
 
 -- | Feed oldest-first posts into a state's inbox.
-feedState :: [Post] -> AgentState [Post] [Post] -> AgentState [Post] [Post]
+feedState :: [Post Text] -> AgentState [Post Text] [Post Text] -> AgentState [Post Text] [Post Text]
 feedState posts st = foldl' (flip routeToInbox) st posts
 
 -- | Seed an agent state from the addressed posts in a log.
-seedState :: [Text] -> [Post] -> AgentState [Post] [Post]
-seedState who lg = feedState (watch who lg) (emptyAgentState who)
+seedState :: [Text] -> [Post Text] -> AgentState [Post Text] [Post Text]
+seedState who lg = feedState (watch @Text who lg) (emptyAgentState @Text who)
 
 -- | Addressed posts for @who@ in @lg@ that are not already in the carrier.
-newFor :: [Text] -> [Post] -> AgentState [Post] [Post] -> [Post]
-newFor who lg st = filter (`notElem` asCarrier st) (watch who lg)
+newFor :: [Text] -> [Post Text] -> AgentState [Post Text] [Post Text] -> [Post Text]
+newFor who lg st = filter (`notElem` asCarrier st) (watch @Text who lg)
 
 -- | Parallel reduction: every agent runs against the *same* input log, and
 -- all emitted posts are appended to that log.  This is the schedule-independent
 -- baseline that O8 compares against the round-robin 'loop'.
-runParallel :: [(Text, Agent (->) [Post] Post [Post])] -> [Post] -> [Post]
+runParallel :: [(Text, Agent (->) [Post Text] (Post Text) [Post Text])] -> [Post Text] -> [Post Text]
 runParallel roster lg = foldl' (flip post) lg outputs
   where
-    outputs = concatMap (\(who, agent) -> beh agent [] (watch [who] lg)) roster
+    outputs = concatMap (\(who, agent) -> beh agent [] (watch @Text [who] lg)) roster
 
 -- | Pure 'orElse': left branch speaks unless it is silent, otherwise right.
-raceP :: ([Post] -> [Post]) -> ([Post] -> [Post]) -> ([Post] -> [Post])
+raceP :: ([Post Text] -> [Post Text]) -> ([Post Text] -> [Post Text]) -> ([Post Text] -> [Post Text])
 raceP f g hist =
   let os = f hist
    in if null os then g hist else os
 
 -- | Pure product / await: both branches speak; emits are concatenated
 -- left-to-right.
-awaitP :: ([Post] -> [Post]) -> ([Post] -> [Post]) -> ([Post] -> [Post])
+awaitP :: ([Post Text] -> [Post Text]) -> ([Post Text] -> [Post Text]) -> ([Post Text] -> [Post Text])
 awaitP f g hist = f hist <> g hist
 
 -- | Silent policy: the zero of race and the unit of await.
-silent :: [Post] -> [Post]
+silent :: [Post Text] -> [Post Text]
 silent _ = []
 
 -- | Symmetric closure of 'raceP' outcomes under left/right bias.
 -- In the pure model this is the set of possible results; temporal race
 -- refines it by picking one element.
-outcomesRace :: ([Post] -> [Post]) -> ([Post] -> [Post]) -> [Post] -> [[Post]]
+outcomesRace :: ([Post Text] -> [Post Text]) -> ([Post Text] -> [Post Text]) -> [Post Text] -> [[Post Text]]
 outcomesRace f g hist = nub [raceP f g hist, raceP g f hist]
 
 -- | Agent that ignores its history and always emits the same list.
-constAgent :: [Post] -> Agent (->) [Post] Post [Post]
+constAgent :: [Post Text] -> Agent (->) [Post Text] (Post Text) [Post Text]
 constAgent outs = tape (const outs)
 
 -- | STM agent that ignores its history and always emits the same list.
-constAgentS :: [Post] -> AgentS [Post] Post
+constAgentS :: [Post Text] -> AgentS [Post Text] (Post Text)
 constAgentS outs = agentM (tape (const outs))
 
 main :: IO ()
@@ -257,9 +260,9 @@ main = do
         ins = [p1, p2, p3]
         f = reply "j"
         h = take 1
-        sys1 :: Agent (->) [Post] Post [Post]
+        sys1 :: Agent (->) [Post Text] (Post Text) [Post Text]
         sys1 = tape f
-        sys2 :: Agent (->) [Post] Post [Post]
+        sys2 :: Agent (->) [Post Text] (Post Text) [Post Text]
         sys2 = tape (f . h)
     assert "reply homomorphism: summarizer h preserves behaviour" $
       beh sys2 (h []) ins == beh sys1 [] ins
@@ -270,9 +273,9 @@ main = do
         p3 = mkPost "human" ["j"] "three"
         xs = [p1, p2]
         ys = [p3]
-        agent :: Agent (->) [Post] Post [Post]
+        agent :: Agent (->) [Post Text] (Post Text) [Post Text]
         agent = tape (reply "j")
-        s0 = [] :: [Post]
+        s0 = [] :: [Post Text]
     assert "reply functoriality: beh s0 (xs ++ ys) == beh s0 xs ++ beh (after agent s0 xs) ys" $
       beh agent s0 (xs ++ ys)
         == beh agent s0 xs ++ beh agent (after agent s0 xs) ys
@@ -479,7 +482,7 @@ main = do
     assert "loop posts both acks" $
       length t1 == 4
     assert "loop reaches quiescence (no pending)" $
-      all (\(_n, st) -> not (hasPending st)) states
+      all (\(_n, st) -> not (hasPending @Text st)) states
     assert "loop records a derivation per processed post" $
       length derivs == 2
     assert "derivation agent names match roster" $
@@ -503,12 +506,12 @@ main = do
     assert "tool-call chain records three derivations" $
       length derivs2 == 3
 
-    let (_emptyStates, tEmpty, emptyDerivs) = loop roster ([] :: [Post])
+    let (_emptyStates, tEmpty, emptyDerivs) = loop roster ([] :: [Post Text])
     assert "loop on empty log is identity" $ null tEmpty
     assert "loop on empty log records no derivations" $ null emptyDerivs
 
     -- S0a: the meeting is a 'Loop Either (->)' value; 'run' agrees with 'loopWith'.
-    let states0 = [(n, feedState (watch [n] t0) (emptyAgentState [n])) | (n, _) <- roster]
+    let states0 = [(n, feedState (watch @Text [n] t0) (emptyAgentState @Text [n])) | (n, _) <- roster]
         bundle0 = (states0, t0, [])
     assert "meetingLoop run agrees with loopWith" $
       run (meetingLoop roster) bundle0 == loopWith roster states0 t0
@@ -560,13 +563,13 @@ main = do
   putStrLn "multi-round pure (two Moore agents)"
   do
     let rounds = 3 :: Int
-        nudge :: Agent (->) [Post] Post [Post]
+        nudge :: Agent (->) [Post Text] (Post Text) [Post Text]
         nudge =
           tape
             ( const
                 [mkPost "nudge" ["worker"] "tell me more."]
             )
-        worker :: Agent (->) [Post] Post [Post]
+        worker :: Agent (->) [Post Text] (Post Text) [Post Text]
         worker =
           tape
             ( \hist ->
@@ -599,14 +602,14 @@ main = do
   do
     let p1 = mkPost "human" ["j"] "hi"
         p2 = mkPost "j" ["human"] "ack"
-        fixedShard :: Shard Identity [Post] [Post]
+        fixedShard :: Shard Identity [Post Text] [Post Text]
         fixedShard = endsK (\_ -> pure ()) (pure [p2])
         coded = codecShard (map (\p -> p {body = "in:" <> body p})) (map (\p -> p {body = body p <> ":out"})) fixedShard
         out = runIdentity (runKleisli (close (conjoint coded) (companion coded)) [p1])
     assert "codec transforms commit and emit" $
       map body out == ["ack:out"]
 
-    let accumShard :: Shard (State [Post]) [Post] [Post]
+    let accumShard :: Shard (State [Post Text]) [Post Text] [Post Text]
         accumShard = endsK (\ps -> modify (ps ++)) get
         composed = composeShard accumShard (suffixShard (map (\p -> p {body = body p <> "!"})) accumShard)
         (out2, st) = runState (runKleisli (close (conjoint composed) (companion composed)) [p1]) []
@@ -618,7 +621,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "agent as shard"
   do
-    let ack :: Agent (->) [Post] Post [Post]
+    let ack :: Agent (->) [Post Text] (Post Text) [Post Text]
         ack = tape (reply "j")
         pIn = mkPost "human" ["j"] "hi"
         -- pure closed form
@@ -627,7 +630,7 @@ main = do
       map body outs == ["ack: hi"] && length (asState seat) == 1
 
     -- same citizen as Ends (Kleisli State) — commit/emit only at the boundary
-    let sh :: Shard (State (AgentSeat [Post])) [Post] [Post]
+    let sh :: Shard (State (AgentSeat [Post Text] Text)) [Post Text] [Post Text]
         sh = agentShard get put ack
         (outs2, seat2) =
           runState
@@ -646,7 +649,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "O5: arity change"
   do
-    let arityBreaker :: Agent (->) [Post] Post [Post]
+    let arityBreaker :: Agent (->) [Post Text] (Post Text) [Post Text]
         arityBreaker =
           tape
             ( \hist ->
@@ -670,17 +673,17 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "branch agent"
   do
-    let liftAgent :: Agent (->) [Post] Post [Post] -> Agent (->) (Bool, [Post]) Post [Post]
+    let liftAgent :: Agent (->) [Post Text] (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         liftAgent sys =
           System $ \((tag, hist), d) ->
             let inp = monoDir d
                 (outs, next) = runSystem sys hist
              in ((tag, next inp), (outs, ()))
-        calcOnly :: Agent (->) [Post] Post [Post]
+        calcOnly :: Agent (->) [Post Text] (Post Text) [Post Text]
         calcOnly = tape calc
-        echoOnly :: Agent (->) [Post] Post [Post]
+        echoOnly :: Agent (->) [Post Text] (Post Text) [Post Text]
         echoOnly = tape (reply "j")
-        branchy :: Agent (->) (Bool, [Post]) Post [Post]
+        branchy :: Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         branchy = branchAgent fst (liftAgent calcOnly) (liftAgent echoOnly)
         pCalc = mkPost "human" ["j"] "1 2 3"
         pEcho = mkPost "human" ["j"] "hello"
@@ -704,17 +707,17 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "port (token seat)"
   do
-    let ack :: Agent (->) [Post] Post [Post]
+    let ack :: Agent (->) [Post Text] (Post Text) [Post Text]
         ack = tape (reply "j")
         pIn = mkPost "human" ["j"] "hi"
         -- agent as list shard, then token seat via stream buffers
-        sh :: Shard (State (AgentSeat [Post], [Post], [Post])) [Post] [Post]
+        sh :: Shard (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) [Post Text] [Post Text]
         sh =
           agentShard
             (gets (\(seat, _, _) -> seat))
             (\seat -> modify (\(_, i, o) -> (seat, i, o)))
             ack
-        port :: Port (State (AgentSeat [Post], [Post], [Post]))
+        port :: Port (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) Text
         port =
           portShard
             (gets (\(_, i, _) -> i))
@@ -753,13 +756,13 @@ main = do
   putStrLn "tool call"
   do
     -- type: tool call ≡ Post addressed to the tool
-    let call :: Post
+    let call :: Post Text
         call = toolCall "j" "calc" "1 2 3"
     assert "tool call addr is the tool" $ to call == ["calc"]
     assert "tool call body is the args" $ body call == "1 2 3"
 
     -- code: pure Agent that emits a tool-call Post
-    let caller :: Agent (->) [Post] Post [Post]
+    let caller :: Agent (->) [Post Text] (Post Text) [Post Text]
         caller = tape callCalc
         human = mkPost "human" ["j"] "please sum 1 2 3"
         (outs, _) = runAgentShard caller (AgentSeat [] []) [human]
@@ -769,13 +772,13 @@ main = do
         _ -> False
 
     -- example: Port (Ends Post Post) — one token in, tool-call token out
-    let sh :: Shard (State (AgentSeat [Post], [Post], [Post])) [Post] [Post]
+    let sh :: Shard (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) [Post Text] [Post Text]
         sh =
           agentShard
             (gets (\(s, _, _) -> s))
             (\s -> modify (\(_, i, o) -> (s, i, o)))
             caller
-        port :: Port (State (AgentSeat [Post], [Post], [Post]))
+        port :: Port (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) Text
         port =
           portShard
             (gets (\(_, i, _) -> i))
@@ -801,7 +804,7 @@ main = do
     let secret = mkPost "ops" ["j"] "bus emergency — do not show yet"
         public = mkPost "human" ["j"] "hi j"
         held = [secret, public] -- store exists; not all of it is delivered
-        agent = tape (reply "j") :: Agent (->) [Post] Post [Post]
+        agent = tape (reply "j") :: Agent (->) [Post Text] (Post Text) [Post Text]
 
         -- release only public (withhold secret)
         released = filter ((== "human") . from) held
@@ -830,7 +833,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "agent graph wiring"
   do
-    let echo :: Text -> [Post] -> [Post]
+    let echo :: Text -> [Post Text] -> [Post Text]
         echo name hist =
           let p = peek hist
            in [mkPost name [] ("ack:" <> body p)]
@@ -846,11 +849,11 @@ main = do
       any ((== "j") . from) logBus && any ((== "k") . from) logBus
 
   do
-    let summary :: [Post] -> [Post]
+    let summary :: [Post Text] -> [Post Text]
         summary hist =
           let p = peek hist
            in [mkPost "hub" [] ("summary: " <> body p)]
-        leafEcho :: [Post] -> [Post]
+        leafEcho :: [Post Text] -> [Post Text]
         leafEcho hist =
           let p = peek hist
            in [mkPost "leaf" [] ("leaf:" <> body p)]
@@ -866,7 +869,7 @@ main = do
       any ((== "hub") . from) logStar
 
   do
-    let echo :: Text -> [Post] -> [Post]
+    let echo :: Text -> [Post Text] -> [Post Text]
         echo name hist =
           let p = peek hist
            in [mkPost name [] ("ack:" <> body p)]
@@ -914,7 +917,7 @@ main = do
     assert "self-loop halts on mark: log stops growing after the halt post (silent last turn)" $
       null (dOutputs (last derivs))
     assert "self-loop halts on mark: quiescence reached" $
-      all (\(_n, st) -> not (hasPending st)) states
+      all (\(_n, st) -> not (hasPending @Text st)) states
 
   -------------------------------------------------------------------------
   -- Silence is quiescence: with no new card-addressed posts the loop
@@ -922,7 +925,8 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "silence is quiescence"
   do
-    let quietLog = [mkPost "human" ["someone-else"] "not addressed to the card"]
+    let quietLog :: [Post Text]
+        quietLog = [mkPost "human" ["someone-else"] "not addressed to the card"]
         (_qStates, qLog, qDerivs) = loop [("xyzzy", tape (reply "xyzzy"))] quietLog
     assert "silence is quiescence: loop with no card posts is identity on the log" $
       qLog == quietLog
@@ -935,7 +939,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "fork is id"
   do
-    let agent = tape (reply "xyzzy") :: Agent (->) [Post] Post [Post]
+    let agent = tape (reply "xyzzy") :: Agent (->) [Post Text] (Post Text) [Post Text]
         p1 = mkPost "human" ["xyzzy"] "one"
         p2 = mkPost "human" ["xyzzy"] "two"
         (_outs0, seat0) = runAgentShard agent (AgentSeat [] []) [p1]
@@ -956,8 +960,8 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "fan-in lands exactly one post"
   do
-    let worker = tape (reply "xyzzy") :: Agent (->) [Post] Post [Post]
-        main0 = AgentSeat [] [] :: AgentSeat [Post]
+    let worker = tape (reply "xyzzy") :: Agent (->) [Post Text] (Post Text) [Post Text]
+        main0 = AgentSeat [] [] :: AgentSeat [Post Text] Text
         prompt1 = mkPost "human" ["xyzzy"] "task one"
         prompt2 = mkPost "human" ["xyzzy"] "task two"
         (outs1, fork1) = runAgentShard worker main0 [prompt1]
@@ -994,8 +998,8 @@ main = do
   do
     let seed = mkPost "human" ["xyzzy"] "start"
         t0 = [seed]
-        agentA = tape (cardEcho "a") :: Agent (->) [Post] Post [Post]
-        agentB = tape (cardEcho "b") :: Agent (->) [Post] Post [Post]
+        agentA = tape (cardEcho "a") :: Agent (->) [Post Text] (Post Text) [Post Text]
+        agentB = tape (cardEcho "b") :: Agent (->) [Post Text] (Post Text) [Post Text]
         -- one round: first seat turns, new card posts route to both inboxes
         -- (self-loop: its own reply re-enters), then the second seat turns.
         mkRound first second (stF, stS, lg) =
@@ -1006,7 +1010,8 @@ main = do
               stF3 = feedState (diffLog lg1 lg2) stF''
               stS3 = feedState (diffLog lg1 lg2) stS''
            in (stF3, stS3, lg2)
-        pending (stF, stS, _) = hasPending stF || hasPending stS
+        pending :: (AgentState [Post Text] [Post Text], AgentState [Post Text] [Post Text], [Post Text]) -> Bool
+        pending (stF, stS, _) = hasPending @Text stF || hasPending @Text stS
         settle round0 s0 = head (dropWhile pending (iterate round0 s0))
         states0 = (seedState ["xyzzy"] t0, seedState ["xyzzy"] t0, t0)
         (_, _, lgAB) = settle (mkRound agentA agentB) states0
@@ -1036,11 +1041,11 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "race is orElse with silence as zero"
   do
-    let f :: [Post] -> [Post]
+    let f :: [Post Text] -> [Post Text]
         f = const [mkPost "f" [] "f"]
-        g :: [Post] -> [Post]
+        g :: [Post Text] -> [Post Text]
         g = const [mkPost "g" [] "g"]
-        h :: [Post] -> [Post]
+        h :: [Post Text] -> [Post Text]
         h = const [mkPost "h" [] "h"]
     assert "race: silent is left identity" $ raceP silent f [] == f []
     assert "race: silent is right identity" $ raceP f silent [] == f []
@@ -1054,11 +1059,11 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "await is product with silence as unit"
   do
-    let f :: [Post] -> [Post]
+    let f :: [Post Text] -> [Post Text]
         f = const [mkPost "f" [] "f"]
-        g :: [Post] -> [Post]
+        g :: [Post Text] -> [Post Text]
         g = const [mkPost "g" [] "g"]
-        h :: [Post] -> [Post]
+        h :: [Post Text] -> [Post Text]
         h = const [mkPost "h" [] "h"]
     assert "await: silent is left unit" $ awaitP silent f [] == f []
     assert "await: silent is right unit" $ awaitP f silent [] == f []
@@ -1070,9 +1075,9 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "race takes the whole winning branch emit"
   do
-    let f2 :: [Post] -> [Post]
+    let f2 :: [Post Text] -> [Post Text]
         f2 = const [mkPost "f" [] "f1", mkPost "f" [] "f2"]
-        g1 :: [Post] -> [Post]
+        g1 :: [Post Text] -> [Post Text]
         g1 = const [mkPost "g" [] "g"]
     assert "race: left branch whole emit wins" $ raceP f2 g1 [] == f2 []
     assert "race: not just the first post of concat" $ raceP f2 g1 [] /= take 1 (f2 [] ++ g1 [])
@@ -1087,13 +1092,13 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "exchange probe"
   do
-    let a :: [Post] -> [Post]
+    let a :: [Post Text] -> [Post Text]
         a = const [mkPost "a" [] "a"]
-        b :: [Post] -> [Post]
+        b :: [Post Text] -> [Post Text]
         b = const [mkPost "b" [] "b"]
-        c :: [Post] -> [Post]
+        c :: [Post Text] -> [Post Text]
         c = const [mkPost "c" [] "c"]
-        d :: [Post] -> [Post]
+        d :: [Post Text] -> [Post Text]
         d = const [mkPost "d" [] "d"]
         leftHand = outcomesRace (awaitP a c) (awaitP b d) []
         rightHand = [x <> y | x <- outcomesRace a b [], y <- outcomesRace c d []]
@@ -1170,8 +1175,8 @@ main = do
   do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
-        f = const [p] :: [Post] -> [Post]
-        g = const [q] :: [Post] -> [Post]
+        f = const [p] :: [Post Text] -> [Post Text]
+        g = const [q] :: [Post Text] -> [Post Text]
         a = constAgent [p]
         b = constAgent [q]
         ins = [mkPost "human" [] "one", mkPost "human" [] "two"]
@@ -1202,8 +1207,8 @@ main = do
     assert "retry: resumes after commit" $ fmap body resumed == Just "hello"
     -- Extensional equivalence: a retrying emit with an orElse fallback []
     -- equals the silent agent on an empty commit.
-    commitVar <- newTVarIO ([] :: [Post])
-    let stmEmit :: STM [Post]
+    commitVar <- newTVarIO ([] :: [Post Text])
+    let stmEmit :: STM [Post Text]
         stmEmit =
           readTVar commitVar >>= \case
             [] -> retry
@@ -1220,10 +1225,10 @@ main = do
     rightFlag <- newTVarIO False
     let leftPost = mkPost "l" [] "left"
         rightPost = mkPost "r" [] "right"
-        branch flag branchPost = do
+        raceBranch flag branchPost = do
           ok <- readTVar flag
           if ok then pure [branchPost] else retry
-        raceSTM = branch leftFlag leftPost `orElse` branch rightFlag rightPost
+        raceSTM = raceBranch leftFlag leftPost `orElse` raceBranch rightFlag rightPost
     resA <- atomically raceSTM
     assert "orElse: left wins when only left ready" $ resA == [leftPost]
     atomically $ do
@@ -1383,7 +1388,7 @@ main = do
 
   do
     let k = 3 :: Int
-        selfEcho :: AgentS [Post] Post
+        selfEcho :: AgentS [Post Text] (Post Text)
         selfEcho = agentM $ tape $ \hist ->
           if length hist >= k
             then []
@@ -1419,7 +1424,7 @@ main = do
 
   do
     let k = 3 :: Int
-        selfEcho :: AgentS [Post] Post
+        selfEcho :: AgentS [Post Text] (Post Text)
         selfEcho = agentM $ tape $ \hist ->
           if length hist >= k
             then []
@@ -1454,7 +1459,7 @@ main = do
 
     -- Spike A: composed token frame
     (sTok, remTok) <- do
-      ends <- atomically $ openSTM (Unbounded :: Queue Post)
+      ends <- atomically $ openSTM (Unbounded :: Queue (Post Text))
       atomically $ writeEndSTM ends seed
       atomically $ do
         s' <- runKleisli (quiesce (frameToken selfEcho ends ends)) []
@@ -1469,7 +1474,7 @@ main = do
 
     -- Spike B: composed bundle frame
     (sBun, remBun) <- do
-      ends <- atomically $ openSTM (Unbounded :: Queue [Post])
+      ends <- atomically $ openSTM (Unbounded :: Queue [Post Text])
       atomically $ writeEndSTM ends [seed]
       atomically $ do
         s' <- runKleisli (quiesce (frameBundle selfEcho ends ends)) []
@@ -1484,7 +1489,7 @@ main = do
 
     -- Agreement with the bind-spelled selfLoopS
     sRef <- do
-      ends <- atomically $ openSTM (Unbounded :: Queue Post)
+      ends <- atomically $ openSTM (Unbounded :: Queue (Post Text))
       atomically $ writeEndSTM ends seed
       atomically $ selfLoopS selfEcho [] ends
     assert "spike A agrees with selfLoopS" $ sTok == sRef
@@ -1498,7 +1503,7 @@ main = do
 
   do
     let k = 3 :: Int
-        selfEcho :: AgentS [Post] Post
+        selfEcho :: AgentS [Post Text] (Post Text)
         selfEcho = agentM $ tape $ \hist ->
           if length hist >= k
             then []
@@ -1510,7 +1515,7 @@ main = do
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
 
     -- Loop version: bundle wire, Either-trace iteration
-    endsL <- atomically $ openSTM (Unbounded :: Queue [Post])
+    endsL <- atomically $ openSTM (Unbounded :: Queue [Post Text])
     atomically $ writeEndSTM endsL [seed]
     (sLoop, remainingL) <- atomically $ do
       s' <- selfLoopL selfEcho [] endsL
@@ -1526,13 +1531,13 @@ main = do
 
     -- Reference run with the bind-spelled token self-loop
     sRef <- do
-      endsRef <- atomically $ openSTM (Unbounded :: Queue Post)
+      endsRef <- atomically $ openSTM (Unbounded :: Queue (Post Text))
       atomically $ writeEndSTM endsRef seed
       atomically $ selfLoopS selfEcho [] endsRef
     assert "Loop self-loop agrees with selfLoopS" $ sLoop == sRef
 
   -------------------------------------------------------------------------
-  -- Shard-level tensors (StateT [Post] IO)
+  -- Shard-level tensors (StateT [Post Text] IO)
   --
   -- These are the semantic citizens that free-agent 'FreeSeat' terms fold
   -- into.  Laws are tested directly on shards, independent of any free syntax.
@@ -1662,11 +1667,11 @@ main = do
        in os ++ behA sys s' ins
 
     -- \| Tool call as data: from = caller, to = [tool], body = args.
-    toolCall :: Text -> Text -> Text -> Post
+    toolCall :: Text -> Text -> Text -> Post Text
     toolCall from tool = mkPost from [tool]
 
     -- \| Agent policy: on a "please sum …" human, emit a calc tool call.
-    callCalc :: [Post] -> [Post]
+    callCalc :: [Post Text] -> [Post Text]
     callCalc hist =
       let p = peek hist
           args =
@@ -1675,7 +1680,7 @@ main = do
               else body p
        in [toolCall "j" "calc" args]
 
-    llmJ :: [Post] -> [Post]
+    llmJ :: [Post Text] -> [Post Text]
     llmJ hist =
       let p = peek hist
        in [ if "calc:" `T.isPrefixOf` body p
@@ -1687,7 +1692,7 @@ main = do
                   ("final: " <> body p)
           ]
 
-    calc :: [Post] -> [Post]
+    calc :: [Post Text] -> [Post Text]
     calc hist =
       let p = peek hist
        in [ mkPost
@@ -1698,7 +1703,7 @@ main = do
 
     -- \| Self-loop policy: echo card posts back to the same card; after k
     -- rounds emit the halt mark; silence once the mark is on the card.
-    selfLoopPolicy :: Text -> Int -> [Post] -> [Post]
+    selfLoopPolicy :: Text -> Int -> [Post Text] -> [Post Text]
     selfLoopPolicy name k hist =
       let p = peek hist
        in if "🟢" `T.isPrefixOf` body p
@@ -1710,7 +1715,7 @@ main = do
 
     -- \| Neutral card policy: answer human posts once with a halt-marked
     -- echo back to the card; silence on anything else (including the marks).
-    cardEcho :: Text -> [Post] -> [Post]
+    cardEcho :: Text -> [Post Text] -> [Post Text]
     cardEcho name hist =
       let p = peek hist
        in if from p == "human"
