@@ -50,7 +50,8 @@ module Circuit.Agent
     Post (..),
     mkPost,
     replyTo,
-    branch,
+    synthesis,
+    branches,
     Log,
     emptyLog,
     Name,
@@ -202,7 +203,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
 import Control.Concurrent.STM (STM, atomically, orElse)
 import Data.Foldable (traverse_)
-import Data.List (find, foldl')
+import Data.List (find, foldl', nub, sort)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
@@ -221,51 +222,71 @@ type Name = Text
 -- | A single entry on the shared log, polymorphic in payload.
 --
 -- Routing is by name list: a post delivers to every agent whose name appears
--- in 'to' (the audience).  'thread' is the ancestry edge: 'Nothing' for a
--- root post, @'Just' n@ for a reply, where @n@ is the sender of the post
--- being replied to.  Names are labels, not identity — a thread edge resolves
--- to a particular post by log order (most recent prior post by that name);
--- see 'branch'.
+-- in 'to' (the audience).  'thread' is the ancestry edges: @[]@ for a root
+-- post, otherwise the senders of the posts being replied to or synthesised
+-- from.  Parents are a set (duplicates discarded) in normalised (sorted)
+-- order — the smart constructors keep it so.  Names are labels, not
+-- identity — a thread edge resolves to a particular post by log order (most
+-- recent prior post by that name); see 'branches'.
 data Post a = Post
   { from :: Name,
     to :: [Name],
-    thread :: Maybe Name,
+    thread :: [Name],
     body :: a
   }
   deriving (Show, Eq, Ord, Functor)
 
--- | A fresh root post (empty thread).
+-- | A fresh root post (no parents).
 mkPost :: Name -> [Name] -> a -> Post a
-mkPost f t b = Post f t Nothing b
+mkPost f t b = Post f t [] b
 
 -- | A reply: the audience is the parent's sender plus the rest of the
--- parent's audience (minus self); the thread edge points at the parent's
--- sender.
+-- parent's audience (minus self); the sole thread edge points at the
+-- parent's sender.
 replyTo :: Name -> Post a -> b -> Post b
 replyTo who p b =
   Post
     { from = who,
       to = from p : filter (/= who) (to p),
-      thread = Just (from p),
+      thread = [from p],
       body = b
     }
 
--- | The label-branch from a post to its conversation root, resolved against
--- the posts prior to it (oldest first).  Each thread edge resolves to the
--- most recent prior post by that name; a dangling edge keeps its label.
--- Branches of replies are pure cons:
+-- | A synthesis: one descendant of several parents — the object-level
+-- wire-merge dual to merging agents.  The ancestry cites every parent's
+-- sender as a normalised set (sorted, duplicates discarded).
+synthesis :: Name -> [Name] -> [Post a] -> b -> Post b
+synthesis who audience ps b =
+  Post
+    { from = who,
+      to = audience,
+      thread = sortNub (map from ps),
+      body = b
+    }
+
+-- | Sorted, duplicate-free.
+sortNub :: (Ord a) => [a] -> [a]
+sortNub = nub . sort
+
+-- | The label-branches from a post to its conversation roots, resolved
+-- against the posts prior to it (oldest first).  Each thread edge resolves
+-- to the most recent prior post by that name; a dangling edge keeps its
+-- label.  A root post has one trivial branch; every parent edge contributes
+-- its own path.  Branches of replies are pure cons:
 --
--- prop> branch prior (replyTo who p b) == who : branch prior p
-branch :: (Eq a) => [Post a] -> Post a -> [Name]
-branch prior p0 = go prior p0
+-- prop> branches prior (replyTo who p b) == map (who :) (branches prior p)
+branches :: (Eq a) => [Post a] -> Post a -> [[Name]]
+branches prior p0 = go prior p0
   where
     go pre p =
-      from p : case thread p of
-        Nothing -> []
-        Just n ->
-          case find ((== n) . from) (reverse pre) of
-            Nothing -> [n]
-            Just q -> go (takeWhile (/= q) pre) q
+      case thread p of
+        [] -> [[from p]]
+        ns -> concatMap (step pre p) ns
+
+    step pre p n =
+      case find ((== n) . from) (reverse pre) of
+        Nothing -> [[from p, n]]
+        Just q -> map (from p :) (go (takeWhile (/= q) pre) q)
 
 -- | The shared append-only log, newest first.
 --

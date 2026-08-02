@@ -102,7 +102,7 @@ policyAgent (Tag name) = tape $ \hist ->
 policyAgent (Const txt) =
   tape $
     const
-      [Post {from = "agent", to = [], thread = Nothing, body = txt}]
+      [Post {from = "agent", to = [], thread = [], body = txt}]
 
 genPolicy :: Gen Policy
 genPolicy =
@@ -123,7 +123,7 @@ genPost = do
   sender <- genName
   ch <- genChannel
   b <- elements ["one", "two", "three"]
-  pure (Post {from = sender, to = [ch], thread = Nothing, body = b})
+  pure (Post {from = sender, to = [ch], thread = [], body = b})
 
 genInputs :: Gen [Post Text]
 genInputs = listOf1 genPost

@@ -9,7 +9,7 @@
 -- (when told) rejects --resume so the stale-fallback path is exercised.
 module Main (main) where
 
-import Circuit.Agent (Post (..), branch, mkPost, replyTo)
+import Circuit.Agent (Post (..), branches, mkPost, replyTo, synthesis)
 import Circuit.Agent.Cli
 import Control.Monad (when)
 import Data.Text (Text)
@@ -175,38 +175,55 @@ main = do
   assert "empty commit emits nothing" (null r3)
 
   putStrLn "thread (ancestry) oracles"
-  assert "root post has empty thread" (thread p1 == Nothing)
+  assert "root post has no parents" (thread p1 == [])
   assert
     "reply threads onto the parent's sender"
-    (thread (replyTo "kimi" p2 "x" :: Post Text) == Just "grok")
+    (thread (replyTo "kimi" p2 "x" :: Post Text) == ["grok"])
   assert
     "replyPosts threads onto the last input's sender"
     (case replyPosts "kimi" [p1, p2] "sure" of
-       [rp] -> thread rp == Just "grok"
+       [rp] -> thread rp == ["grok"]
        _ -> False)
   let r1' :: Post Text
       r1' = replyTo "kimi" p2 "a"
       r2' :: Post Text
       r2' = replyTo "tony" r1' "b"
   assert
-    "branch of a root is its sender"
-    (branch [p1, p2] p2 == ["grok"])
+    "branches of a root are its sender"
+    (branches [p1, p2] p2 == [["grok"]])
   assert
-    "branch of a reply is pure cons"
-    (branch [p1, p2] r1' == "kimi" : branch [p1, p2] p2)
+    "branches of a reply are pure cons"
+    (branches [p1, p2] r1' == map ("kimi" :) (branches [p1, p2] p2))
   assert
-    "branch unfolds a three-post thread"
-    (branch [p1, p2, r1'] r2' == ["tony", "kimi", "grok"])
+    "branches unfolds a three-post thread"
+    (branches [p1, p2, r1'] r2' == [["tony", "kimi", "grok"]])
   let r0 :: Post Text
       r0 = replyTo "kimi" p1 "old"
   assert
     "ambiguous edge resolves to the most recent prior post"
-    (branch [p1, p2, r0, r1'] r2' == ["tony", "kimi", "grok"])
+    (branches [p1, p2, r0, r1'] r2' == [["tony", "kimi", "grok"]])
   let dangling :: Post Text
-      dangling = (mkPost "x" ["y"] "z") {thread = Just "ghost"}
+      dangling = (mkPost "x" ["y"] "z") {thread = ["ghost"]}
   assert
     "dangling thread edge keeps its label"
-    (branch [] dangling == ["x", "ghost"])
+    (branches [] dangling == [["x", "ghost"]])
+
+  putStrLn "synthesis (wire-merge) oracles"
+  let syn :: Post Text
+      syn = synthesis "sum" ["human"] [p2, p1] "Σ"
+  assert
+    "synthesis ancestry is a normalised set of parent senders"
+    (thread syn == ["grok", "tony"])
+  assert
+    "synthesis ancestry discards duplicate senders"
+    (thread (synthesis "sum" [] [p1, p1] "Σ" :: Post Text) == ["tony"])
+  assert
+    "branches of a synthesis has one path per parent"
+    (branches [p1, p2] syn == [["sum", "grok"], ["sum", "tony"]])
+  assert
+    "branches of a synthesis continues through each parent"
+    (branches [p1, p2, r1'] (synthesis "sum" [] [r1', p1] "Σ" :: Post Text)
+       == [["sum", "kimi", "grok"], ["sum", "tony"]])
 
   putStrLn "cliQuery against fake CLI (process oracle)"
   tmp <- getTemporaryDirectory
