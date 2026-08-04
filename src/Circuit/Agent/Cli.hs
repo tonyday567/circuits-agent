@@ -35,7 +35,7 @@ module Circuit.Agent.Cli
   )
 where
 
-import Circuit.Agent (Ends (..), Post (..), Shard, close, replyTo, shard, sortNub, synthesis)
+import Circuit.Agent (Ends (..), Post (..), PostId, Shard, close, mkPost, replyTo, shard, sortNub, synthesis)
 import Control.Arrow (runKleisli)
 import Control.Exception (SomeException, try)
 import Control.Monad (when)
@@ -272,10 +272,11 @@ writeStoredSession path sid = do
   TIO.writeFile path sid
 
 -- | Hermes-flavoured TUI noise filter: drops session chatter, decorative
--- rules, and ANSI lines; keeps plain reply text.
+-- rules, and ANSI lines; keeps plain reply text with no trailing newline.
 cleanCliOut :: Text -> Text
 cleanCliOut =
-  T.unlines
+  T.strip
+    . T.unlines
     . filter keep
     . map T.strip
     . T.lines
@@ -317,33 +318,50 @@ sessionPrompt = T.intercalate "\n" . map body
 --
 -- Addresses the last input's sender, preserves any other names on the
 -- original wire (e.g. the bus channel), and threads onto the last input's
--- sender (see 'replyTo').  Empty reply → no posts (quiet).
-replyPosts :: Text -> [Post Text] -> Text -> [Post Text]
-replyPosts who ins reply =
+-- 'PostId' when one is supplied.  Empty reply → no posts (quiet).
+--
+-- The caller passes one 'PostId' per input post in the same order.  If the
+-- ids are missing or misaligned, the reply is still addressed correctly but
+-- carries no thread edge (see 'mkPost') — the honest fallback when a shard
+-- does not have access to the stamped log.
+replyPosts :: Text -> [Post Text] -> [PostId] -> Text -> [Post Text]
+replyPosts who ins ids reply =
   case (listToMaybe (reverse ins), T.strip reply) of
     (_, r) | T.null r -> []
     (Nothing, _) -> []
-    (Just lastIn, r) -> [replyTo who lastIn r]
+    (Just lastIn, r) ->
+      let to' = from lastIn : filter (/= who) (to lastIn)
+       in case listToMaybe (reverse ids) of
+            Just parentId -> [replyTo who parentId lastIn r]
+            Nothing -> [mkPost who to' r]
 
 -- | Build one synthesis post from a cleaned agent response.
 --
 -- The honest twin of 'replyPosts' for seats that fold /every/ input into
--- their answer: ancestry cites every input's sender (see 'synthesis'),
+-- their answer: ancestry cites every input's 'PostId' (see 'synthesis'),
 -- and the audience is every input's sender and wire name, minus self.
 -- Empty reply or no inputs → no posts (quiet).
-synthesisPosts :: Text -> [Post Text] -> Text -> [Post Text]
-synthesisPosts who ins reply =
+--
+-- The caller passes one 'PostId' per input post.  If ids are missing the
+-- synthesis is still addressed correctly but carries no thread edge.
+synthesisPosts :: Text -> [Post Text] -> [PostId] -> Text -> [Post Text]
+synthesisPosts who ins ids reply =
   case (ins, T.strip reply) of
     (_, r) | T.null r -> []
     ([], _) -> []
     (_, r) ->
       let audience = filter (/= who) (sortNub (concatMap (\p -> from p : to p) ins))
-       in [synthesis who audience ins r]
+          parentIds = take (length ins) ids
+       in [if null parentIds then mkPost who audience r else synthesis who audience parentIds r]
 
 -- | Opaque evaluate seat: any @Text -> IO Text@ behind list ends.
 --
 -- Commit assembles a session prompt from the input posts; emit is
 -- 'replyPosts' of the query result (empty = quiet).
+--
+-- TODO: this generic seat does not have access to stamped log ids, so
+-- emitted replies carry no thread edge.  Callers that need provenance
+-- should use a variant that supplies parent ids.
 queryShard :: Text -> (Text -> IO Text) -> IO (Shard IO [Post Text] [Post Text])
 queryShard = queryShardWith replyPosts
 
@@ -351,12 +369,15 @@ queryShard = queryShardWith replyPosts
 -- input's sender as ancestry ('synthesisPosts').  For seats that fold the
 -- whole input into one answer — the honest-provenance twin of
 -- 'queryShard'.
+--
+-- TODO: like 'queryShard', the generic seat has no ids and therefore emits
+-- syntheses without thread edges.
 synthShard :: Text -> (Text -> IO Text) -> IO (Shard IO [Post Text] [Post Text])
 synthShard = queryShardWith synthesisPosts
 
 -- | 'queryShard' parameterised on the reply-to-posts builder.
 queryShardWith ::
-  (Text -> [Post Text] -> Text -> [Post Text]) ->
+  (Text -> [Post Text] -> [PostId] -> Text -> [Post Text]) ->
   Text ->
   (Text -> IO Text) ->
   IO (Shard IO [Post Text] [Post Text])
@@ -369,7 +390,9 @@ queryShardWith posts who query = do
             then writeIORef outbox []
             else do
               reply <- query (sessionPrompt ins)
-              writeIORef outbox (posts who ins reply)
+              -- Generic seats have no stamped parent ids; the builder's
+              -- fallback (mkPost) keeps addressing honest.
+              writeIORef outbox (posts who ins [] reply)
       )
       (atomicModifyIORef' outbox ([],))
 
