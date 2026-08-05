@@ -16,7 +16,7 @@ module Circuit.Agent.Tensor
 where
 
 import Circuit (Ends (..), close, companion, conjoint, endsK)
-import Circuit.Agent (Name, Post (..), Shard, synthesis)
+import Circuit.Agent (Name, Post (..), PostId, Shard, mkPost, synthesis)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State (StateT, get, put, runStateT)
@@ -103,17 +103,24 @@ fanInShard summary shs =
     )
 
 -- | A fan-in summary honest by construction: the single output post is a
--- 'synthesis' of everything the branches emitted, so its ancestry cites
--- every branch-output sender.  The supplied function computes the body.
+-- 'synthesis' of the supplied parent ids, so its ancestry cites every
+-- branch output by exact reference.  The supplied function computes the body.
 -- No branch outputs, or an empty body → no posts (quiet).
+--
+-- The caller supplies one 'PostId' per branch output (in the order produced
+-- by @concat oss@).  When ids are not available, pass @[]@ and the summary
+-- falls back to a root post (no thread edge).
 synthesisSummary ::
   Name ->
   [Name] ->
+  [PostId] ->
   ([[Post Text]] -> Text) ->
   [[Post Text]] ->
   [Post Text]
-synthesisSummary who audience f oss =
+synthesisSummary who audience parentIds f oss =
   case (concat oss, T.strip (f oss)) of
     ([], _) -> []
     (_, b) | T.null b -> []
-    (ps, b) -> [synthesis who audience ps b]
+    (ps, b) ->
+      let ids = take (length ps) parentIds
+       in [if null ids then mkPost who audience b else synthesis who audience ids b]

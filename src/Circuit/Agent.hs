@@ -48,6 +48,7 @@
 module Circuit.Agent
   ( -- * Posts and the log
     Post (..),
+    PostId,
     mkPost,
     replyTo,
     synthesis,
@@ -199,14 +200,15 @@ import Circuit.Loop (Loop (..))
 import Circuit.Layer (run)
 import Circuit.Poly (Eval (..), Mono, System (..), fromEvalSystem, monoDir, monoIn)
 import Circuit.Poly.Process (after, runSystem)
-import Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
+import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
 import Control.Concurrent.STM (STM, atomically, orElse)
 import Data.Foldable (traverse_)
-import Data.List (find, foldl', nub, sort)
+import Data.List (find, foldl', genericIndex, genericTake, nub, sort)
 import Data.Map (Map)
+import Numeric.Natural (Natural)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Sequence (Seq)
@@ -221,19 +223,22 @@ import Data.Text (Text, empty)
 -- | Agent name on the shared log.
 type Name = Text
 
+-- | Absolute post identity.  In the stamped log this is the line id assigned
+-- by the single writer; in pure meeting logs it is the positional index in
+-- the oldest-first log that 'branches' resolves against.
+type PostId = Natural
+
 -- | A single entry on the shared log, polymorphic in payload.
 --
 -- Routing is by name list: a post delivers to every agent whose name appears
 -- in 'to' (the audience).  'thread' is the ancestry edges: @[]@ for a root
--- post, otherwise the senders of the posts being replied to or synthesised
+-- post, otherwise the 'PostId's of the posts being replied to or synthesised
 -- from.  Parents are a set (duplicates discarded) in normalised (sorted)
--- order — the smart constructors keep it so.  Names are labels, not
--- identity — a thread edge resolves to a particular post by log order (most
--- recent prior post by that name); see 'branches'.
+-- order — the smart constructors keep it so.
 data Post a = Post
   { from :: Name,
     to :: [Name],
-    thread :: [Name],
+    thread :: [PostId],
     body :: a
   }
   deriving (Show, Eq, Ord, Functor)
@@ -243,26 +248,26 @@ mkPost :: Name -> [Name] -> a -> Post a
 mkPost f t b = Post f t [] b
 
 -- | A reply: the audience is the parent's sender plus the rest of the
--- parent's audience (minus self); the sole thread edge points at the
--- parent's sender.
-replyTo :: Name -> Post a -> b -> Post b
-replyTo who p b =
+-- parent's audience (minus self); the sole thread edge cites the parent's
+-- 'PostId'.
+replyTo :: Name -> PostId -> Post a -> b -> Post b
+replyTo who parentId p b =
   Post
     { from = who,
       to = from p : filter (/= who) (to p),
-      thread = [from p],
+      thread = [parentId],
       body = b
     }
 
 -- | A synthesis: one descendant of several parents — the object-level
--- wire-merge dual to merging agents.  The ancestry cites every parent's
--- sender as a normalised set (sorted, duplicates discarded).
-synthesis :: Name -> [Name] -> [Post a] -> b -> Post b
-synthesis who audience ps b =
+-- wire-merge dual to merging agents.  The ancestry cites every parent id as
+-- a normalised set (sorted, duplicates discarded).
+synthesis :: Name -> [Name] -> [PostId] -> b -> Post b
+synthesis who audience parentIds b =
   Post
     { from = who,
       to = audience,
-      thread = sortNub (map from ps),
+      thread = sortNub parentIds,
       body = b
     }
 
@@ -272,33 +277,33 @@ sortNub :: (Ord a) => [a] -> [a]
 sortNub = nub . sort
 
 -- | The label-branches from a post to its conversation roots, resolved
--- against the posts prior to it (oldest first).  Each thread edge resolves
--- to the most recent prior post by that name; a dangling edge keeps its
--- label.  A root post has one trivial branch; every parent edge contributes
--- its own path.  Branches of replies are pure cons:
+-- against the posts prior to it (oldest first).  Each thread edge is a
+-- 'PostId' interpreted as a positional index into the prior log; a dangling
+-- id is an error (ids are expected to be valid).  A root post has one trivial
+-- branch; every parent edge contributes its own path.  Branches of replies
+-- are pure cons:
 --
--- prop> branches prior (replyTo who p b) == map (who :) (branches prior p)
-branches :: (Eq a) => [Post a] -> Post a -> [[Name]]
+-- prop> branches prior (replyTo who i p b) == map (who :) (branches (take i prior) p)
+branches :: [Post a] -> Post a -> [[Name]]
 branches prior p0 = go prior p0
   where
     go pre p =
       case thread p of
         [] -> [[from p]]
-        ns -> concatMap (step pre p) ns
+        is -> concatMap (step pre p) is
 
-    step pre p n =
-      case find ((== n) . from) (reverse pre) of
-        Nothing -> [[from p, n]]
-        Just q -> map (from p :) (go (takeWhile (/= q) pre) q)
+    step pre p i =
+      let q = pre `genericIndex` i
+       in map (from p :) (go (genericTake i pre) q)
 
 -- | The ancestry cone: every name appearing on any branch from a post to
 -- its roots, as a normalised set — the "who contributed to this" query,
 -- free with the log.  Includes the post's own sender.
 --
--- Cone-union law (unambiguous case — one post per sender in @prior@):
+-- Cone-union law:
 --
--- prop> cone prior (synthesis who aud ps b) == sortNub (who : concatMap (cone prior) ps)
-cone :: (Eq a) => [Post a] -> Post a -> [Name]
+-- prop> cone prior (synthesis who aud is b) == sortNub (who : concatMap (cone (take i prior)) (map (prior !!) is))
+cone :: [Post a] -> Post a -> [Name]
 cone prior p = sortNub (concat (branches prior p))
 
 -- | The shared append-only log, newest first.

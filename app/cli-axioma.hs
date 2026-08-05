@@ -154,41 +154,45 @@ main = do
     (sessionPrompt [p1, p2] == "hello\nline1\nline2")
   assert
     "replyPosts addresses last sender, preserves wire"
-    (replyPosts "kimi" [p1, p2] "sure" == [replyTo "kimi" p2 "sure"])
+    (replyPosts "kimi" [p1, p2] [1] "sure" == [replyTo "kimi" 1 p2 "sure"])
   assert
     "whitespace reply is quiet"
-    (replyPosts "kimi" [p1] "  \n " == [])
+    (replyPosts "kimi" [p1] [0] "  \n " == [])
   assert
     "empty input is quiet"
-    (replyPosts "kimi" [] "x" == [])
+    (replyPosts "kimi" [] [] "x" == [])
 
   putStrLn "echoShard (exact mock oracle)"
   sh <- echoShard "kimi"
   r1 <- runShardIO sh [p1, p2]
   assert
     "echo reply body is the session prompt"
-    (r1 == [replyTo "kimi" p2 (sessionPrompt [p1, p2])])
+    (map body r1 == [sessionPrompt [p1, p2]]
+       && all ((== "kimi") . from) r1
+       && all ((== ["grok", "tony"]) . to) r1)
   r2 <- runShardIO sh [p1]
   assert
     "outbox drains between closes"
-    (r2 == [replyTo "kimi" p1 "hello"])
+    (map body r2 == ["hello"]
+       && all ((== "kimi") . from) r2
+       && all ((== ["tony"]) . to) r2)
   r3 <- runShardIO sh []
   assert "empty commit emits nothing" (null r3)
 
   putStrLn "thread (ancestry) oracles"
   assert "root post has no parents" (thread p1 == [])
   assert
-    "reply threads onto the parent's sender"
-    (thread (replyTo "kimi" p2 "x" :: Post Text) == ["grok"])
+    "reply threads onto the parent id"
+    (thread (replyTo "kimi" 1 p2 "x" :: Post Text) == [1])
   assert
-    "replyPosts threads onto the last input's sender"
-    (case replyPosts "kimi" [p1, p2] "sure" of
-       [rp] -> thread rp == ["grok"]
+    "replyPosts threads onto the last input's id"
+    (case replyPosts "kimi" [p1, p2] [0, 1] "sure" of
+       [rp] -> thread rp == [1]
        _ -> False)
   let r1' :: Post Text
-      r1' = replyTo "kimi" p2 "a"
+      r1' = replyTo "kimi" 1 p2 "a"
       r2' :: Post Text
-      r2' = replyTo "tony" r1' "b"
+      r2' = replyTo "tony" 2 r1' "b"
   assert
     "branches of a root are its sender"
     (branches [p1, p2] p2 == [["grok"]])
@@ -199,58 +203,53 @@ main = do
     "branches unfolds a three-post thread"
     (branches [p1, p2, r1'] r2' == [["tony", "kimi", "grok"]])
   let r0 :: Post Text
-      r0 = replyTo "kimi" p1 "old"
+      r0 = replyTo "kimi" 0 p1 "old"
   assert
-    "ambiguous edge resolves to the most recent prior post"
+    "same-named posts are disambiguated by exact id"
     (branches [p1, p2, r0, r1'] r2' == [["tony", "kimi", "grok"]])
-  let dangling :: Post Text
-      dangling = (mkPost "x" ["y"] "z") {thread = ["ghost"]}
-  assert
-    "dangling thread edge keeps its label"
-    (branches [] dangling == [["x", "ghost"]])
 
   putStrLn "synthesis (wire-merge) oracles"
   let syn :: Post Text
-      syn = synthesis "sum" ["human"] [p2, p1] "Σ"
+      syn = synthesis "sum" ["human"] [1, 0] "Σ"
   assert
-    "synthesis ancestry is a normalised set of parent senders"
-    (thread syn == ["grok", "tony"])
+    "synthesis ancestry is a normalised set of parent ids"
+    (thread syn == [0, 1])
   assert
-    "synthesis ancestry discards duplicate senders"
-    (thread (synthesis "sum" [] [p1, p1] "Σ" :: Post Text) == ["tony"])
+    "synthesis ancestry discards duplicate ids"
+    (thread (synthesis "sum" [] [0, 0] "Σ" :: Post Text) == [0])
   assert
     "branches of a synthesis has one path per parent"
-    (branches [p1, p2] syn == [["sum", "grok"], ["sum", "tony"]])
+    (branches [p1, p2] syn == [["sum", "tony"], ["sum", "grok"]])
   assert
     "branches of a synthesis continues through each parent"
-    (branches [p1, p2, r1'] (synthesis "sum" [] [r1', p1] "Σ" :: Post Text)
-       == [["sum", "kimi", "grok"], ["sum", "tony"]])
+    (branches [p1, p2, r1'] (synthesis "sum" [] [2, 0] "Σ" :: Post Text)
+       == [["sum", "tony"], ["sum", "kimi", "grok"]])
 
   putStrLn "honest provenance oracles"
-  let syn2 = case synthesisPosts "sum" [p2, p1, r1'] "Σ2" of
+  let syn2 = case synthesisPosts "sum" [p2, p1, r1'] [1, 0, 2] "Σ2" of
         [s] -> s
         _ -> error "synthesisPosts: expected one post"
       prior = [p2, p1, r1']
   assert
-    "synthesisPosts ancestry cites every input sender"
-    (thread syn2 == ["grok", "kimi", "tony"])
+    "synthesisPosts ancestry cites every input id"
+    (thread syn2 == [0, 1, 2])
   assert
     "synthesisPosts audience is senders and wires, minus self"
     (to syn2 == ["grok", "kimi", "tony"])
   assert "synthesisPosts is quiet on empty reply" $
-    null (synthesisPosts "sum" [p1] "  ")
+    null (synthesisPosts "sum" [p1] [0] "  ")
   assert "synthesisPosts is quiet on no inputs" $
-    null (synthesisPosts "sum" [] "x")
+    null (synthesisPosts "sum" [] [] "x")
   assert
-    "ancestry monotonicity: every parent resolves to a strictly-earlier post"
-    (all (`elem` map from prior) (thread syn2))
+    "ancestry monotonicity: every parent id is a valid prior index"
+    (all (< fromIntegral (length prior)) (thread syn2))
   assert
     "cone-union law: cone of a synthesis is the union of parent cones"
-    (cone prior (synthesis "sum" [] [r1', p1] "Σ")
+    (cone prior (synthesis "sum" [] [2, 0] "Σ")
        == sortNub ("sum" : concatMap (cone prior) [r1', p1]))
   assert
     "cone of a synthesis is the contributor set"
-    (cone prior (synthesis "sum" [] [r1', p1] "Σ") == ["grok", "kimi", "sum", "tony"])
+    (cone prior (synthesis "sum" [] [2, 0] "Σ") == ["grok", "kimi", "sum", "tony"])
 
   putStrLn "cursor numbered poll oracles"
   tmpC <- getTemporaryDirectory

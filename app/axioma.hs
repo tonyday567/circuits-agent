@@ -1663,15 +1663,15 @@ main = do
     let posts = [mkPost "human" [] "one"]
         branchA = constShard [mkPost "a" [] "x"]
         branchB = constShard [mkPost "b" [] "y"]
-        summary = synthesisSummary "sum" ["human"] (T.intercalate "+" . map body . concat)
+        summary = synthesisSummary "sum" ["human"] [0, 1] (T.intercalate "+" . map body . concat)
     (outs, _) <- closeShardIO (fanInShard summary [branchA, branchB]) posts []
     assert "honest fan-in: one synthesis post" $ length outs == 1
-    assert "honest fan-in: ancestry cites every branch sender" $
+    assert "honest fan-in: ancestry cites every branch output by id" $
       case outs of
-        [o] -> thread o == ["a", "b"] && body o == "x+y"
+        [o] -> thread o == [0, 1] && body o == "x+y"
         _ -> False
     assert "honest fan-in: empty body is quiet" $
-      null (synthesisSummary "sum" [] (const "") [[mkPost "a" [] "x"]])
+      null (synthesisSummary "sum" [] [0] (const "") [[mkPost "a" [] "x"]])
 
   putStrLn "All tests passed"
   where
