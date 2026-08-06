@@ -74,7 +74,9 @@ fakeCli script sessionFile =
       cliSessionId = parseSessionId,
       cliStale = \code out ->
         code /= ExitSuccess || "No session found matching" `T.isInfixOf` out,
-      cliScrub = id
+      cliScrub = id,
+      cliStderr = StderrMerge,
+      cliStderrTee = Nothing
     }
 
 -- | Canned @kimi@ binary: emits the exact shapes kimiCli scrapes and

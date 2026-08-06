@@ -15,6 +15,7 @@
 module Circuit.Agent.Cli
   ( -- * Invocation recipe
     Cli (..),
+    StderrPolicy (..),
     hermesCli,
     kimiCli,
     grokCli,
@@ -47,7 +48,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory)
+import System.FilePath (takeDirectory, (-<.>))
 import System.Process (proc, readCreateProcessWithExitCode)
 import Prelude
 
@@ -71,14 +72,37 @@ data Cli = Cli
     -- | Is this (exit code, output) pair a stale-session response?
     cliStale :: ExitCode -> Text -> Bool,
     -- | Noise filter applied to output before it becomes a reply body.
-    cliScrub :: Text -> Text
+    cliScrub :: Text -> Text,
+    -- | What to do with the process's stderr channel.
+    cliStderr :: StderrPolicy,
+    -- | Optional tee: raw stderr appended to this log file on every call,
+    -- regardless of the policy (interiority stays searchable, never
+    -- silently dropped).
+    cliStderrTee :: Maybe FilePath
   }
+
+-- | stderr routing for a CLI agent's output channels.
+--
+-- Precedent: @Muster.Connector@ posts @-- stdout --@ \/ @-- stderr --@
+-- marked sections; 'StderrMark' is the in-body equivalent.
+data StderrPolicy
+  = -- | Discard stderr (use with 'cliStderrTee' to keep a log).
+    StderrDrop
+  | -- | Concatenate stdout and stderr (the historical behaviour).
+    StderrMerge
+  | -- | Append stderr after a @-- stderr --@ section marker.
+    StderrMark
+  deriving (Eq, Show)
 
 -- | Recipe for the kimi CLI: @kimi -p \<prompt\> [-r \<sid\>]@,
 -- text output.  kimi prints a plain-text resume hint line, so scraping and
 -- scrubbing are line-oriented — no JSON needed.  Note: kimi exits 0 even
 -- when the prompt fails (and @--auto@ cannot combine with @-p@), so stale
 -- detection is output-based.
+--
+-- stderr (thinking / tool progress / notices) is dropped from the reply
+-- but teed raw to @\<sessionFile\>.stderr.log@ — interiority stays
+-- searchable, never silently dropped.
 kimiCli :: Maybe Text -> FilePath -> Cli
 kimiCli model sessionFile =
   Cli
@@ -92,7 +116,10 @@ kimiCli model sessionFile =
       cliSessionId = kimiSessionId,
       cliStale = \_ out ->
         "Session \"" `T.isInfixOf` out && "not found" `T.isInfixOf` out,
-      cliScrub = kimiText
+      cliScrub = kimiText,
+      cliStderr = StderrDrop,
+      -- Interiority log: NAME.sid -> NAME.stderr.log
+      cliStderrTee = Just (sessionFile -<.> "stderr.log")
     }
 
 -- | Scrape the @To resume this session: kimi -r \<id\>@ hint line.
@@ -126,7 +153,9 @@ grokCli model sessionFile =
       cliSessionId = jsonField "sessionId",
       cliStale = \code out ->
         code /= ExitSuccess || "Failed to restore session" `T.isInfixOf` out,
-      cliScrub = grokText
+      cliScrub = grokText,
+      cliStderr = StderrMerge,
+      cliStderrTee = Nothing
     }
 
 -- | Reply text is the JSON @text@ field, unescaped; if there is no such
@@ -209,7 +238,9 @@ hermesCli model provider sessionFile =
         code /= ExitSuccess
           || "No session found matching" `T.isInfixOf` out
           || "Session not found" `T.isInfixOf` out,
-      cliScrub = cleanCliOut
+      cliScrub = cleanCliOut,
+      cliStderr = StderrMerge,
+      cliStderrTee = Nothing
     }
 
 -- | One query against a CLI agent.
@@ -224,21 +255,36 @@ cliQuery cli prompt = do
   case mSid of
     Nothing -> fresh
     Just sid -> do
-      (code, out) <- run (Just sid)
-      if cliStale cli code out
+      (code, raw, routedOut) <- run (Just sid)
+      if cliStale cli code raw
         then fresh
         else do
-          scrape out
-          pure (cliScrub cli out)
+          scrape raw
+          pure (cliScrub cli routedOut)
   where
+    -- (exit code, raw merged out<>err pre-policy, policy-routed output).
+    -- cliStale and scrape act on the raw merged stream: stale notices and
+    -- resume hints live on stderr for some CLIs, and 'StderrDrop' must not
+    -- hide them — it only filters the reply body.
     run mSid = do
       (code, out, err) <-
         readCreateProcessWithExitCode
           (proc (cliCommand cli) (cliArgv cli prompt mSid))
           (cliStdin cli prompt)
-      pure (code, T.pack out <> T.pack err)
+      tee err
+      pure (code, T.pack out <> T.pack err, T.pack out <> routed (T.pack err))
+    tee err =
+      for_ (cliStderrTee cli) $ \path -> do
+        createDirectoryIfMissing True (takeDirectory path)
+        TIO.appendFile path (T.pack err)
+    routed err = case cliStderr cli of
+      StderrDrop -> ""
+      StderrMerge -> err
+      StderrMark
+        | T.null (T.strip err) -> ""
+        | otherwise -> "\n-- stderr --\n" <> err
     fresh = do
-      (code, out) <- run Nothing
+      (code, raw, routedOut) <- run Nothing
       when (code /= ExitSuccess) $
         fail
           ( "cliQuery: "
@@ -246,10 +292,10 @@ cliQuery cli prompt = do
               <> " exited "
               <> show code
               <> ": "
-              <> T.unpack (T.take 200 out)
+              <> T.unpack (T.take 200 raw)
           )
-      scrape out
-      pure (cliScrub cli out)
+      scrape raw
+      pure (cliScrub cli routedOut)
     scrape out =
       for_ (cliSessionId cli out) (writeStoredSession (cliSessionFile cli))
 
