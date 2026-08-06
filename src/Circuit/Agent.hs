@@ -1,4 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -417,10 +418,16 @@ appendInbox p (Inbox (subs, f)) = Inbox (subs, snoc f p)
 --
 -- A post delivers when any of the subscribed names appears in the post's 'to'
 -- list.  Multi-cast is direct: a post addressed to several names reaches each
--- subscriber.  This predicate is a small stepping stone toward a relational
--- copy/discard delivery model ('FinRel'); the full wiring is future work.
+-- subscriber.  A post with @to = ["all"]@ broadcasts to every subscriber;
+-- @to = []@ and @to = [""]@ deliver to no one (discard).  This predicate is a
+-- small stepping stone toward a relational copy/discard delivery model
+-- ('FinRel'); the full wiring is future work.
 deliversTo :: Post a -> [Name] -> Bool
-deliversTo p = any (`elem` to p)
+deliversTo p subs =
+  case to p of
+    [] -> False
+    [t] | t == empty -> False
+    ts -> ("all" :: Text) `elem` ts || any (`elem` ts) subs
 
 -- | Peel the oldest addressed post from the inbox, returning the rest.
 --

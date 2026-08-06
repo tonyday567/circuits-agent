@@ -10,9 +10,17 @@ module Main (main) where
 import Algebra.Graph.Labelled qualified as LG
 import Circuit.Agent
 import Circuit.Agent.Delivery
-  ( deliveryMatrix,
+  ( DelRel,
+    broadcastRel,
+    copyRel,
+    deliveryMatrix,
+    deliveryRel,
+    deliversRel,
+    discardRel,
+    emptyRel,
     isNilpotent,
     matrixPowers,
+    namedRel,
     topologyMatrix,
   )
 import Circuit.Agent.Graph
@@ -48,6 +56,8 @@ import Data.List (find, foldl', nub, sort)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (isJust)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Harpie.NumHask.Matrix (Matrix, fromLists, matPlus, starMatrix, toLists)
@@ -306,6 +316,15 @@ main = do
     assert "post not addressed to agent does not deliver" $
       deliversTo (mkPost "human" ["j"] "hi") ["j"]
         && not (deliversTo (mkPost "human" ["j"] "hi") ["k"])
+    assert "to=all broadcasts to every subscriber" $
+      deliversTo (mkPost "human" ["all"] "hi") ["j"]
+        && deliversTo (mkPost "human" ["all"] "hi") ["k"]
+    assert "to=[] delivers to no one" $
+      not (deliversTo (mkPost "human" [] "hi") ["j"])
+        && not (deliversTo (mkPost "human" [] "hi") ["k"])
+    assert "to=[''] is discard, delivers to no one" $
+      not (deliversTo (mkPost "human" [""] "hi") ["j"])
+        && not (deliversTo (mkPost "human" [""] "hi") ["k"])
 
     let t3 = post (mkPost "human" ["j"] "again") t2
     let (stJ2, _t4, _) = turn (tape (reply "j")) (feedState (newFor ["j"] t3 stJ1) stJ1) t3
@@ -322,11 +341,21 @@ main = do
         posts =
           [ ["j"], -- unicast to j
             ["j", "k"], -- multi-cast to both
-            ["k"] -- unicast to k
+            ["k"], -- unicast to k
+            ["all"], -- broadcast
+            [], -- discard
+            [""] -- discard sentinel
           ] ::
             [[Text]]
         m = deliveryMatrix agents posts
-        expected = [[True, False], [True, True], [False, True]]
+        expected =
+          [ [True, False],
+            [True, True],
+            [False, True],
+            [True, True],
+            [False, False],
+            [False, False]
+          ]
     assert "G2 boolean delivery matrix matches FinRel" $
       toLists m == expected
 
@@ -367,6 +396,53 @@ main = do
         finiteSum = foldl' matPlus eye (matrixPowers (n - 1) d)
     assert "G3 star of nilpotent boolean matrix equals finite sum" $
       starMatrix d == finiteSum
+
+  -------------------------------------------------------------------------
+  -- FinRel delivery (F1)
+  -------------------------------------------------------------------------
+  putStrLn "FinRel delivery"
+  do
+    let agents :: Set Text
+        agents = Set.fromList ["j", "k"]
+        p = mkPost "human" [] "irrelevant"
+        expect tos subs expected =
+          deliversRel (deliveryRel agents tos) (Set.fromList subs) == expected
+            && deliversTo (p {to = tos}) subs == expected
+
+    assert "F1 copyRel is the diagonal on agents" $
+      copyRel agents == Set.fromList [("j", ("j", "j")), ("k", ("k", "k"))]
+
+    assert "F1 discardRel relates every agent to the terminal value" $
+      discardRel agents == Set.fromList [("j", ()), ("k", ())]
+
+    assert "F1 broadcast is the dagger (converse) of discard" $
+      Set.map (\(a, ()) -> ((), a)) (discardRel agents)
+        == broadcastRel agents
+
+    assert "F1 deliveryRel [all] equals broadcast" $
+      deliveryRel agents ["all"] == broadcastRel agents
+
+    assert "F1 deliveryRel [] equals emptyRel" $
+      deliveryRel agents [] == (emptyRel :: DelRel Text)
+
+    assert "F1 deliveryRel [\"\"] equals emptyRel" $
+      deliveryRel agents [""] == (emptyRel :: DelRel Text)
+
+    assert "F1 deliveryRel named equals singleton union" $
+      deliveryRel agents ["j", "k"]
+        == namedRel "j" `Set.union` namedRel "k"
+
+    assert "F1 FinRel agrees with deliversTo: unicast" $
+      expect ["j"] ["j"] True && expect ["j"] ["k"] False
+
+    assert "F1 FinRel agrees with deliversTo: multicast" $
+      expect ["j", "k"] ["j"] True && expect ["j", "k"] ["k"] True
+
+    assert "F1 FinRel agrees with deliversTo: broadcast" $
+      expect ["all"] ["j"] True && expect ["all"] ["k"] True
+
+    assert "F1 FinRel agrees with deliversTo: discard" $
+      expect [] ["j"] False && expect [""] ["j"] False
 
   -------------------------------------------------------------------------
   -- S0b · estimator fork: soft routing path (pathwise gradients)

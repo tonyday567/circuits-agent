@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 -- | Semiring delivery matrices for addressed posts.
 --
 -- 'deliversTo' in 'Circuit.Agent' is the boolean predicate that gates delivery.
@@ -16,6 +18,16 @@ module Circuit.Agent.Delivery
   ( -- * Semiring predicate
     deliversToSemiring,
 
+    -- * Finite-relation delivery model
+    DelRel,
+    copyRel,
+    discardRel,
+    broadcastRel,
+    emptyRel,
+    namedRel,
+    deliveryRel,
+    deliversRel,
+
     -- * Matrices
     deliveryMatrix,
     topologyMatrix,
@@ -26,7 +38,9 @@ module Circuit.Agent.Delivery
   )
 where
 
-import Data.Text (Text)
+import Data.Set (Set)
+import Data.Set qualified as Set
+import Data.Text (Text, empty)
 import Data.Vector.Unboxed qualified as VU
 import Harpie.Array qualified as A
 import Harpie.NumHask.Matrix (Matrix (..), fromLists, matTimes, toLists)
@@ -37,7 +51,9 @@ import Prelude hiding ((*), (+))
 -- | Semiring-generalised delivery predicate.
 --
 -- A post delivers with the semiring's 'one' when @who@ is in the recipient
--- list; otherwise it delivers with 'zero'.
+-- list, or when the recipient list contains the broadcast sentinel @"all"@;
+-- @[]@ and @[""]@ are discard (deliver to no one).  Otherwise it delivers
+-- with 'zero'.
 deliversToSemiring ::
   (Additive r, Multiplicative r) =>
   -- | Recipients on the post.
@@ -46,8 +62,79 @@ deliversToSemiring ::
   Text ->
   r
 deliversToSemiring recipients who
+  | null recipients = zero
+  | recipients == [empty] = zero
+  | ("all" :: Text) `elem` recipients = one
   | who `elem` recipients = one
   | otherwise = zero
+
+-- ===========================================================================
+-- Finite-relation delivery model
+-- ===========================================================================
+
+-- | A relation from a single post (the unit type) to a finite set of agents.
+--
+-- This is the set-based reading of FinRel: objects are finite sets, morphisms
+-- are relations, and the cartesian comonoid on the agent set gives canonical
+-- copy/discard generators.  The @\"all\"@ broadcast sentinel is the dagger
+-- (relational converse) of 'discardRel'; the empty / @[\"\"]@ case is the zero
+-- morphism 'emptyRel'.
+type DelRel a = Set ((), a)
+
+-- | Canonical copy comonoid on a finite agent set.
+--
+-- Relates each agent @a@ to the pair @(a, a)@.
+copyRel :: Set a -> Set (a, (a, a))
+copyRel agents = Set.mapMonotonic (\a -> (a, (a, a))) agents
+
+-- | Canonical discard counit on a finite agent set.
+--
+-- Relates every agent to the terminal value @()@.
+discardRel :: Set a -> Set (a, ())
+discardRel agents = Set.mapMonotonic (\a -> (a, ())) agents
+
+-- | Broadcast relation: the dagger of 'discardRel'.
+--
+-- Maps the single post @()@ to every agent in the roster.  This is exactly
+-- the semantics of @to = [\"all\"]@.
+broadcastRel :: Set a -> DelRel a
+broadcastRel agents = Set.mapMonotonic ((),) agents
+
+-- | Empty (zero) delivery relation.
+--
+-- This is the semantics of @to = []@ and @to = [\"\"]@: the post reaches no
+-- agent.
+emptyRel :: DelRel a
+emptyRel = Set.empty
+
+-- | Singleton injection for a named recipient.
+namedRel :: a -> DelRel a
+namedRel a = Set.singleton ((), a)
+
+-- | Delivery relation encoded by a post's @to@ list.
+--
+-- * @\"all\"@ selects the broadcast relation ('broadcastRel').
+-- * @[]@ and @[\"\"]@ select the zero relation ('emptyRel').
+-- * Named recipients select the corresponding singleton injections.
+deliveryRel ::
+  -- | Roster of agents (the codomain of the relation).
+  Set Text ->
+  -- | Recipients on the post.
+  [Text] ->
+  DelRel Text
+deliveryRel agents tos
+  | null tos = emptyRel
+  | tos == [empty] = emptyRel
+  | ("all" :: Text) `elem` tos = broadcastRel agents
+  | otherwise = Set.fromList [((), a) | a <- tos]
+
+-- | Evaluate a delivery relation against a subscriber set.
+--
+-- Returns 'True' when the relation's image intersects the subscribers.
+deliversRel :: DelRel Text -> Set Text -> Bool
+deliversRel rel subs = not (Set.null (image `Set.intersection` subs))
+  where
+    image = Set.map snd rel
 
 -- | Delivery matrix for a fixed list of posts and a roster of agents.
 --
