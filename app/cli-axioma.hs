@@ -324,7 +324,7 @@ main = do
   wipe grokSf
 
   unsetEnv "FAIL_RESUME"
-  let kcli = kimiCli Nothing kimiSf
+  let kcli = kimiCli Nothing Nothing kimiSf
   k1 <- cliQuery kcli "hello kimi"
   assert
     "kimi fresh reply scrubbed of resume hint"

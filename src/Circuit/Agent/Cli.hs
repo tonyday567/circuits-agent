@@ -94,7 +94,7 @@ data StderrPolicy
     StderrMark
   deriving (Eq, Show)
 
--- | Recipe for the kimi CLI: @kimi -p \<prompt\> [-r \<sid\>]@,
+-- | Recipe for the kimi CLI: @kimi -p \<prompt\> [-m \<model\>] [--provider \<provider\>] [-r \<sid\>]@,
 -- text output.  kimi prints a plain-text resume hint line, so scraping and
 -- scrubbing are line-oriented — no JSON needed.  Note: kimi exits 0 even
 -- when the prompt fails (and @--auto@ cannot combine with @-p@), so stale
@@ -103,13 +103,14 @@ data StderrPolicy
 -- stderr (thinking / tool progress / notices) is dropped from the reply
 -- but teed raw to @\<sessionFile\>.stderr.log@ — interiority stays
 -- searchable, never silently dropped.
-kimiCli :: Maybe Text -> FilePath -> Cli
-kimiCli model sessionFile =
+kimiCli :: Maybe Text -> Maybe Text -> FilePath -> Cli
+kimiCli model provider sessionFile =
   Cli
     { cliCommand = "kimi",
       cliArgv = \prompt mSid ->
         ["-p", T.unpack prompt]
           <> maybe [] (\m -> ["-m", T.unpack m]) model
+          <> maybe [] (\p -> ["--provider", T.unpack p]) provider
           <> maybe [] (\sid -> ["-r", T.unpack sid]) mSid,
       cliStdin = const "",
       cliSessionFile = sessionFile,
