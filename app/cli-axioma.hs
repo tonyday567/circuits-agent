@@ -9,7 +9,7 @@
 -- (when told) rejects --resume so the stale-fallback path is exercised.
 module Main (main) where
 
-import Circuit.Agent (Post (..), branches, cone, mkPost, replyTo, sortNub, synthesis)
+import Circuit.Agent (Post (..), branches, branchesByIndex, cone, coneByIndex, mkPost, replyTo, sortNub, synthesis)
 import Circuit.Agent.Cli
 import Cursor (newMem, pollNumberedFile)
 import Control.Monad (when)
@@ -197,18 +197,18 @@ main = do
       r2' = replyTo "tony" 2 r1' "b"
   assert
     "branches of a root are its sender"
-    (branches [p1, p2] p2 == [["grok"]])
+    (branchesByIndex [p1, p2] p2 == [["grok"]])
   assert
     "branches of a reply are pure cons"
-    (branches [p1, p2] r1' == map ("kimi" :) (branches [p1, p2] p2))
+    (branchesByIndex [p1, p2] r1' == map ("kimi" :) (branchesByIndex [p1, p2] p2))
   assert
     "branches unfolds a three-post thread"
-    (branches [p1, p2, r1'] r2' == [["tony", "kimi", "grok"]])
+    (branchesByIndex [p1, p2, r1'] r2' == [["tony", "kimi", "grok"]])
   let r0 :: Post Text
       r0 = replyTo "kimi" 0 p1 "old"
   assert
     "same-named posts are disambiguated by exact id"
-    (branches [p1, p2, r0, r1'] r2' == [["tony", "kimi", "grok"]])
+    (branchesByIndex [p1, p2, r1', r0] r2' == [["tony", "kimi", "grok"]])
 
   putStrLn "synthesis (wire-merge) oracles"
   let syn :: Post Text
@@ -221,10 +221,10 @@ main = do
     (thread (synthesis "sum" [] [0, 0] "Σ" :: Post Text) == [0])
   assert
     "branches of a synthesis has one path per parent"
-    (branches [p1, p2] syn == [["sum", "tony"], ["sum", "grok"]])
+    (branchesByIndex [p1, p2] syn == [["sum", "tony"], ["sum", "grok"]])
   assert
     "branches of a synthesis continues through each parent"
-    (branches [p1, p2, r1'] (synthesis "sum" [] [2, 0] "Σ" :: Post Text)
+    (branchesByIndex [p1, p2, r1'] (synthesis "sum" [] [2, 0] "Σ" :: Post Text)
        == [["sum", "tony"], ["sum", "kimi", "grok"]])
 
   putStrLn "honest provenance oracles"
@@ -247,11 +247,11 @@ main = do
     (all (< fromIntegral (length prior)) (thread syn2))
   assert
     "cone-union law: cone of a synthesis is the union of parent cones"
-    (cone prior (synthesis "sum" [] [2, 0] "Σ")
-       == sortNub ("sum" : concatMap (cone prior) [r1', p1]))
+    (coneByIndex prior (synthesis "sum" [] [2, 0] "Σ")
+       == sortNub ("sum" : concatMap (coneByIndex prior) [r1', p2]))
   assert
     "cone of a synthesis is the contributor set"
-    (cone prior (synthesis "sum" [] [2, 0] "Σ") == ["grok", "kimi", "sum", "tony"])
+    (coneByIndex prior (synthesis "sum" [] [2, 0] "Σ") == ["grok", "kimi", "sum", "tony"])
 
   putStrLn "cursor numbered poll oracles"
   tmpC <- getTemporaryDirectory

@@ -54,8 +54,11 @@ module Circuit.Agent
     replyTo,
     synthesis,
     sortNub,
+    indexToIdMap,
     branches,
+    branchesByIndex,
     cone,
+    coneByIndex,
     Log,
     emptyLog,
     Name,
@@ -225,8 +228,10 @@ import Data.Text (Text, empty)
 type Name = Text
 
 -- | Absolute post identity.  In the stamped log this is the line id assigned
--- by the single writer; in pure meeting logs it is the positional index in
--- the oldest-first log that 'branches' resolves against.
+-- by the single writer.  In pure meeting logs it is the position in the
+-- oldest-first log, but 'branches' and 'cone' resolve by the id itself, not by
+-- position in the passed-in list.  Use 'indexToIdMap' to assign ids [0..] from
+-- a chronological list.
 type PostId = Natural
 
 -- | A single entry on the shared log, polymorphic in payload.
@@ -277,25 +282,45 @@ synthesis who audience parentIds b =
 sortNub :: (Ord a) => [a] -> [a]
 sortNub = nub . sort
 
--- | The label-branches from a post to its conversation roots, resolved
--- against the posts prior to it (oldest first).  Each thread edge is a
--- 'PostId' interpreted as a positional index into the prior log; a dangling
--- id is an error (ids are expected to be valid).  A root post has one trivial
+-- | Assign positional ids @[0..]@ to a chronological list of posts.  This is
+-- the convenience bridge from list-shaped logs to the id-resolved
+-- 'branches'/'cone' API.
+indexToIdMap :: [Post a] -> Map PostId (Post a)
+indexToIdMap = Map.fromList . zip [0 ..]
+
+-- | The next id after the largest key in the map, or @0@ if empty.
+nextId :: Map PostId (Post a) -> PostId
+nextId m = if Map.null m then 0 else fst (Map.findMax m) + 1
+
+-- | The label-branches from a post to its conversation roots, resolved by
+-- exact 'PostId'.  The current post is not in the map; its id is inferred as
+-- the id after the largest key in the prior map.  Only thread edges strictly
+-- less than the current id are resolved (ancestors must be prior posts).  A
+-- dangling or future id is silently ignored.  A root post has one trivial
 -- branch; every parent edge contributes its own path.  Branches of replies
 -- are pure cons:
 --
--- prop> branches prior (replyTo who i p b) == map (who :) (branches (take i prior) p)
-branches :: [Post a] -> Post a -> [[Name]]
-branches prior p0 = go prior p0
+-- prop> branches (indexToIdMap prior) (replyTo who i p b)
+--     == map (who :) (branches (Map.filterWithKey (\k _ -> k < i) (indexToIdMap prior)) p)
+branches :: Map PostId (Post a) -> Post a -> [[Name]]
+branches priorMap p0 = go (nextId priorMap) p0
   where
-    go pre p =
+    go selfId p =
       case thread p of
         [] -> [[from p]]
-        is -> concatMap (step pre p) is
+        is -> concatMap (step selfId p) is
 
-    step pre p i =
-      let q = pre `genericIndex` i
-       in map (from p :) (go (genericTake i pre) q)
+    step selfId p i =
+      if i >= selfId
+        then []
+        else case Map.lookup i priorMap of
+          Nothing -> []
+          Just q -> map (from p :) (go i q)
+
+-- | Convenience wrapper: resolve branches from a chronological list, assigning
+-- ids @[0..]@.
+branchesByIndex :: [Post a] -> Post a -> [[Name]]
+branchesByIndex prior = branches (indexToIdMap prior)
 
 -- | The ancestry cone: every name appearing on any branch from a post to
 -- its roots, as a normalised set — the "who contributed to this" query,
@@ -303,9 +328,15 @@ branches prior p0 = go prior p0
 --
 -- Cone-union law:
 --
--- prop> cone prior (synthesis who aud is b) == sortNub (who : concatMap (cone (take i prior)) (map (prior !!) is))
-cone :: [Post a] -> Post a -> [Name]
-cone prior p = sortNub (concat (branches prior p))
+-- prop> cone (indexToIdMap prior) (synthesis who aud is b)
+--     == sortNub (who : concatMap (cone (Map.filterWithKey (\k _ -> k < i) (indexToIdMap prior)) . (priorMap Map.!)) is)
+cone :: Map PostId (Post a) -> Post a -> [Name]
+cone priorMap p = sortNub (concat (branches priorMap p))
+
+-- | Convenience wrapper: resolve cone from a chronological list, assigning ids
+-- @[0..]@.
+coneByIndex :: [Post a] -> Post a -> [Name]
+coneByIndex prior = cone (indexToIdMap prior)
 
 -- | The shared append-only log, newest first.
 --

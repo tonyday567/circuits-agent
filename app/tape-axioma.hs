@@ -306,7 +306,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "O4: zero-gradient certificate"
   assert "O4: the noise post is off the final post's ancestry cone" $
-    "noise" `notElem` cone (init ps) (last ps)
+    "noise" `notElem` coneByIndex (init ps) (last ps)
   assert "O4: the noise post has exactly zero cotangent" $
     cot IntMap.! 2 == 0.0
 
