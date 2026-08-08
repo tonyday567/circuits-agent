@@ -2,6 +2,13 @@
 
 ## unreleased
 
+- `Circuit.Agent.Mark`: the halt-mark grammar as a type — `Mark`
+  (🟡 `Motion`, ✓ `Consent`, ↩ `Amendment`, 🔴 `Escalate`, 🟢 `Landed`,
+  🔵 `StandDown`) with `markGlyph`/`parseMark`/`markOf`/`isHalt`/
+  `isEscalate`. The level-0 grammar: finite K, stateless predicate. The
+  legacy 🟡-quiescent collision is pinned by oracle (quiescence is 🔵
+  `StandDown`); `selfLoopPolicy` in the axioma now parses marks via
+  `markOf`.
 - Moved population churn (`Circuit.Agent.Population`) to package `agent-evolve`
   (`Agent.Evolve.Population`). Kernel is fixed-roster meetings only.
 - Retired `Circuit.Agent.Comm` (cat-FIFO channel); product bus lives in muster.

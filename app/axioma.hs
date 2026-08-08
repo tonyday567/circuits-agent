@@ -9,6 +9,7 @@ module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
 import Circuit.Agent
+import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf, parseMark)
 import Circuit.Agent.Framing
   ( Cons (..),
     Jsonl (..),
@@ -1643,6 +1644,35 @@ main = do
     assert "Loop self-loop agrees with selfLoopS" $ sLoop == sRef
 
   -------------------------------------------------------------------------
+  -- The mark grammar as a type (Circuit.Agent.Mark)
+  --
+  -- The level-0 grammar: finite K, stateless predicate.  The free boundary
+  -- K + payload, where the 🟡/quiescent collision is pinned, not folklore.
+  -------------------------------------------------------------------------
+  putStrLn "mark grammar"
+  do
+    assert "render/parse round-trips every mark" $
+      all (\m -> parseMark (markGlyph m) == Just m) [minBound .. maxBound]
+    assert "parse tolerates the emoji variation selector" $
+      parseMark "↩️ amend this" == Just Amendment
+        && parseMark "🟢\xFE0F landed" == Just Landed
+    assert "plain bodies carry no mark" $
+      parseMark "hello" == Nothing && parseMark "" == Nothing
+    assert "halt marks are Landed and StandDown" $
+      all isHalt [Landed, StandDown]
+        && not (any isHalt [Motion, Consent, Amendment, Escalate])
+    assert "escalation is its own class" $
+      isEscalate Escalate && not (isEscalate Landed)
+    assert "markOf reads the post body" $
+      markOf (mkPost "a" ["b"] "🟢 landed") == Just Landed
+        && markOf (mkPost "a" ["b"] "no mark") == Nothing
+    -- The pinned collision: legacy quiescence posts used 🟡, which is a
+    -- Motion here.  That ambiguity is why quiescence moved to 🔵; this
+    -- oracle stops anyone reintroducing it quietly.
+    assert "legacy 🟡 quiescent body parses as Motion (the pinned collision)" $
+      parseMark "🟡 quiescent after 10 empty cycles" == Just Motion
+
+  -------------------------------------------------------------------------
   -- Shard-level tensors (StateT [Post Text] IO)
   --
   -- These are the semantic citizens that free-agent 'FreeSeat' terms fold
@@ -2044,7 +2074,7 @@ main = do
     selfLoopPolicy :: Text -> Int -> [Post Text] -> [Post Text]
     selfLoopPolicy name k hist =
       let p = peek hist
-       in if "🟢" `T.isPrefixOf` body p
+       in if markOf p == Just Landed
             then []
             else
               if length hist > k
