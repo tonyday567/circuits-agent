@@ -2,6 +2,14 @@
 
 ## unreleased
 
+- Multi-seat cards: additive `*Subs` API in `Circuit.Agent` — `RosterEntry`,
+  `turnAs`, `loopSubs`, `loopWithSubs`, `loopsSubs`, `loopHeteroSubs`,
+  `meetingLoopSubs`. Backwards-compatible wrappers keep the old names.
+  `meetingPass` now routes by subscription map, so several agents can share a
+  card subscription. `Circuit.Agent.Graph.runGraph` uses `loopWithSubs` with
+  graph-computed subscriptions; graph oracles were updated to use guarded
+  agents that only reply to the original stimulus, since routed replies now
+  re-enter the shared channel.
 - `Circuit.Agent.Mark`: the halt-mark grammar as a type — `Mark`
   (🟡 `Motion`, ✓ `Consent`, ↩ `Amendment`, 🔴 `Escalate`, 🟢 `Landed`,
   🔵 `StandDown`) with `markGlyph`/`parseMark`/`markOf`/`isHalt`/

@@ -10,6 +10,7 @@ module Main (main) where
 import Algebra.Graph.Labelled qualified as LG
 import Circuit.Agent
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf, parseMark)
+import Circuit.Agent.Machina.Mark (markLoop, spinMark)
 import Circuit.Agent.Framing
   ( Cons (..),
     Jsonl (..),
@@ -624,6 +625,33 @@ main = do
       run (meetingLoop roster) bundle0 == loopWith roster states0 t0
 
   -------------------------------------------------------------------------
+  -- Multi-seat card: two agents share one card subscription.
+  --
+  -- 'loopSubs' lets several agents subscribe to the same card name; a post
+  -- addressed to the card reaches every subscriber.
+  -------------------------------------------------------------------------
+  putStrLn "multi-seat card"
+  do
+    let cardRoster =
+          [ ("alpha", ["xyzzy"], tape (reply "alpha")),
+            ("beta", ["xyzzy"], tape (reply "beta"))
+          ]
+        seed = [mkPost "human" ["xyzzy"] "hello card"]
+        (cardStates, cardLog, cardDerivs) = loopSubs cardRoster seed
+    let replies = filter (\p -> from p /= "human") cardLog
+    assert "both subscribers processed the card post" $
+      map body (reverse (maybe [] asCarrier (lookup "alpha" cardStates))) == ["hello card"]
+        && map body (reverse (maybe [] asCarrier (lookup "beta" cardStates))) == ["hello card"]
+    assert "log has seed plus one reply per subscriber" $
+      length cardLog == 3 && length replies == 2
+    assert "replies are from alpha and beta" $
+      sort (map from replies) == ["alpha", "beta"]
+    assert "replies are addressed to the original sender" $
+      all (== ["human"]) (map to replies)
+    assert "derivations name the subscriber agents, not the card" $
+      sort (map dAgent cardDerivs) == ["alpha", "beta"]
+
+  -------------------------------------------------------------------------
   -- O8: schedule independence — loop vs parallel reduction.
   --
   -- Parallel reduction runs every agent against the *same* input log and
@@ -937,13 +965,18 @@ main = do
   -- Agent graph wiring
   --
   -- Algebraic graphs over agents: vertices are names, edges are channels.
+  -- runGraph now routes by explicit subscriptions (loopWithSubs), so a post
+  -- to a channel reaches every agent whose incoming edges include that
+  -- channel.  Echo agents must be guarded: an agent that always replies will
+  -- see its own routed replies and loop forever.
   -------------------------------------------------------------------------
   putStrLn "agent graph wiring"
   do
-    let echo :: Text -> [Post Text] -> [Post Text]
-        echo name hist =
+    let echo name hist =
           let p = peek hist
-           in [mkPost name [] ("ack:" <> body p)]
+           in if from p == "human"
+                then [mkPost name [] ("ack:" <> body p)]
+                else []
         reg :: AgentRegistry
         reg =
           Map.fromList
@@ -959,27 +992,34 @@ main = do
     let summary :: [Post Text] -> [Post Text]
         summary hist =
           let p = peek hist
-           in [mkPost "hub" [] ("summary: " <> body p)]
+           in if from p == "leaf"
+                then [mkPost "hub" [] ("summary: " <> body p)]
+                else []
         leafEcho :: [Post Text] -> [Post Text]
         leafEcho hist =
           let p = peek hist
-           in [mkPost "leaf" [] ("leaf:" <> body p)]
+           in if from p == "human"
+                then [mkPost "leaf" [] ("leaf:" <> body p)]
+                else []
         reg :: AgentRegistry
         reg =
           Map.fromList
             [ ("hub", atomic (tape summary)),
               ("leaf", atomic (tape leafEcho))
             ]
-        t0 = [mkPost "human" ["leaf"] "data"]
+        -- leaf subscribes to the "hub" channel, so the seed must be posted
+        -- there for leaf to receive it first.
+        t0 = [mkPost "human" ["hub"] "data"]
         logStar = runGraph (star "hub" ["leaf"] "hub" "leaf") reg t0
     assert "star: hub posts a summary after receiving from leaf" $
       any ((== "hub") . from) logStar
 
   do
-    let echo :: Text -> [Post Text] -> [Post Text]
-        echo name hist =
+    let echo name hist =
           let p = peek hist
-           in [mkPost name [] ("ack:" <> body p)]
+           in if from p == "human"
+                then [mkPost name [] ("ack:" <> body p)]
+                else []
         reg :: AgentRegistry
         reg =
           Map.fromList
@@ -1671,6 +1711,38 @@ main = do
     -- oracle stops anyone reintroducing it quietly.
     assert "legacy 🟡 quiescent body parses as Motion (the pinned collision)" $
       parseMark "🟡 quiescent after 10 empty cycles" == Just Motion
+
+  -------------------------------------------------------------------------
+  -- Mark-driven halt (Circuit.Agent.Machina)
+  --
+  -- The first machina graduate: spinMark halts on a mark token, and markLoop
+  -- is the same halt as a Loop Either citizen.
+  -------------------------------------------------------------------------
+  putStrLn "mark-driven halt"
+  do
+    let isHaltMark p = maybe False isHalt (markOf p)
+        step acc p = p : acc
+        seed = mkPost "human" ["self"] "seed"
+        one = mkPost "human" ["self"] "one"
+        two = mkPost "human" ["self"] "two"
+        halt = mkPost "human" ["self"] "🟢 landed"
+        writeAll ends = do
+          writeEndSTM ends seed
+          writeEndSTM ends one
+          writeEndSTM ends two
+          writeEndSTM ends halt
+    endsSpin <- atomically $ openSTM (Unbounded :: Queue (Post Text))
+    atomically $ writeAll endsSpin
+    accSpin <- atomically $ runKleisli (spinMark isHaltMark step endsSpin) []
+    endsLoop <- atomically $ openSTM (Unbounded :: Queue (Post Text))
+    atomically $ writeAll endsLoop
+    accLoop <- atomically $ runKleisli (run (markLoop isHaltMark step endsLoop)) []
+    assert "spinMark accumulated the three normal posts" $
+      length accSpin == 3
+    assert "spinMark consumed the halt mark as the halt token" $
+      not (any (\p -> body p == "🟢 landed") accSpin)
+    assert "markLoop agrees with spinMark" $
+      accLoop == accSpin
 
   -------------------------------------------------------------------------
   -- Shard-level tensors (StateT [Post Text] IO)

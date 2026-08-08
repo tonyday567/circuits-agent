@@ -47,7 +47,7 @@ import Circuit.Agent
     Post (..),
     appendInbox,
     emptyInbox,
-    loopWith,
+    loopWithSubs,
     runAgentShard,
     watch,
   )
@@ -214,7 +214,8 @@ runGraph graph registry inputs =
       info = channelMap graph
       subs n = Set.toList (viIn (fromMaybe emptyInfo (Map.lookup n info)))
       states = [(n, seedGraphState (subs n) inputs) | (n, _) <- roster]
-   in case loopWith roster states inputs of
+      rosterSubs = [(n, subs n, a) | (n, a) <- roster]
+   in case loopWithSubs rosterSubs states inputs of
         (_, log', _) -> log'
 
 -- | Map over vertex names.

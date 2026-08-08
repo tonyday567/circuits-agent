@@ -63,6 +63,7 @@ library
     Circuit.Agent.Delivery
     Circuit.Agent.Framing
     Circuit.Agent.Graph
+    Circuit.Agent.Machina.Mark
     Circuit.Agent.Mark
     Circuit.Agent.Process
     Circuit.Agent.Tensor

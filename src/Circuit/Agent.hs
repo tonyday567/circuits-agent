@@ -106,13 +106,20 @@ module Circuit.Agent
     watch,
     post,
     turn,
+    turnAs,
     hasPending,
     loop,
+    loopSubs,
     loopWith,
+    loopWithSubs,
     loops,
+    loopsSubs,
     loopHetero,
+    loopHeteroSubs,
     meetingLoop,
+    meetingLoopSubs,
     seedAgentState,
+    RosterEntry,
 
     -- * Derivations
     Derivation (..),
@@ -539,16 +546,21 @@ session subs = map body . watch subs
 -- one post is consumed per call; repeated calls drain the inbox.  Outputs are
 -- committed newest-first via 'post'.  When a post is processed, the returned
 -- 'Derivation' records the agent name, the input post, and the emitted outputs.
-turn ::
+--
+-- 'turnAs' lets the caller supply the agent identity used in the derivation;
+-- this matters when an inbox has multiple subscriptions (card-addressing) and
+-- the first subscription is not the agent's own name.
+turnAs ::
   forall a s f.
   (Cons f (Post a), Uncons f (Post a)) =>
+  -- | Agent identity recorded in the derivation.
+  Name ->
   Agent (->) s (Post a) [Post a] ->
   AgentState s f ->
   Log f ->
   (AgentState s f, Log f, Maybe (Derivation a))
-turn sys st log0 =
-  let who = inboxWho (asInbox st)
-      subs = inboxSubs (asInbox st)
+turnAs who sys st log0 =
+  let subs = inboxSubs (asInbox st)
    in case unconsInbox @a (asInbox st) of
         That _ -> (st, log0, Nothing)
         This p ->
@@ -557,6 +569,19 @@ turn sys st log0 =
         These p rest ->
           let (os, seen') = run1 sys (asCarrier st) p
            in (AgentState seen' rest, foldl' (flip post) log0 os, Just (Derivation who p os []))
+
+-- | 'turn' with the agent identity taken from the inbox's first subscription.
+--
+-- For single-subscription inboxes this is the agent's own name; for
+-- multi-subscription inboxes use 'turnAs'.
+turn ::
+  forall a s f.
+  (Cons f (Post a), Uncons f (Post a)) =>
+  Agent (->) s (Post a) [Post a] ->
+  AgentState s f ->
+  Log f ->
+  (AgentState s f, Log f, Maybe (Derivation a))
+turn sys st log0 = turnAs (inboxWho (asInbox st)) sys st log0
 
 -- | Whether the agent's inbox has an addressed post waiting.
 hasPending :: forall a s f. (Uncons f (Post a)) => AgentState s f -> Bool
@@ -586,6 +611,11 @@ takeStream n s = go n s []
         This x -> x : acc
         These x rest -> go (n' - 1) rest (x : acc)
 
+-- | A roster entry with explicit subscriptions: agent name, subscription names,
+-- and the agent itself.  The subscription list is the set of names whose posts
+-- the agent's inbox should receive; the agent's own name need not be in it.
+type RosterEntry s a = (Name, [Name], Agent (->) s (Post a) [Post a])
+
 -- | Round-robin turn-loop until no agent has pending deliveries (quiescence).
 --
 -- Roster order is the schedule.  Each pass runs 'turn' for every agent that
@@ -597,12 +627,24 @@ loop ::
   [(Name, Agent (->) s (Post a) [Post a])] ->
   Log f ->
   ([(Name, AgentState s f)], Log f, [Derivation a])
-loop roster log0 = loopWith roster [(n, seedAgentState @a @s @f [n] log0) | (n, _) <- roster] log0
+loop roster = loopSubs [(n, [n], a) | (n, a) <- roster]
+
+-- | Multi-seat-card variant of 'loop': each agent carries its own subscription
+-- list, so several agents can share a card name.
+loopSubs ::
+  forall a s f.
+  (Snoc s (Post a), Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  [RosterEntry s a] ->
+  Log f ->
+  ([(Name, AgentState s f)], Log f, [Derivation a])
+loopSubs roster log0 = loopWithSubs roster [(n, seedAgentState @a @s @f subs log0) | (n, subs, _) <- roster] log0
 
 -- | Resumable 'loop': supply the initial states and inboxes.
 --
 -- Implemented as an 'Either' trace over the roster: each pass is one
 -- iteration of the feedback channel, quiescence returns a 'Right' result.
+--
+-- Backwards-compatible wrapper; for explicit subscriptions use 'loopWithSubs'.
 loopWith ::
   forall a s f.
   (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
@@ -610,7 +652,17 @@ loopWith ::
   [(Name, AgentState s f)] ->
   Log f ->
   ([(Name, AgentState s f)], Log f, [Derivation a])
-loopWith roster states0 log0 = trace body ()
+loopWith roster = loopWithSubs [(n, [n], a) | (n, a) <- roster]
+
+-- | Multi-seat-card variant of 'loopWith'.
+loopWithSubs ::
+  forall a s f.
+  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  [RosterEntry s a] ->
+  [(Name, AgentState s f)] ->
+  Log f ->
+  ([(Name, AgentState s f)], Log f, [Derivation a])
+loopWithSubs roster states0 log0 = trace body ()
   where
     bundle0 = (states0, log0, []) :: ([(Name, AgentState s f)], Log f, [Derivation a])
     body (Right ()) =
@@ -626,12 +678,22 @@ loopWith roster states0 log0 = trace body ()
 
 -- | The same meeting as a 'Loop' value: 'Knot' body over the 'Either'
 -- tensor, quiescence returned as a 'Right' payload.
+--
+-- Backwards-compatible wrapper; for explicit subscriptions use 'meetingLoopSubs'.
 meetingLoop ::
   forall a s f.
   (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
   [(Name, Agent (->) s (Post a) [Post a])] ->
   Loop Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
-meetingLoop roster = Knot body
+meetingLoop roster = meetingLoopSubs [(n, [n], a) | (n, a) <- roster]
+
+-- | Multi-seat-card variant of 'meetingLoop'.
+meetingLoopSubs ::
+  forall a s f.
+  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  [RosterEntry s a] ->
+  Loop Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
+meetingLoopSubs roster = Knot body
   where
     body (Right bundle@(states, _, _)) =
       if any (hasPending @a . snd) states
@@ -644,20 +706,25 @@ meetingLoop roster = Knot body
             else Right bundle'
 
 -- | One roster pass: schedule every agent that has pending work.
+--
+-- The roster carries explicit subscriptions; posts are routed to every agent
+-- whose subscriptions intersect the post's 'to' list.
 meetingPass ::
   forall a s f.
   (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
-  [(Name, Agent (->) s (Post a) [Post a])] ->
+  [RosterEntry s a] ->
   ([(Name, AgentState s f)], Log f, [Derivation a]) ->
   ([(Name, AgentState s f)], Log f, [Derivation a])
 meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roster
   where
-    step (st, l, ds) (name, agent) =
+    subMap = Map.fromList [(n, subs) | (n, subs, _) <- roster]
+
+    step (st, l, ds) (name, _subs, agent) =
       case lookup name st of
         Nothing -> (st, l, ds)
         Just sti
           | hasPending @a sti ->
-              let (st', l', md) = turn agent sti l
+              let (st', l', md) = turnAs name agent sti l
                   newCount = streamLength @f @(Post a) l' - streamLength @f @(Post a) l
                   newPosts = takeStream @f @(Post a) newCount l'
                   st'' = foldl' routePost (updateState name st' st) newPosts
@@ -670,7 +737,7 @@ meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roste
     routePost states' p =
       map
         ( \(n, st) ->
-            if deliversTo p [n]
+            if deliversTo p (Map.findWithDefault [n] n subMap)
               then (n, st {asInbox = appendInbox p (asInbox st)})
               else (n, st)
         )
@@ -682,15 +749,29 @@ meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roste
 -- observable (the list is infinite) and 'loop' is simply the last quiescent
 -- element.  The third component collects one 'Derivation' for every post that
 -- was processed by 'turn' across the schedule.
+--
+-- Backwards-compatible wrapper; for explicit subscriptions use 'loopsSubs'.
 loops ::
   forall a s f.
-  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  (Snoc s (Post a), Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
   [(Name, Agent (->) s (Post a) [Post a])] ->
   [(Name, AgentState s f)] ->
   Log f ->
   [([(Name, AgentState s f)], Log f, [Derivation a])]
-loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
+loops roster = loopsSubs [(n, [n], a) | (n, a) <- roster]
+
+-- | Multi-seat-card variant of 'loops'.
+loopsSubs ::
+  forall a s f.
+  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  [RosterEntry s a] ->
+  [(Name, AgentState s f)] ->
+  Log f ->
+  [([(Name, AgentState s f)], Log f, [Derivation a])]
+loopsSubs roster states0 log0 = (states0, log0, []) : go states0 log0 []
   where
+    subMap = Map.fromList [(n, subs) | (n, subs, _) <- roster]
+
     go :: [(Name, AgentState s f)] -> Log f -> [Derivation a] -> [([(Name, AgentState s f)], Log f, [Derivation a])]
     go states lg derivs
       | not (any (hasPending @a . snd) states) = []
@@ -698,13 +779,13 @@ loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
           let (states', lg', derivs') = foldl' step (states, lg, derivs) roster
            in (states', lg', derivs') : go states' lg' derivs'
 
-    step :: ([(Name, AgentState s f)], Log f, [Derivation a]) -> (Name, Agent (->) s (Post a) [Post a]) -> ([(Name, AgentState s f)], Log f, [Derivation a])
-    step (states, lg, derivs) (name, agent) =
+    step :: ([(Name, AgentState s f)], Log f, [Derivation a]) -> RosterEntry s a -> ([(Name, AgentState s f)], Log f, [Derivation a])
+    step (states, lg, derivs) (name, _subs, agent) =
       case lookup name states of
         Nothing -> (states, lg, derivs)
         Just st
           | hasPending @a st ->
-              let (st', lg', md) = turn agent st lg
+              let (st', lg', md) = turnAs name agent st lg
                   newCount = streamLength @f @(Post a) lg' - streamLength @f @(Post a) lg
                   newPosts = takeStream @f @(Post a) newCount lg'
                   states'' = foldl' routePost (updateState name st' states) newPosts
@@ -719,7 +800,7 @@ loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
     routePost states p =
       map
         ( \(n, st) ->
-            if deliversTo p [n]
+            if deliversTo p (Map.findWithDefault [n] n subMap)
               then (n, st {asInbox = appendInbox p (asInbox st)})
               else (n, st)
         )
@@ -727,14 +808,28 @@ loops roster states0 log0 = (states0, log0, []) : go states0 log0 []
 
 -- | Resumable 'loop' with a heterogeneous roster: each agent supplies its own
 -- initial carrier, while inboxes are still seeded from the shared log.
+--
+-- Backwards-compatible wrapper; for explicit subscriptions use 'loopHeteroSubs'.
 loopHetero ::
   forall a s f.
   (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
   [(Name, s, Agent (->) s (Post a) [Post a])] ->
   Log f ->
   ([(Name, AgentState s f)], Log f, [Derivation a])
-loopHetero roster log0 =
-  loopWith (map (\(n, _, a') -> (n, a')) roster) (map (\(n, s, _) -> (n, AgentState s (seedInbox @a [n] log0))) roster) log0
+loopHetero roster = loopHeteroSubs [(n, s, [n], a) | (n, s, a) <- roster]
+
+-- | Multi-seat-card variant of 'loopHetero'.
+loopHeteroSubs ::
+  forall a s f.
+  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  [(Name, s, [Name], Agent (->) s (Post a) [Post a])] ->
+  Log f ->
+  ([(Name, AgentState s f)], Log f, [Derivation a])
+loopHeteroSubs roster log0 =
+  loopWithSubs
+    [(n, subs, a) | (n, _, subs, a) <- roster]
+    [(n, AgentState s (seedInbox @a subs log0)) | (n, s, subs, _) <- roster]
+    log0
 
 -- | Run a monomial system for one step.
 --
