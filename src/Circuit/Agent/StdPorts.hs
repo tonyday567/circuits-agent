@@ -46,6 +46,7 @@ module Circuit.Agent.StdPorts
     splitFrame,
     lineMarks,
     ghciMarks,
+    hermesMarks,
 
     -- * Process ports
     StdPorts (..),
@@ -130,6 +131,12 @@ lineMarks = ProcMarks ["\n"]
 -- | The ghci prompt grammar.
 ghciMarks :: ProcMarks
 ghciMarks = ProcMarks ["ghci> ", "\955> "]
+
+-- | The hermes CLI prompt grammar: @❯@ between separator lines when ready.
+-- ANSI decorations ride inside the payload; the mark itself is a bare glyph.
+-- (Probe card: @coffee\/loom\/hermes-boundary-probe.md@.)
+hermesMarks :: ProcMarks
+hermesMarks = ProcMarks ["❯"]
 
 -- | The stateless mark parse: the earliest mark occurrence in the buffer,
 -- giving @(payload, rest)@ — payload before the mark (mark stripped), rest
