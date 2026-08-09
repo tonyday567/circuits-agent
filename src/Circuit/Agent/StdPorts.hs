@@ -52,6 +52,10 @@ module Circuit.Agent.StdPorts
     StdPorts (..),
     openStdPorts,
 
+    -- * The mark machine
+    frameAgent,
+    frameProcess,
+
     -- * Ends / seat view (client-facing)
     ProcEnds (..),
     stdioEnds,
@@ -64,15 +68,20 @@ module Circuit.Agent.StdPorts
   )
 where
 
+import Circuit.Agent (Agent, run1)
 import Circuit.Category ((.>))
 import Circuit.Ends (Ends (..), HasUnit (..), In (..), Out (..), Queue (..), commit, emit, open, openIO)
 import Circuit.Loop (Loop (..))
+import Circuit.Poly (Eval (..), fromEvalSystem)
+import Circuit.Poly.Process (iterateSystem, systemAsProcess)
+import Circuit.Process (Process)
 import Circuit.Tensor (Tensor (..))
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (forkIO, killThread)
 import Control.Exception (IOException, try)
-import Control.Monad (unless, void)
+import Control.Monad (void)
 import Data.ByteString qualified as BS
+import Data.Foldable (traverse_)
 import Data.IORef
 import Data.List (minimumBy)
 import Data.Maybe (fromMaybe)
@@ -237,28 +246,58 @@ sink q a = runKleisli (commit (conjoint q) outU) a
   where
     Ends _ outU = open :: Ends (Kleisli IO) () ()
 
--- | The pumper: blocking reads from the handle, frames split on the marks,
--- payloads sunk into the queue.  The buffer is the whole state — the mark
--- machine needs nothing else.  A mark split across reads completes in the
--- buffer; a partial frame at end-of-stream is flushed as the final token.
-pumpFrames :: ProcMarks -> (BS.ByteString -> a) -> Handle -> (a -> IO ()) -> IO ()
-pumpFrames marks decode h snk = go BS.empty
+-- | The pumper as an agent: a Moore machine from maybe-chunks to frame
+-- lists.  The carrier is @(buffer, pending)@ — the unexplained suffix and
+-- the frames awaiting observation.  @Just chunk@ is the percept,
+-- 'Nothing' the end-of-stream mark: the EOF flush is content, decided by
+-- the same stateless grammar.  This is the level-0 mark machine made
+-- literal; 'pumpFrames' is merely its IO interpretation at a 'Handle'.
+--
+-- >>> iterateSystem (frameAgent lineMarks decodeUtf8) ("", []) [Just "a\n", Just "b", Nothing]
+-- [["a"],[],["b"]]
+frameAgent :: ProcMarks -> (BS.ByteString -> a) -> Agent (->) (BS.ByteString, [a]) (Maybe BS.ByteString) [a]
+frameAgent marks decode = fromEvalSystem $ \(buf, pending) ->
+  EP
+    ( EK pending,
+      EE $ \input -> case input of
+        Just chunk ->
+          let (fs, buf') = peel (buf <> chunk)
+           in (buf', map decode fs)
+        Nothing ->
+          (BS.empty, [decode buf | not (BS.null buf)])
+    )
   where
-    go buf = do
+    peel buf = case splitFrame marks buf of
+      Nothing -> ([], buf)
+      Just (p, rest) ->
+        let (ps, rest') = peel rest
+         in (p : ps, rest')
+
+-- | The same machine as a 'Process': chunk stream in, frame lists out,
+-- state carried implicitly.
+frameProcess :: ProcMarks -> (BS.ByteString -> a) -> Process (Maybe BS.ByteString) [a]
+frameProcess marks decode = systemAsProcess (frameAgent marks decode) (BS.empty, [])
+
+-- | The pumper: the IO interpretation of 'frameAgent' at a 'Handle'.
+-- Blocking reads deliver percepts; payloads are sunk into the queue.
+-- A mark split across reads completes in the buffer; end-of-stream is the
+-- 'Nothing' percept, flushing a partial frame as the final token.
+pumpFrames :: ProcMarks -> (BS.ByteString -> a) -> Handle -> (a -> IO ()) -> IO ()
+pumpFrames marks decode h snk = go (BS.empty, [])
+  where
+    sys = frameAgent marks decode
+    go st = do
       r <- try @IOException (BS.hGetSome h 4096)
-      case r of
-        Left _ -> flush buf
-        Right bs
-          | BS.null bs -> flush buf
-          | otherwise -> frames (buf <> bs) >>= go
-
-    frames buf = case splitFrame marks buf of
-      Nothing -> pure buf
-      Just (payload, rest) -> do
-        snk (decode payload)
-        frames rest
-
-    flush buf = unless (BS.null buf) (snk (decode buf))
+      let input = case r of
+            Left _ -> Nothing
+            Right bs
+              | BS.null bs -> Nothing
+              | otherwise -> Just bs
+          (outs, st') = run1 sys st input
+      traverse_ snk outs
+      case input of
+        Nothing -> pure ()
+        Just _ -> go st'
 
 -- ---------------------------------------------------------------------------
 -- Ends / seat view
