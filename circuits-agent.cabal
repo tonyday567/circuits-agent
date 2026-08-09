@@ -18,7 +18,7 @@ description:
   boundaries are opaque shards: 'Shard' m a b = 'Ends' ('Kleisli' m) a b
   (lists both ways in the common log case; one-post commit via prefixIn (:[])).
   'LogEnds' is the same shape on the log seat.  Includes process-port plumbing
-  ('Circuit.Agent.Repl'), message framing ('Circuit.Agent.Framing'),
+  ('Circuit.Agent.StdPorts'), message framing ('Circuit.Agent.Framing'),
   and turn-boundary runners ('Circuit.Agent.Turn').
 
 build-type: Simple
@@ -65,7 +65,7 @@ library
     Circuit.Agent.Graph
     Circuit.Agent.Machina.Mark
     Circuit.Agent.Mark
-    Circuit.Agent.Repl
+    Circuit.Agent.StdPorts
     Circuit.Agent.Tensor
     Circuit.Agent.Turn
     Cursor
@@ -85,13 +85,11 @@ library
     harpie-numhask >=0.2 && <0.3,
     mtl >=2.3 && <2.4,
     numhask >=0.14 && <0.15,
-    posix-pty >=0.2 && <0.3,
     process >=1.6 && <1.7,
     scientific >=0.3 && <0.4,
     stm >=2.5 && <2.6,
     text >=2.0 && <3,
     time >=1.12 && <2,
-    unix >=2.8 && <2.9,
     vector >=0.13 && <0.14,
 
 executable circuits-agent-axioma

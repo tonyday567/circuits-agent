@@ -2,89 +2,56 @@
 
 -- | Named runner circuits that tie free dual ends into a turn.
 --
--- A turn is a /runner/ observation: it commits input, then polls the emit
--- end until a boundary predicate is satisfied or a timeout expires.  The
--- ends themselves live elsewhere (e.g. 'stdioEnds'); the tying schedule
--- lives here.
+-- A turn is a /runner/ observation: it commits input, then blocks on one
+-- frame.  Framing lives port-side ('Circuit.Agent.StdPorts' stream marks);
+-- the queue retry is the blocking boundary.  No polling, no backoff — the
+-- halt is decided by content, not inferred from quiet.
 --
 -- @
---   closeOnce cfg e  :: Loop (,) (Kleisli IO) [Text] (Maybe [Text])
---   turnUntil cfg p e :: Loop (,) (Kleisli IO) [Text] (Maybe [Text])
+--   turn        e :: Loop (,) (Kleisli IO) Text Text
+--   turnTimeout u e :: Loop (,) (Kleisli IO) Text (Maybe Text)
 -- @
 --
--- Both return 'Nothing' when the timeout expires before the boundary is
--- reached.  Partial output is discarded on timeout (runner choice); use a
--- raw poll emit if you need every line.
+-- 'turnTimeout' wraps the blocking read in a deadline: a runner that cannot
+-- wait forever sets a budget.  'Nothing' means the budget expired before the
+-- frame arrived; partial output stays port-side, framed, for the next read.
 module Circuit.Agent.Turn
-  ( -- * Turn configuration
-    TurnConfig (..),
-    defaultTurnConfig,
-
-    -- * Runner circuits
-    closeOnce,
-    turnUntil,
+  ( -- * Runner circuits
+    turn,
+    turnTimeout,
   )
 where
 
 import Circuit (Loop (..))
 import Circuit.Ends (Ends (..), HasUnit (..), commit, emit, open)
 import Control.Arrow (Kleisli (..), runKleisli)
-import Control.Concurrent (threadDelay)
 import Data.Text (Text)
-import Data.Text qualified as T
+import System.Timeout (timeout)
+import Prelude
 
--- | Configuration for a single turn.
-data TurnConfig = TurnConfig
-  { -- | Timeout in microseconds.
-    turnTimeoutUs :: Int,
-    -- | End-of-turn marker used by 'closeOnce'.
-    turnEofTag :: Text
-  }
-  deriving (Show, Eq)
-
--- | Sensible defaults: 15 second timeout, @"<EOF>"@ end-of-turn tag.
-defaultTurnConfig :: TurnConfig
-defaultTurnConfig =
-  TurnConfig
-    { turnTimeoutUs = 15_000_000,
-      turnEofTag = "<EOF>"
-    }
-
--- | One turn: commit input lines, then emit until the boundary
--- predicate succeeds or the timeout expires.
+-- | One turn: commit one token, then block until the next frame arrives.
 --
--- Agent endomorphism @[Text] -> Maybe [Text]@ — matches the free dual
--- on commit / emit.
-turnUntil ::
-  TurnConfig ->
-  (Text -> Bool) ->
-  Ends (Kleisli IO) [Text] [Text] ->
-  Loop (,) (Kleisli IO) [Text] (Maybe [Text])
-turnUntil cfg isBoundary e = Lift $ Kleisli $ \cmds -> do
-  runKleisli (commit (conjoint e) outU) cmds
-  poll 0 [] 10_000
+-- Agent endomorphism @Text -> Text@ — matches the free dual on commit /
+-- emit.  This blocks: if the mark never arrives, neither does the result.
+turn ::
+  Ends (Kleisli IO) Text Text ->
+  Loop (,) (Kleisli IO) Text Text
+turn e = Lift $ Kleisli $ \cmd -> do
+  runKleisli (commit (conjoint e) outU) cmd
+  runKleisli (emit (companion e) inU) ()
   where
     Ends _ outU = open :: Ends (Kleisli IO) () ()
-    timeoutUs = turnTimeoutUs cfg
-    poll elapsed acc delay = do
-      news <- runKleisli (emit (companion e) inU) ()
-      let acc' = acc <> news
-      if any isBoundary news
-        then pure (Just acc')
-        else do
-          let elapsed' = elapsed + delay
-          if elapsed' >= timeoutUs
-            then pure Nothing
-            else do
-              threadDelay delay
-              let delay' = min 500_000 (floor (fromIntegral delay * 1.5 :: Double))
-              poll elapsed' acc' delay'
     Ends inU _ = open :: Ends (Kleisli IO) () ()
 
--- | One turn that closes when the configured 'turnEofTag' appears in the
--- emitted stream.
-closeOnce ::
-  TurnConfig ->
-  Ends (Kleisli IO) [Text] [Text] ->
-  Loop (,) (Kleisli IO) [Text] (Maybe [Text])
-closeOnce cfg = turnUntil cfg (T.isInfixOf (turnEofTag cfg))
+-- | 'turn' under a deadline (microseconds).  'Nothing' on expiry; the
+-- unarrived frame is not lost — the next emit still receives it.
+turnTimeout ::
+  Int ->
+  Ends (Kleisli IO) Text Text ->
+  Loop (,) (Kleisli IO) Text (Maybe Text)
+turnTimeout us e = Lift $ Kleisli $ \cmd -> do
+  runKleisli (commit (conjoint e) outU) cmd
+  timeout us (runKleisli (emit (companion e) inU) ())
+  where
+    Ends _ outU = open :: Ends (Kleisli IO) () ()
+    Ends inU _ = open :: Ends (Kleisli IO) () ()
