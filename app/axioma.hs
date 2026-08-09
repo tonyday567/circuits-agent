@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ExtendedDefaultRules #-}
+{-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 -- Post is polymorphic in its payload; this file pins everything at Text via
 -- the module 'default' declaration, so -Wtype-defaults would be noise.
@@ -13,15 +14,17 @@ import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf, par
 import Circuit.Agent.Machina.Mark (markLoop, spinMark)
 import Circuit.Agent.Framing
   ( Cons (..),
-    Jsonl (..),
+    Log (..),
     Snoc (..),
     Stamped (..),
     frameStored,
     parseLine,
     parseLineAt,
+    parseTimeText,
     parseMessage,
     renderStored,
   )
+import Circuit.Agent.Framing qualified as Framing
 import Circuit.Agent.Delivery
   ( DelRel,
     broadcastRel,
@@ -1882,28 +1885,32 @@ main = do
   -------------------------------------------------------------------------
   -- Tier F: framing laws
   --
-  -- Stamped Text JSON Lines round-trip, legacy parsing, and Jsonl typeclass
+  -- Stamped Text JSON Lines round-trip, legacy parsing, and Log typeclass
   -- laws. These were formerly in test/Test.hs under tasty.
   -------------------------------------------------------------------------
   putStrLn "Tier F: framing laws"
   do
     let p = Post "kimi" ["bus"] [3] ("hello \nworld ♪" :: Text)
-        stored = Stamped 42 "2026-08-03T23:10:25" p
+        stored = case parseTimeText "2026-08-03T23:10:25" of
+          Just ts -> Stamped { stamp = 42, timeStamp = ts, stamped = p }
+          Nothing -> error "bad timestamp"
     assert "F0: round-trip unicode and embedded newlines" $
-      parseLine (frameStored stored) == Just stored
+      parseLine @Text (frameStored stored) == Just stored
 
   do
     let p = Post "a" ["b"] [2] ("body" :: Text)
-        stored = Stamped 7 "2026-08-03T23:10:25" p
+        stored = case parseTimeText "2026-08-03T23:10:25" of
+          Just ts -> Stamped { stamp = 7, timeStamp = ts, stamped = p }
+          Nothing -> error "bad timestamp"
     assert "F1: id is preserved across round-trip" $
-      maybe False ((== 7) . stampId) (parseLine (frameStored stored))
+      maybe False ((== 7) . stamp) (parseLine @Text (frameStored stored))
 
   do
     let line = "{\"ts\":\"2026-08-03T12:00:00\",\"sender\":\"kimi\",\"body\":\"legacy\"}" :: Text
     assert "F2: legacy triple round-trip" $
       case parseLineAt 5 line of
         Just s ->
-          stampId s == 5
+          stamp s == 5
             && from (stamped s) == "kimi"
             && body (stamped s) == "legacy"
             && to (stamped s) == []
@@ -1915,20 +1922,24 @@ main = do
     assert "F3: legacy bracket round-trip" $
       case parseLineAt 3 line of
         Just s ->
-          stampId s == 3
+          stamp s == 3
             && from (stamped s) == "kimi"
             && body (stamped s) == "legacy bracket"
         Nothing -> False
 
   do
     let p = Post "kimi" ["bus"] [] ("hi" :: Text)
-        stored = Stamped 1 "2026-08-03T23:10:25" p
+        stored = case parseTimeText "2026-08-03T23:10:25" of
+          Just ts -> Stamped { stamp = 1, timeStamp = ts, stamped = p }
+          Nothing -> error "bad timestamp"
     assert "F4: parseMessage extracts (from, body) on stamped line" $
       parseMessage (frameStored stored) == Just ("kimi", "hi")
 
   do
     let p = Post "kimi" ["bus"] [] ("hi" :: Text)
-        s = Stamped 9 "2026-08-03T23:10:25" p
+        s = case parseTimeText "2026-08-03T23:10:25" of
+          Just ts -> Stamped { stamp = 9, timeStamp = ts, stamped = p }
+          Nothing -> error "bad timestamp"
         rendered = renderStored s
     assert "F5: renderStored includes id@ts" $
       "[9@2026-08-03T23:10:25]" `T.isPrefixOf` rendered
@@ -1936,32 +1947,41 @@ main = do
       "kimi: hi" `T.isSuffixOf` rendered
 
   do
-    let a = Stamped 0 "t0" (Post "a" [] [] "A")
-        b = Stamped 1 "t1" (Post "b" [] [] "B")
-        j = snoc (snoc (Jsonl []) a) b
+    let dummyTS = case parseTimeText "2026-01-01T00:00:00" of
+          Just ts -> ts
+          Nothing -> error "bad timestamp"
+        a = Stamped { stamp = 0, timeStamp = dummyTS, stamped = Post "a" [] [] "A" }
+        b = Stamped { stamp = 1, timeStamp = dummyTS, stamped = Post "b" [] [] "B" }
+        j :: Framing.Log Text
+        j = snoc (snoc (Log []) a) b
     assert "F7: Snoc then Uncons peels oldest first" $
       case uncons j of
-        These a' (Jsonl rest1) ->
+        These a' (Log rest1) ->
           a' == a
-            && case uncons (Jsonl rest1) of
+            && case uncons (Log rest1 :: Framing.Log Text) of
               This b' -> b' == b
               _ -> False
         _ -> False
 
   do
-    let posts =
-          [ Stamped 0 "t0" (Post "a" ["x"] [1, 2] "multi\nline ♪"),
-            Stamped 1 "t1" (Post "b" ["y"] [] "body2"),
-            Stamped 2 "t2" (Post "c" [] [] "body3")
+    let dummyTS = case parseTimeText "2026-01-01T00:00:00" of
+          Just ts -> ts
+          Nothing -> error "bad timestamp"
+        posts =
+          [ Stamped { stamp = 0, timeStamp = dummyTS, stamped = Post "a" ["x"] [1, 2] "multi\nline ♪" },
+            Stamped { stamp = 1, timeStamp = dummyTS, stamped = Post "b" ["y"] [] "body2" },
+            Stamped { stamp = 2, timeStamp = dummyTS, stamped = Post "c" [] [] "body3" }
           ] :: [Stamped Text]
-        j = foldl snoc (Jsonl []) posts
-        go (Jsonl []) = []
+        j :: Framing.Log Text
+        j = foldl snoc (Log []) posts
+        go :: Framing.Log Text -> [Stamped Text]
+        go (Log []) = []
         go js =
           case uncons js of
             This p -> [p]
             These p js' -> p : go js'
             That _ -> []
-    assert "F8: Recreate from Jsonl via snoc/uncons" $
+    assert "F8: Recreate from Log via snoc/uncons" $
       go j == posts
 
   -------------------------------------------------------------------------

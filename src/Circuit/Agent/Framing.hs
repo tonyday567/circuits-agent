@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Bus message framing.
 --
@@ -7,9 +8,13 @@
 -- for framing; JSON string encoding handles newlines in the standard way.
 --
 -- The file image is a stream with the same 'Circuit.Stream' ends as the pure
--- log: 'Jsonl' is oldest-first on disk, so append is 'snoc' and read is
+-- log: 'Log' is oldest-first on disk, so append is 'snoc' and read is
 -- 'uncons'.  The pure 'Log' is newest-first; that is the dual linearisation of
 -- the same thread DAG, not a different algebra.
+--
+-- 'Log a' stores 'Stamped a' values in memory — no encoding in the hot path.
+-- File persistence uses 'frameStored'/'parseLine' via 'PostBody' at the
+-- storage boundary.
 --
 -- Backwards compatibility: 'parseLineAt' also accepts the legacy flat triple
 -- @{\"ts\":..., \"sender\":..., \"body\":...}@ and the bracket format
@@ -19,8 +24,9 @@
 module Circuit.Agent.Framing
   ( -- * Types
     PostId,
+    PostBody (..),
     Stamped (..),
-    Jsonl (..),
+    Log (..),
 
     -- * Stream ends (re-exported from Circuit.Stream)
     Cons (..),
@@ -45,6 +51,11 @@ module Circuit.Agent.Framing
 
     -- * Time
     formatNow,
+    parseTimeText,
+
+    -- * File helpers
+    readLogFile,
+    encodeLog,
   )
 where
 
@@ -53,14 +64,27 @@ import "circuits-parser" Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import Control.Applicative ((<|>))
 import Control.Monad (guard)
+import Data.Maybe (mapMaybe)
 import Data.Scientific (Scientific, base10Exponent, coefficient)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime, parseTimeM)
 import Data.Vector qualified as V
 import Numeric.Natural (Natural)
 import Prelude
+
+-- | Encodable/decodable post body. Every body type in the bus must
+-- support JSON round-trip through 'circuits-parser''s 'Json' type.
+class PostBody a where
+  encodePostBody :: a -> Json
+  decodePostBody :: Json -> Maybe a
+
+instance PostBody Text where
+  encodePostBody = JString
+  decodePostBody (JString t) = Just t
+  decodePostBody _ = Nothing
 
 -- | Storage boundary: a post with its assigned id and timestamp.
 data Stamped a = Stamped
@@ -70,34 +94,26 @@ data Stamped a = Stamped
   }
   deriving (Show, Eq, Functor)
 
--- | The file image: a stream of raw JSONL lines, oldest first.
-newtype Jsonl = Jsonl { unJsonl :: [Text] }
-  deriving (Show, Eq)
+-- | The log image: a stream of stamped posts, oldest first.
+newtype Log a = Log { unLog :: [Stamped a] }
+  deriving (Show, Eq, Functor)
 
--- | Append is the natural file operation: a new line at the end.
-instance Snoc Jsonl (Stamped Text) where
-  snoc (Jsonl xs) p = Jsonl (xs ++ [frameStored p])
-  snocNil = Jsonl []
+-- | Append is the natural operation: one element at the end.
+instance Snoc (Log a) (Stamped a) where
+  snoc (Log xs) p = Log (xs ++ [p])
+  snocNil = Log []
 
--- | Read peels the oldest line first.  A malformed or partial line is treated
--- as end-of-stream on a singleton, or skipped if more lines follow — the
--- cursor should have trimmed trailing partials before streaming.
-instance Uncons Jsonl (Stamped Text) where
-  uncons (Jsonl []) = That (Jsonl [])
-  uncons (Jsonl [line]) =
-    case parseLine line of
-      Just p -> This p
-      Nothing -> That (Jsonl [])
-  uncons (Jsonl (line : rest)) =
-    case parseLine line of
-      Just p -> These p (Jsonl rest)
-      Nothing -> uncons (Jsonl rest)
-  nil = Jsonl []
+-- | Read peels the oldest element first.
+instance Uncons (Log a) (Stamped a) where
+  uncons (Log []) = That (Log [])
+  uncons (Log [x]) = This x
+  uncons (Log (x : xs)) = These x (Log xs)
+  nil = Log []
 
 -- | Prepend is the dual view: a newest-first stream over the same image.
-instance Cons Jsonl (Stamped Text) where
-  cons p (Jsonl xs) = Jsonl (frameStored p : xs)
-  consNil = Jsonl []
+instance Cons (Log a) (Stamped a) where
+  cons p (Log xs) = Log (p : xs)
+  consNil = Log []
 
 -- | Current UTC time as an ISO-8601 string.
 formatNow :: IO Text
@@ -107,8 +123,8 @@ formatNow = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" <$> getCur
 parseTimeText :: Text -> Maybe UTCTime
 parseTimeText = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S" . T.unpack
 
--- | Encode a 'Stamped Text' as a single canonical JSON Lines object.
-frameStored :: Stamped Text -> Text
+-- | Encode a 'Stamped a' as a single canonical JSON Lines object.
+frameStored :: PostBody a => Stamped a -> Text
 frameStored (Stamped ts i (Post from' to' thread' body')) =
   decodeUtf8 $
     encodeJson $
@@ -118,12 +134,12 @@ frameStored (Stamped ts i (Post from' to' thread' body')) =
           ("from", JString from'),
           ("to", JArray (V.fromList (map JString to'))),
           ("thread", JArray (V.fromList (map (JNumber . fromIntegral) thread'))),
-          ("body", JString body')
+          ("body", encodePostBody body')
         ]
 
--- | Encode a bare 'Post Text' as a single JSON Lines object (the protocol
+-- | Encode a bare 'Post a' as a single JSON Lines object (the protocol
 -- format sent to the stamping bus daemon).
-framePost :: Post Text -> Text
+framePost :: PostBody a => Post a -> Text
 framePost p =
   decodeUtf8 $
     encodeJson $
@@ -131,12 +147,12 @@ framePost p =
         [ ("from", JString (from p)),
           ("to", JArray (V.fromList (map JString (to p)))),
           ("thread", JArray (V.fromList (map (JNumber . fromIntegral) (thread p)))),
-          ("body", JString (body p))
+          ("body", encodePostBody (body p))
         ]
 
 -- | Parse a canonical stamped storage line.  Returns 'Nothing' if the line is
 -- not valid JSON with the expected fields.
-parseLine :: Text -> Maybe (Stamped Text)
+parseLine :: PostBody a => Text -> Maybe (Stamped a)
 parseLine line =
   case decodeJson (encodeUtf8 line) of
     Right (JObject o) -> do
@@ -146,24 +162,26 @@ parseLine line =
       JString from' <- lookup "from" o
       to' <- lookupStrings "to" (JObject o)
       thread' <- lookupPostIds "thread" (JObject o)
-      JString body' <- lookup "body" o
+      bodyVal <- lookup "body" o
+      body' <- decodePostBody bodyVal
       pure (Stamped ts pid (Post from' to' thread' body'))
     _ -> Nothing
 
--- | Parse a bare 'Post Text' line (no stamp).
-parsePost :: Text -> Maybe (Post Text)
+-- | Parse a bare 'Post a' line (no stamp).
+parsePost :: PostBody a => Text -> Maybe (Post a)
 parsePost line =
   case decodeJson (encodeUtf8 line) of
     Right (JObject o) -> do
       JString from' <- lookup "from" o
       to' <- lookupStrings "to" (JObject o)
       thread' <- lookupPostIds "thread" (JObject o)
-      JString body' <- lookup "body" o
+      bodyVal <- lookup "body" o
+      body' <- decodePostBody bodyVal
       pure (Post from' to' thread' body')
     _ -> Nothing
 
 -- | Like 'parseLine', but also accepts the legacy flat triple and bracket
--- formats, assigning the supplied line index as the id.
+-- formats, assigning the supplied line index as the id. Legacy-only, 'Text' body.
 parseLineAt :: Int -> Text -> Maybe (Stamped Text)
 parseLineAt idx line =
   parseLine line
@@ -183,14 +201,28 @@ parseMessageTs line = do
   Stamped{timeStamp = ts} <- parseLineAt 0 line
   pure (T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" ts))
 
--- | Render a 'Stamped Text' for human display as @[id@ts] from: body@.
-renderStored :: Stamped Text -> Text
+-- | Render a 'Stamped a' for human display as @[id@ts] from: body@.
+renderStored :: PostBody a => Stamped a -> Text
 renderStored (Stamped ts i (Post from' _to' _thread' body')) =
-  T.concat ["[", T.pack (show i), "@", T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" ts), "] ", from', ": ", body']
+  T.concat ["[", T.pack (show i), "@", T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" ts), "] ", from', ": ", renderBody body']
+  where
+    renderBody b = case decodeUtf8 (encodeJson (encodePostBody b)) of
+      t -> T.strip t
 
 -- | Render a raw log line for human display.
 renderMessage :: Text -> Maybe Text
 renderMessage line = renderStored <$> parseLineAt 0 line
+
+-- | Read a log file into a 'Log a', oldest first. Malformed lines are skipped.
+readLogFile :: PostBody a => FilePath -> IO (Log a)
+readLogFile path = do
+  content <- TIO.readFile path
+  let ls = filter (not . T.null) (T.lines content)
+  pure (Log (mapMaybe parseLine ls))
+
+-- | Encode a 'Log a' to raw JSONL text for file persistence.
+encodeLog :: PostBody a => Log a -> [Text]
+encodeLog = map frameStored . reverse . unLog
 
 -- ---------------------------------------------------------------------------
 -- Internal helpers
