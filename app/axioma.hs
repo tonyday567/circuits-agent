@@ -16,7 +16,6 @@ import Circuit.Agent.Framing
     Jsonl (..),
     Snoc (..),
     Stamped (..),
-    StoredPost,
     frameStored,
     parseLine,
     parseLineAt,
@@ -1883,7 +1882,7 @@ main = do
   -------------------------------------------------------------------------
   -- Tier F: framing laws
   --
-  -- StoredPost JSON Lines round-trip, legacy parsing, and Jsonl typeclass
+  -- Stamped Text JSON Lines round-trip, legacy parsing, and Jsonl typeclass
   -- laws. These were formerly in test/Test.hs under tasty.
   -------------------------------------------------------------------------
   putStrLn "Tier F: framing laws"
@@ -1954,7 +1953,7 @@ main = do
           [ Stamped 0 "t0" (Post "a" ["x"] [1, 2] "multi\nline ♪"),
             Stamped 1 "t1" (Post "b" ["y"] [] "body2"),
             Stamped 2 "t2" (Post "c" [] [] "body3")
-          ] :: [StoredPost]
+          ] :: [Stamped Text]
         j = foldl snoc (Jsonl []) posts
         go (Jsonl []) = []
         go js =
