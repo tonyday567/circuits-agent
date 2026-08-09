@@ -47,6 +47,7 @@ module Circuit.Agent.StdPorts
     lineMarks,
     ghciMarks,
     hermesMarks,
+    sseMarks,
 
     -- * Process ports
     StdPorts (..),
@@ -146,6 +147,11 @@ ghciMarks = ProcMarks ["ghci> ", "\955> "]
 -- (Probe card: @coffee\/loom\/hermes-boundary-probe.md@.)
 hermesMarks :: ProcMarks
 hermesMarks = ProcMarks ["❯"]
+
+-- | The SSE (Server-Sent Events) level-0 grammar: the blank line ends an
+-- event frame.  Payload is the @event:\/data:@ block, mark stripped.
+sseMarks :: ProcMarks
+sseMarks = ProcMarks ["\n\n"]
 
 -- | The stateless mark parse: the earliest mark occurrence in the buffer,
 -- giving @(payload, rest)@ — payload before the mark (mark stripped), rest
