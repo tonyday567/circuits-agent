@@ -536,6 +536,65 @@ main = do
       not (chuLaw lawfulFwd unlawfulBwd counterPost counterSub)
 
   -------------------------------------------------------------------------
+  -- Semiring Chu lift: delivery matrix commutes with prefix morphism
+  --
+  -- The boolean Chu law above lifts to the semiring matrix formulation:
+  -- if forward prefixes recipients and backward strips the prefix, the
+  -- delivery matrix over the domain agents equals the matrix over the
+  -- codomain agents on the prefixed posts.
+  -------------------------------------------------------------------------
+  putStrLn "semiring Chu lift"
+  do
+    let prefix :: Text
+        prefix = "ch-"
+        prefixTo = map (\x -> if x == "all" || x == "" then x else T.append prefix x)
+        domainAgents = ["j", "k"] :: [Text]
+        codomainAgents = map (T.append prefix) domainAgents
+        posts =
+          [ mkPost "a" ["j"] "b",
+            mkPost "a" ["j", "k"] "b",
+            mkPost "a" ["k"] "b",
+            mkPost "a" ["all"] "b",
+            mkPost "a" [] "b"
+          ]
+        domainMat =
+          deliveryMatrix domainAgents (map to posts) :: Matrix Bool
+        codomainMat =
+          deliveryMatrix codomainAgents (map (prefixTo . to) posts) :: Matrix Bool
+    assert "delivery matrix commutes with prefix morphism (Bool)" $
+      toLists domainMat == toLists codomainMat
+
+  do
+    let prefix :: Text
+        prefix = "ch-"
+        prefixTo = map (\x -> if x == "all" || x == "" then x else T.append prefix x)
+        domainAgents = ["j", "k"] :: [Text]
+        codomainAgents = map (T.append prefix) domainAgents
+        posts =
+          [ mkPost "a" ["j", "k"] "b",
+            mkPost "a" ["all"] "b"
+          ]
+        domainMat =
+          deliveryMatrix domainAgents (map to posts) :: Matrix Double
+        codomainMat =
+          deliveryMatrix codomainAgents (map (prefixTo . to) posts) :: Matrix Double
+    assert "delivery matrix commutes with prefix morphism (Double)" $
+      toLists domainMat == toLists codomainMat
+
+  do
+    let prefix :: Text
+        prefix = "ch-"
+        prefixTo = map (\x -> if x == "all" || x == "" then x else T.append prefix x)
+        domainAgents = ["j", "k"] :: [Text]
+        posts = [mkPost "a" ["j"] "b"]
+        domainMat =
+          deliveryMatrix domainAgents (map to posts) :: Matrix Bool
+        forwardOnlyMat =
+          deliveryMatrix domainAgents (map (prefixTo . to) posts) :: Matrix Bool
+    assert "prefix without backward column rename breaks matrix equality" $
+      toLists domainMat /= toLists forwardOnlyMat
+
+  -------------------------------------------------------------------------
   -- S0b · estimator fork: soft routing path (pathwise gradients)
   -------------------------------------------------------------------------
   putStrLn "S0b estimator fork: soft routing"
