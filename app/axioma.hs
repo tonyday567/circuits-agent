@@ -1,17 +1,29 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ExtendedDefaultRules #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
-{-# OPTIONS_GHC -Wno-x-partial #-}
 -- Post is polymorphic in its payload; this file pins everything at Text via
 -- the module 'default' declaration, so -Wtype-defaults would be noise.
 {-# OPTIONS_GHC -Wno-type-defaults #-}
+{-# OPTIONS_GHC -Wno-x-partial #-}
 
 module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
 import Circuit.Agent
-import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf, parseMark)
-import Circuit.Agent.Machina.Mark (markLoop, spinMark)
+import Circuit.Agent.Delivery
+  ( DelRel,
+    broadcastRel,
+    copyRel,
+    deliversRel,
+    deliveryMatrix,
+    deliveryRel,
+    discardRel,
+    emptyRel,
+    isNilpotent,
+    matrixPowers,
+    namedRel,
+    topologyMatrix,
+  )
 import Circuit.Agent.Framing
   ( Cons (..),
     Log (..),
@@ -20,25 +32,11 @@ import Circuit.Agent.Framing
     frameStored,
     parseLine,
     parseLineAt,
-    parseTimeText,
     parseMessage,
+    parseTimeText,
     renderStored,
   )
 import Circuit.Agent.Framing qualified as Framing
-import Circuit.Agent.Delivery
-  ( DelRel,
-    broadcastRel,
-    copyRel,
-    deliveryMatrix,
-    deliveryRel,
-    deliversRel,
-    discardRel,
-    emptyRel,
-    isNilpotent,
-    matrixPowers,
-    namedRel,
-    topologyMatrix,
-  )
 import Circuit.Agent.Graph
   ( AgentRegistry,
     atomic,
@@ -46,6 +44,8 @@ import Circuit.Agent.Graph
     runGraph,
     star,
   )
+import Circuit.Agent.Machina.Mark (markLoop, spinMark)
+import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf, parseMark)
 import Circuit.Agent.Query
   ( echoShard,
     replyPosts,
@@ -67,19 +67,19 @@ import Circuit.Poly.Process (after, iterateSystem, runSystem)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Category qualified as C
-import Cursor (newMem, pollNumberedFile)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM
 import Control.Exception (BlockedIndefinitelyOnSTM (..), SomeException, catch, fromException)
 import Control.Monad (unless, when)
 import Control.Monad.State (State, StateT, get, gets, modify, put, runState, runStateT)
+import Cursor (newMem, pollNumberedFile)
 import Data.Foldable (traverse_)
 import Data.Function (fix)
 import Data.Functor.Identity (Identity (..))
 import Data.List (find, foldl', nub, sort)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -476,6 +476,64 @@ main = do
 
     assert "F1 FinRel agrees with deliversTo: discard" $
       expect [] ["j"] False && expect [""] ["j"] False
+
+  -------------------------------------------------------------------------
+  -- Bus Chu space: adjoint law for delivery morphisms
+  --
+  -- Chu-space reading of the bus (chu.md): rows = posts, columns = names,
+  -- pairing = deliversTo. A bus morphism is a post-map forward with a
+  -- subscription-map backward satisfying the adjoint equation:
+  --   deliversTo (fwd p) s == deliversTo p (bwd s)
+  -------------------------------------------------------------------------
+  putStrLn "bus Chu space"
+  do
+    let prefix :: Text
+        prefix = "ch-"
+        prefixTo :: [Text] -> [Text]
+        prefixTo = map (\x -> if x == "all" || x == "" then x else T.append prefix x)
+        unprefixSub :: [Text] -> [Text]
+        unprefixSub =
+          map
+            ( \x ->
+                if x == "all" || x == ""
+                  then x
+                  else fromMaybe x (T.stripPrefix prefix x)
+            )
+        lawfulFwd :: Post Text -> Post Text
+        lawfulFwd p = p {to = prefixTo (to p)}
+        lawfulBwd :: [Text] -> [Text]
+        lawfulBwd = unprefixSub
+        chuLaw fwd bwd p s =
+          deliversTo (fwd p) s == deliversTo p (bwd s)
+        roster = ["j", "k"] :: [Text]
+        posts =
+          [ mkPost "a" [r] "b"
+          | r <- roster
+          ]
+            ++ [mkPost "a" ["j", "k"] "b"]
+            ++ [mkPost "a" ["all"] "b"]
+            ++ [mkPost "a" [] "b"]
+        -- Subscriber sets live in the codomain (prefixed names).
+        subs =
+          map ((: []) . T.append prefix) roster
+            ++ [map (T.append prefix) roster]
+            ++ [["all"], [""]]
+    assert "lawful prefix pair satisfies Chu adjoint law" $
+      all (\p -> all (chuLaw lawfulFwd lawfulBwd p) subs) posts
+
+  do
+    let prefix :: Text
+        prefix = "ch-"
+        prefixTo = map (\x -> if x == "all" || x == "" then x else T.append prefix x)
+        lawfulFwd p = p {to = prefixTo (to p)}
+        unlawfulBwd :: [Text] -> [Text]
+        unlawfulBwd = id
+        chuLaw fwd bwd p s =
+          deliversTo (fwd p) s == deliversTo p (bwd s)
+        counterPost = mkPost "a" ["j"] "b"
+        counterSub = [T.append prefix "j"]
+    assert "unlawful pair violates Chu adjoint law" $
+      not (chuLaw lawfulFwd unlawfulBwd counterPost counterSub)
 
   -------------------------------------------------------------------------
   -- S0b · estimator fork: soft routing path (pathwise gradients)
@@ -1584,22 +1642,22 @@ main = do
           where
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
 
-        -- | orElse lifted to state-threading Kleisli arrows.
+        -- \| orElse lifted to state-threading Kleisli arrows.
         orElseA :: Kleisli STM s s -> Kleisli STM s s -> Kleisli STM s s
         orElseA (Kleisli f) (Kleisli g) = Kleisli $ \s -> f s `orElse` g s
 
-        -- | Run a frame until the read end retries (quiescence).
+        -- \| Run a frame until the read end retries (quiescence).
         quiesce :: Kleisli STM s s -> Kleisli STM s s
         quiesce frame = fix $ \go -> (frame C.>>> go) `orElseA` C.id
 
-        -- | Spike A: one token per frame, no do/bind in the frame.
+        -- \| Spike A: one token per frame, no do/bind in the frame.
         frameToken :: AgentS s a -> Ends (Kleisli STM) a a -> Ends (Kleisli STM) a a -> Kleisli STM s s
         frameToken agent inbox outbox =
           Kleisli (\s -> (s,) <$> readEndSTM inbox)
             C.>>> Kleisli (uncurry (stepS agent))
             C.>>> Kleisli (\(s', outs) -> s' <$ traverse_ (writeEndSTM outbox) outs)
 
-        -- | Spike B: one bundle per frame over a bundle wire.
+        -- \| Spike B: one bundle per frame over a bundle wire.
         frameBundle :: AgentS s a -> Ends (Kleisli STM) [a] [a] -> Ends (Kleisli STM) [a] [a] -> Kleisli STM s s
         frameBundle agent inbox outbox =
           Kleisli (\s -> (s,) <$> readEndSTM inbox)
@@ -1892,7 +1950,7 @@ main = do
   do
     let p = Post "kimi" ["bus"] [3] ("hello \nworld ♪" :: Text)
         stored = case parseTimeText "2026-08-03T23:10:25" of
-          Just ts -> Stamped { stamp = 42, timeStamp = ts, stamped = p }
+          Just ts -> Stamped {stamp = 42, timeStamp = ts, stamped = p}
           Nothing -> error "bad timestamp"
     assert "F0: round-trip unicode and embedded newlines" $
       parseLine @Text (frameStored stored) == Just stored
@@ -1900,7 +1958,7 @@ main = do
   do
     let p = Post "a" ["b"] [2] ("body" :: Text)
         stored = case parseTimeText "2026-08-03T23:10:25" of
-          Just ts -> Stamped { stamp = 7, timeStamp = ts, stamped = p }
+          Just ts -> Stamped {stamp = 7, timeStamp = ts, stamped = p}
           Nothing -> error "bad timestamp"
     assert "F1: id is preserved across round-trip" $
       maybe False ((== 7) . stamp) (parseLine @Text (frameStored stored))
@@ -1930,7 +1988,7 @@ main = do
   do
     let p = Post "kimi" ["bus"] [] ("hi" :: Text)
         stored = case parseTimeText "2026-08-03T23:10:25" of
-          Just ts -> Stamped { stamp = 1, timeStamp = ts, stamped = p }
+          Just ts -> Stamped {stamp = 1, timeStamp = ts, stamped = p}
           Nothing -> error "bad timestamp"
     assert "F4: parseMessage extracts (from, body) on stamped line" $
       parseMessage (frameStored stored) == Just ("kimi", "hi")
@@ -1938,20 +1996,20 @@ main = do
   do
     let p = Post "kimi" ["bus"] [] ("hi" :: Text)
         s = case parseTimeText "2026-08-03T23:10:25" of
-          Just ts -> Stamped { stamp = 9, timeStamp = ts, stamped = p }
+          Just ts -> Stamped {stamp = 9, timeStamp = ts, stamped = p}
           Nothing -> error "bad timestamp"
         rendered = renderStored s
     assert "F5: renderStored includes id@ts" $
       "[9@2026-08-03T23:10:25]" `T.isPrefixOf` rendered
     assert "F6: renderStored contains from:body" $
-      "kimi: hi" `T.isSuffixOf` rendered
+      "kimi: \"hi\"" `T.isSuffixOf` rendered
 
   do
     let dummyTS = case parseTimeText "2026-01-01T00:00:00" of
           Just ts -> ts
           Nothing -> error "bad timestamp"
-        a = Stamped { stamp = 0, timeStamp = dummyTS, stamped = Post "a" [] [] "A" }
-        b = Stamped { stamp = 1, timeStamp = dummyTS, stamped = Post "b" [] [] "B" }
+        a = Stamped {stamp = 0, timeStamp = dummyTS, stamped = Post "a" [] [] "A"}
+        b = Stamped {stamp = 1, timeStamp = dummyTS, stamped = Post "b" [] [] "B"}
         j :: Framing.Log Text
         j = snoc (snoc (Log []) a) b
     assert "F7: Snoc then Uncons peels oldest first" $
@@ -1968,10 +2026,11 @@ main = do
           Just ts -> ts
           Nothing -> error "bad timestamp"
         posts =
-          [ Stamped { stamp = 0, timeStamp = dummyTS, stamped = Post "a" ["x"] [1, 2] "multi\nline ♪" },
-            Stamped { stamp = 1, timeStamp = dummyTS, stamped = Post "b" ["y"] [] "body2" },
-            Stamped { stamp = 2, timeStamp = dummyTS, stamped = Post "c" [] [] "body3" }
-          ] :: [Stamped Text]
+          [ Stamped {stamp = 0, timeStamp = dummyTS, stamped = Post "a" ["x"] [1, 2] "multi\nline ♪"},
+            Stamped {stamp = 1, timeStamp = dummyTS, stamped = Post "b" ["y"] [] "body2"},
+            Stamped {stamp = 2, timeStamp = dummyTS, stamped = Post "c" [] [] "body3"}
+          ] ::
+            [Stamped Text]
         j :: Framing.Log Text
         j = foldl snoc (Log []) posts
         go :: Framing.Log Text -> [Stamped Text]
@@ -2012,15 +2071,17 @@ main = do
     r1 <- runShardIO sh [p1, p2]
     assert
       "echo reply body is the session prompt"
-      (map body r1 == [sessionPrompt [p1, p2]]
-         && all ((== "kimi") . from) r1
-         && all ((== ["grok", "tony"]) . to) r1)
+      ( map body r1 == [sessionPrompt [p1, p2]]
+          && all ((== "kimi") . from) r1
+          && all ((== ["grok", "tony"]) . to) r1
+      )
     r2 <- runShardIO sh [p1]
     assert
       "outbox drains between closes"
-      (map body r2 == ["hello"]
-         && all ((== "kimi") . from) r2
-         && all ((== ["tony"]) . to) r2)
+      ( map body r2 == ["hello"]
+          && all ((== "kimi") . from) r2
+          && all ((== ["tony"]) . to) r2
+      )
     r3 <- runShardIO sh []
     assert "empty commit emits nothing" (null r3)
 
@@ -2031,9 +2092,10 @@ main = do
       (thread (replyTo "kimi" 1 p2 "x" :: Post Text) == [1])
     assert
       "replyPosts threads onto the last input's id"
-      (case replyPosts "kimi" [p1, p2] [0, 1] "sure" of
-         [rp] -> thread rp == [1]
-         _ -> False)
+      ( case replyPosts "kimi" [p1, p2] [0, 1] "sure" of
+          [rp] -> thread rp == [1]
+          _ -> False
+      )
     let r1' :: Post Text
         r1' = replyTo "kimi" 1 p2 "a"
         r2' :: Post Text
@@ -2067,8 +2129,9 @@ main = do
       (branchesByIndex [p1, p2] syn == [["sum", "tony"], ["sum", "grok"]])
     assert
       "branches of a synthesis continues through each parent"
-      (branchesByIndex [p1, p2, r1'] (synthesis "sum" [] [2, 0] "Σ" :: Post Text)
-         == [["sum", "tony"], ["sum", "kimi", "grok"]])
+      ( branchesByIndex [p1, p2, r1'] (synthesis "sum" [] [2, 0] "Σ" :: Post Text)
+          == [["sum", "tony"], ["sum", "kimi", "grok"]]
+      )
 
     putStrLn "honest provenance oracles"
     let syn2 = case synthesisPosts "sum" [p2, p1, r1'] [1, 0, 2] "Σ2" of
@@ -2090,8 +2153,9 @@ main = do
       (all (< fromIntegral (length prior)) (thread syn2))
     assert
       "cone-union law: cone of a synthesis is the union of parent cones"
-      (coneByIndex prior (synthesis "sum" [] [2, 0] "Σ")
-         == sortNub ("sum" : concatMap (coneByIndex prior) [r1', p2]))
+      ( coneByIndex prior (synthesis "sum" [] [2, 0] "Σ")
+          == sortNub ("sum" : concatMap (coneByIndex prior) [r1', p2])
+      )
     assert
       "cone of a synthesis is the contributor set"
       (coneByIndex prior (synthesis "sum" [] [2, 0] "Σ") == ["grok", "kimi", "sum", "tony"])
