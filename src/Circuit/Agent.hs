@@ -181,6 +181,13 @@ module Circuit.Agent
     ChannelPolicy (..),
     openChannel,
     openChannelSTM,
+    openLinearChannel,
+    openLinearChannelSTM,
+    HaltChannel (..),
+    IsLinear,
+    openHaltChannel,
+    writeHaltChannel,
+    readHaltChannel,
     openSTM,
     openIO,
     pipeEnds,
@@ -208,7 +215,7 @@ import Circuit
     trace,
     (>:>),
   )
-import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openChannelSTM, openIO, openSTM, pipeEnds)
+import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Layer (run)
 import Circuit.Loop (Loop (..))
 import Circuit.Poly (Eval (..), Mono, System (..), fromEvalSystem, monoDir, monoIn)

@@ -1,4 +1,9 @@
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneKindSignatures #-}
+{-# LANGUAGE TypeFamilies #-}
 
 -- | Effectful 'Circuit.Ends.Ends' constructors and queueing strategies.
 --
@@ -14,6 +19,17 @@ module Circuit.Agent.Ends
     ChannelPolicy (..),
     openChannel,
     openChannelSTM,
+
+    -- * Linear default channels
+    openLinearChannel,
+    openLinearChannelSTM,
+
+    -- * Halt-mark channels (compile-time linearity witness)
+    HaltChannel (..),
+    IsLinear,
+    openHaltChannel,
+    writeHaltChannel,
+    readHaltChannel,
 
     -- * STM @Ends@
     openSTM,
@@ -32,6 +48,8 @@ import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM
 import Control.Monad (forever, void)
+import Data.Kind (Constraint, Type)
+import GHC.TypeLits (ErrorMessage (..), TypeError)
 import Prelude
 
 -- | How messages are queued between producer and consumer.
@@ -93,6 +111,55 @@ openChannel = openIO . policyToQueue
 -- | Open a channel policy as STM @Ends@.
 openChannelSTM :: ChannelPolicy a -> STM (Ends (Kleisli STM) a a)
 openChannelSTM = openSTM . policyToQueue
+
+-- | Open a linear channel as IO @Ends@.
+--
+-- 'Linear' is the default policy: unbounded FIFO, empty residual, preserves
+-- every token in order.  This is the effectful face of 'Circuit.Mediate.linear'.
+openLinearChannel :: IO (Ends (Kleisli IO) a a)
+openLinearChannel = openChannel Linear
+
+-- | Open a linear channel as STM @Ends@.
+openLinearChannelSTM :: STM (Ends (Kleisli STM) a a)
+openLinearChannelSTM = openChannelSTM Linear
+
+-- | Type-level witness that a channel policy is linear.
+--
+-- Only 'Linear' is allowed to carry halt marks; any other policy produces a
+-- compile-time type error.
+type family IsLinear (p :: ChannelPolicy a) :: Constraint where
+  IsLinear 'Linear = ()
+  IsLinear p = TypeError ('Text "only 'Linear' channels can carry halt marks")
+
+-- | A channel statically known to be linear.
+--
+-- The index @p :: ChannelPolicy a@ is checked by 'IsLinear' at construction
+-- time.  Attempting to build a 'HaltChannel' with a non-linear policy fails
+-- to typecheck.
+type HaltChannel :: ChannelPolicy a -> Type
+data HaltChannel p where
+  HaltChannel :: (IsLinear p) => Ends (Kleisli STM) a a -> HaltChannel (p :: ChannelPolicy a)
+
+-- | Open a halt-mark channel.  This is 'openLinearChannelSTM' with a
+-- type-level certificate.
+openHaltChannel :: STM (HaltChannel 'Linear)
+openHaltChannel = HaltChannel <$> openLinearChannelSTM
+
+-- | Write a token to a halt-mark channel.
+writeHaltChannel :: forall a (p :: ChannelPolicy a). HaltChannel p -> a -> STM ()
+writeHaltChannel (HaltChannel ends) = runKleisli (commit (conjoint ends) haltOut)
+  where
+    haltOut = companion (unitEndsSTM :: Ends (Kleisli STM) () ())
+
+-- | Read a token from a halt-mark channel.
+readHaltChannel :: forall a (p :: ChannelPolicy a). HaltChannel p -> STM a
+readHaltChannel (HaltChannel ends) = runKleisli (emit (companion ends) haltIn) ()
+  where
+    haltIn = conjoint (unitEndsSTM :: Ends (Kleisli STM) () ())
+
+-- | Unit ends specialised to 'Kleisli STM'.
+unitEndsSTM :: Ends (Kleisli STM) () ()
+unitEndsSTM = endsK (const (pure ())) (pure ())
 
 -- | Internal STM primitive for a queue strategy.
 --

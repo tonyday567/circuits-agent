@@ -1971,6 +1971,50 @@ main = do
       body swapQToken /= "🟢 landed"
 
   -------------------------------------------------------------------------
+  -- Linear default oracle: openLinearChannelSTM is the default allocation.
+  -------------------------------------------------------------------------
+  putStrLn "linear default oracle"
+  do
+    let one = mkPost "human" ["self"] "one"
+        two = mkPost "human" ["self"] "two"
+        three = mkPost "human" ["self"] "three"
+        four = mkPost "human" ["self"] "four"
+    defaultEnds <- atomically openLinearChannelSTM
+    atomically $ do
+      writeEndSTM defaultEnds one
+      writeEndSTM defaultEnds two
+      writeEndSTM defaultEnds three
+      writeEndSTM defaultEnds four
+    tokens <- atomically $ replicateM 4 (readEndSTM defaultEnds)
+    assert "openLinearChannelSTM preserves four sequential writes in order" $
+      map body tokens == ["one", "two", "three", "four"]
+
+  -------------------------------------------------------------------------
+  -- Compile-time mark-loss oracle: HaltChannel enforces linear policy.
+  --
+  -- 'HaltChannel p' is indexed by a 'ChannelPolicy' and can only be
+  -- constructed when 'IsLinear p' holds.  Passing a non-linear policy is a
+  -- compile-time error.  The runtime oracle above shows *why* the restriction
+  -- matters; this oracle shows that the type system can enforce it.
+  -------------------------------------------------------------------------
+  putStrLn "compile-time mark-loss oracle"
+  do
+    let one = mkPost "human" ["self"] "one"
+        two = mkPost "human" ["self"] "two"
+        halt = mkPost "human" ["self"] "🟢 landed"
+    haltEnds <- atomically openHaltChannel
+    atomically $ do
+      writeHaltChannel haltEnds one
+      writeHaltChannel haltEnds two
+      writeHaltChannel haltEnds halt
+    tokens <- atomically $ replicateM 3 (readHaltChannel haltEnds)
+    assert "HaltChannel (Linear) preserves halt mark in order" $
+      map body tokens == ["one", "two", "🟢 landed"]
+  -- The following would not compile:
+  -- badEnds <- atomically openHaltChannel
+  -- let bad = HaltChannel @'SwapOne badEnds
+
+  -------------------------------------------------------------------------
   -- Content-decided turn correlation (Circuit.Agent.Turn)
   --
   -- The turn assigns each command a fresh id and stores it as the mediator
