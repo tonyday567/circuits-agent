@@ -1,57 +1,138 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 -- | Named runner circuits that tie free dual ends into a turn.
 --
--- A turn is a /runner/ observation: it commits input, then blocks on one
+-- A turn is a /runner/ observation: it commits one token, then blocks on one
 -- frame.  Framing lives port-side ('Circuit.Agent.StdPorts' stream marks);
 -- the queue retry is the blocking boundary.  No polling, no backoff — the
 -- halt is decided by content, not inferred from quiet.
 --
--- @
---   turn        e :: Loop (,) (Kleisli IO) Text Text
---   turnTimeout u e :: Loop (,) (Kleisli IO) Text (Maybe Text)
--- @
+-- The correlation between a command and its response is carried by the
+-- 'TurnToken' envelope, not by pipe adjacency.  The mediator's residual
+-- state holds the pending command; a response matches when its 'thread'
+-- cites the command's id.  This makes zero-frame and two-frame failures
+-- detectable in-band rather than by positional guess.
 --
--- 'turnTimeout' wraps the blocking read in a deadline: a runner that cannot
--- wait forever sets a budget.  'Nothing' means the budget expired before the
--- frame arrived; partial output stays port-side, framed, for the next read.
+-- Mark-carrying turns must use a 'Linear' channel policy; weakening policies
+-- can drop a command or response and break correlation.
+--
+-- @
+--   turn e        :: IO (Loop (,) (Kleisli IO) Text Text)
+--   turnTimeout u e :: IO (Loop (,) (Kleisli IO) Text (Maybe Text))
+-- @
 module Circuit.Agent.Turn
-  ( -- * Runner circuits
+  ( -- * Turn envelope
+    TurnToken (..),
+
+    -- * Turn mediator
+    TurnState (..),
+    turnMediator,
+
+    -- * Runner circuits
     turn,
     turnTimeout,
   )
 where
 
 import Circuit (Loop (..))
-import Circuit.Ends (Ends (..), HasUnit (..), commit, emit, open)
+import Circuit.Agent (PostId)
+import Circuit.Ends (Ends (..), commit, emit, open)
+import Circuit.Mediate (Mediator (..))
 import Control.Arrow (Kleisli (..), runKleisli)
+import Data.IORef
 import Data.Text (Text)
 import System.Timeout (timeout)
 import Prelude
 
--- | One turn: commit one token, then block until the next frame arrives.
+-- | A turn envelope.  Commands are sent with an empty 'turnThread'; the
+-- turn assigns them a fresh id.  Responses must carry that id in their
+-- 'turnThread' to be matched with the pending command.
+data TurnToken a = TurnToken
+  { turnBody :: a,
+    turnThread :: [PostId]
+  }
+  deriving (Eq, Show)
+
+-- | Residual state of the turn mediator.  'nextId' supplies fresh command
+-- ids; 'pending' holds the command awaiting its response.
+data TurnState a = TurnState
+  { nextId :: PostId,
+    pending :: Maybe (PostId, TurnToken a)
+  }
+  deriving (Eq, Show)
+
+-- | Initial turn state.
+emptyTurnState :: TurnState a
+emptyTurnState = TurnState 0 Nothing
+
+-- | Inject a command into the turn state, assigning it the next id.
+injectCommand :: TurnState a -> a -> (TurnState a, TurnToken a)
+injectCommand st body =
+  let cmdId = nextId st
+      cmd = TurnToken body [cmdId]
+   in (st {nextId = succ cmdId, pending = Just (cmdId, cmd)}, cmd)
+
+-- | Match a response against the pending command.
+matchResponse :: TurnState a -> TurnToken a -> (TurnState a, Maybe (TurnToken a, TurnToken a))
+matchResponse st@TurnState {pending = Nothing} _ = (st, Nothing)
+matchResponse st@TurnState {pending = Just (cmdId, cmd)} resp
+  | turnThread resp == [cmdId] = (st {pending = Nothing}, Just (cmd, resp))
+  | otherwise = (st, Nothing)
+
+-- | Mediator that correlates responses with the pending command by thread.
 --
--- Agent endomorphism @Text -> Text@ — matches the free dual on commit /
--- emit.  This blocks: if the mark never arrives, neither does the result.
+-- * A token with empty thread is treated as a command: it receives the next
+--   id and is stored as the pending command.
+-- * A token with non-empty thread is treated as a response: it matches when
+--   its thread equals the pending command's id, emitting the pair.
+turnMediator :: Mediator (TurnState a) (TurnToken a) (TurnToken a, TurnToken a)
+turnMediator = Mediator emptyTurnState $ \st tok ->
+  if null (turnThread tok)
+    then (fst (injectCommand st (turnBody tok)), Nothing)
+    else matchResponse st tok
+
+-- | Read the unit ends used to plug the unused side of a commit or emit.
+unitEnds :: Ends (Kleisli IO) () ()
+unitEnds = open
+
+-- | Run one turn: commit a body, then block until a matching response
+-- arrives.  The correlation is by 'thread', not by position.
 turn ::
-  Ends (Kleisli IO) Text Text ->
-  Loop (,) (Kleisli IO) Text Text
-turn e = Lift $ Kleisli $ \cmd -> do
-  runKleisli (commit (conjoint e) outU) cmd
-  runKleisli (emit (companion e) inU) ()
+  Ends (Kleisli IO) (TurnToken Text) (TurnToken Text) ->
+  IO (Loop (,) (Kleisli IO) Text Text)
+turn e = do
+  ref <- newIORef emptyTurnState
+  pure . Lift . Kleisli $ \body -> do
+    cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
+    runKleisli (commit (conjoint e) outU) cmd
+    let loop = do
+          resp <- runKleisli (emit (companion e) inU) ()
+          mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
+          case mResult of
+            Just (_, resp') -> pure (turnBody resp')
+            Nothing -> loop
+    loop
   where
-    Ends _ outU = open :: Ends (Kleisli IO) () ()
-    Ends inU _ = open :: Ends (Kleisli IO) () ()
+    Ends _ outU = unitEnds
+    Ends inU _ = unitEnds
 
 -- | 'turn' under a deadline (microseconds).  'Nothing' on expiry; the
--- unarrived frame is not lost — the next emit still receives it.
+-- unarrived response is not lost — the next emit still receives it.
 turnTimeout ::
   Int ->
-  Ends (Kleisli IO) Text Text ->
-  Loop (,) (Kleisli IO) Text (Maybe Text)
-turnTimeout us e = Lift $ Kleisli $ \cmd -> do
-  runKleisli (commit (conjoint e) outU) cmd
-  timeout us (runKleisli (emit (companion e) inU) ())
+  Ends (Kleisli IO) (TurnToken Text) (TurnToken Text) ->
+  IO (Loop (,) (Kleisli IO) Text (Maybe Text))
+turnTimeout us e = do
+  ref <- newIORef emptyTurnState
+  pure . Lift . Kleisli $ \body -> do
+    cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
+    runKleisli (commit (conjoint e) outU) cmd
+    timeout us $ do
+      let loop = do
+            resp <- runKleisli (emit (companion e) inU) ()
+            mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
+            case mResult of
+              Just (_, resp') -> pure (turnBody resp')
+              Nothing -> loop
+      loop
   where
-    Ends _ outU = open :: Ends (Kleisli IO) () ()
-    Ends inU _ = open :: Ends (Kleisli IO) () ()
+    Ends _ outU = unitEnds
+    Ends inU _ = unitEnds

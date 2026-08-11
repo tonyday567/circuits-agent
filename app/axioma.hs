@@ -61,8 +61,9 @@ import Circuit.Agent.Tensor
     silentShard,
     synthesisSummary,
   )
+import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Chu qualified as Chu
-import Circuit.Ends (splay0, suffixOut)
+import Circuit.Ends (commit, emit, open, splay0, suffixOut)
 import Circuit.Layer (run)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos, System (..), fromEvalSystem, monoDir, monoIn)
 import Circuit.Poly.Process (after, iterateSystem, runSystem)
@@ -70,6 +71,7 @@ import Circuit.Stream (These (..), Uncons, uncons)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Category qualified as C
 import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.Async (async, cancel, race)
 import Control.Concurrent.STM
 import Control.Exception (BlockedIndefinitelyOnSTM (..), SomeException, catch, fromException)
 import Control.Monad (replicateM, replicateM_, unless, when)
@@ -1925,10 +1927,10 @@ main = do
           writeEndSTM ends one
           writeEndSTM ends two
           writeEndSTM ends halt
-    endsSpin <- atomically $ openSTM (Unbounded :: Queue (Post Text))
+    endsSpin <- atomically $ openChannelSTM (Linear :: ChannelPolicy (Post Text))
     atomically $ writeAll endsSpin
     accSpin <- atomically $ runKleisli (spinMark isHaltMark step endsSpin) []
-    endsLoop <- atomically $ openSTM (Unbounded :: Queue (Post Text))
+    endsLoop <- atomically $ openChannelSTM (Linear :: ChannelPolicy (Post Text))
     atomically $ writeAll endsLoop
     accLoop <- atomically $ runKleisli (run (markLoop isHaltMark step endsLoop)) []
     assert "spinMark accumulated the three normal posts" $
@@ -1967,6 +1969,70 @@ main = do
       map body linearTokens == ["one", "two", "🟢 landed", "three"]
     assert "SwapQ channel loses the halt mark" $
       body swapQToken /= "🟢 landed"
+
+  -------------------------------------------------------------------------
+  -- Content-decided turn correlation (Circuit.Agent.Turn)
+  --
+  -- The turn assigns each command a fresh id and stores it as the mediator
+  -- residual.  Responses must cite that id in their thread; correlation is
+  -- by envelope content, not by pipe adjacency.  Runner and process views
+  -- are separate ends wired to separate queues: commands go from runner to
+  -- process, responses go from process to runner.
+  -------------------------------------------------------------------------
+  putStrLn "content-decided turn"
+  do
+    cmdQ <- newTQueueIO
+    respQ <- newTQueueIO
+    let Ends _ outU = open :: Ends (Kleisli IO) () ()
+        Ends inU _ = open :: Ends (Kleisli IO) () ()
+        runnerEnds :: Ends (Kleisli IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        runnerEnds = endsK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
+        processEnds :: Ends (Kleisli IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processEnds = endsK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
+        -- Responder: read one command and reply with the command id in thread.
+        responder = do
+          cmd <- runKleisli (emit (companion processEnds) inU) ()
+          let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
+          runKleisli (commit (conjoint processEnds) outU) resp
+    loop <- TurnPort.turn runnerEnds
+    -- Run the responder in parallel with the turn, but wait for the turn
+    -- result before cancelling the responder.  A raw race cancels the loser
+    -- as soon as the responder writes, so the turn might not finish reading.
+    responderA <- async responder
+    result <- runKleisli (run loop) "hello"
+    cancel responderA
+    assert "turn correlates response by thread content" $
+      result == "ack: hello"
+
+  do
+    cmdQ <- newTQueueIO
+    respQ <- newTQueueIO
+    let Ends _ outU = open :: Ends (Kleisli IO) () ()
+        Ends inU _ = open :: Ends (Kleisli IO) () ()
+        runnerEnds :: Ends (Kleisli IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        runnerEnds = endsK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
+        processEnds :: Ends (Kleisli IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processEnds = endsK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
+        responder = do
+          cmd <- runKleisli (emit (companion processEnds) inU) ()
+          let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
+          runKleisli (commit (conjoint processEnds) outU) resp
+    loop <- TurnPort.turnTimeout 100000 runnerEnds
+    responderA <- async responder
+    result <- runKleisli (run loop) "hello"
+    cancel responderA
+    assert "turnTimeout correlates response by thread content" $
+      result == Just "ack: hello"
+
+  do
+    cmdQ <- newTQueueIO
+    respQ <- newTQueueIO
+    let runnerEnds :: Ends (Kleisli IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        runnerEnds = endsK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
+    loop <- TurnPort.turnTimeout 10000 runnerEnds
+    result <- runKleisli (run loop) "hello"
+    assert "turnTimeout returns Nothing on expiry" $
+      isNothing result
 
   -------------------------------------------------------------------------
   -- Shard-level tensors (StateT [Post Text] IO)
