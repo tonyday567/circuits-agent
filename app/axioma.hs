@@ -62,7 +62,7 @@ import Circuit.Agent.Tensor
     synthesisSummary,
   )
 import Circuit.Agent.Turn qualified as TurnPort
-import Circuit.Chu qualified as Chu
+import Circuit.Ends qualified as Chu
 import Circuit.Ends (commit, emit, open, splay0, suffixOut)
 import Circuit.Layer (run)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos, System (..), fromEvalSystem, monoDir, monoIn)
