@@ -61,6 +61,7 @@ import Circuit.Agent.Tensor
     silentShard,
     synthesisSummary,
   )
+import Circuit.Ends (splay)
 import Circuit.Layer (run)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos, System (..), fromEvalSystem, monoDir, monoIn)
 import Circuit.Poly.Process (after, iterateSystem, runSystem)
@@ -70,7 +71,7 @@ import Control.Category qualified as C
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM
 import Control.Exception (BlockedIndefinitelyOnSTM (..), SomeException, catch, fromException)
-import Control.Monad (unless, when)
+import Control.Monad (replicateM_, unless, when)
 import Control.Monad.State (State, StateT, get, gets, modify, put, runState, runStateT)
 import Cursor (newMem, pollNumberedFile)
 import Data.Foldable (traverse_)
@@ -79,7 +80,7 @@ import Data.Functor.Identity (Identity (..))
 import Data.List (find, foldl', nub, sort)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -869,6 +870,37 @@ main = do
         (out2, st) = runState (runKleisli (close (conjoint composed) (companion composed)) [p1]) []
     assert "compose chains shards through the monad" $
       map body out2 == ["hi!", "hi!"] && length st == 2
+
+    -- Degeneracy warning: composeEnds over allocated channels splays through
+    -- the unit and serialises the intermediate wire.  An honest pipeline with
+    -- a separate buffer and pump can feed a multi-read consumer; the composed
+    -- end cannot.
+    do
+      let pairSumEnd :: IO (Shard IO Int Int)
+          pairSumEnd = do
+            q <- newTQueueIO
+            pure $ endsK (atomically . writeTQueue q) (atomically $ (+) <$> readTQueue q <*> readTQueue q)
+      e1 <- openIO Unbounded :: IO (Shard IO Int Int)
+      e2 <- pairSumEnd
+      let e12 = composeShard e1 e2
+          (e1Write, _) = splay e1
+          (_, e12Read) = splay e12
+      runKleisli e1Write 1
+      runKleisli e1Write 2
+      serialResult <- timeout 100000 $ runKleisli e12Read ()
+      e1' <- openIO Unbounded :: IO (Shard IO Int Int)
+      midQ <- newTQueueIO :: IO (TQueue Int)
+      let e2' = endsK (atomically . writeTQueue midQ) (atomically $ (+) <$> readTQueue midQ <*> readTQueue midQ)
+          (e1Write', e1Read') = splay e1'
+          (_, e2Read') = splay e2'
+      runKleisli e1Write' 1
+      runKleisli e1Write' 2
+      _ <- forkIO $ replicateM_ 2 $ do
+        x <- runKleisli e1Read' ()
+        atomically $ writeTQueue midQ x
+      pipelinedResult <- timeout 1000000 $ runKleisli e2Read' ()
+      assert "composeEnds serialises allocated channels; honest pipeline does not" $
+        isNothing serialResult && pipelinedResult == Just 3
 
   -------------------------------------------------------------------------
   -- Agent as Shard: pure Moore citizen at Kleisli Ends (change of base).
