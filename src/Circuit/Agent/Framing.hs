@@ -88,7 +88,7 @@ instance PostBody Text where
 
 -- | Storage boundary: a post with its assigned id and timestamp.
 --
--- This is the agent-side specialisation of 'Circuit.Stamped.Stamped' from
+-- This is the agent-side specialisation of 'Circuit.Boundary.Stamped' from
 -- @circuits@ core: the occurrence token here is the @(UTCTime, PostId)@ pair
 -- and the payload is a @Post a@.  The core type captures the free theorem
 -- that 'fmap' cannot touch the stamp.

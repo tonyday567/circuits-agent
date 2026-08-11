@@ -66,7 +66,7 @@ import Circuit.Chu qualified as Chu
 import Circuit.Ends (commit, emit, open, splay0, suffixOut)
 import Circuit.Layer (run)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos, System (..), fromEvalSystem, monoDir, monoIn)
-import Circuit.Poly.Process (after, iterateSystem, runSystem)
+import Circuit.ChannelPoly (after, iterateSystem, runSystem)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Category qualified as C

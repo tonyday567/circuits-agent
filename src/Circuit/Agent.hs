@@ -219,7 +219,7 @@ import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue
 import Circuit.Layer (run)
 import Circuit.Loop (Loop (..))
 import Circuit.Poly (Eval (..), Mono, System (..), fromEvalSystem, monoDir, monoIn)
-import Circuit.Poly.Process (after, runSystem)
+import Circuit.ChannelPoly (after, runSystem)
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
@@ -238,7 +238,7 @@ import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
--- >>> import Circuit.Poly.Process (iterateSystem)
+-- >>> import Circuit.ChannelPoly (iterateSystem)
 
 -- | Agent name on the shared log.
 type Name = Text
