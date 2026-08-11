@@ -60,8 +60,6 @@ module Circuit.Agent.Framing
 where
 
 import Circuit.Agent (Post (..), PostId)
-import "circuits-parser" Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
-import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import Control.Applicative ((<|>))
 import Control.Monad (guard)
 import Data.Maybe (mapMaybe)
@@ -73,6 +71,8 @@ import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime, parseTimeM)
 import Data.Vector qualified as V
 import Numeric.Natural (Natural)
+import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
+import "circuits-parser" Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Prelude
 
 -- | Encodable/decodable post body. Every body type in the bus must
@@ -87,6 +87,11 @@ instance PostBody Text where
   decodePostBody _ = Nothing
 
 -- | Storage boundary: a post with its assigned id and timestamp.
+--
+-- This is the agent-side specialisation of 'Circuit.Stamped.Stamped' from
+-- @circuits@ core: the occurrence token here is the @(UTCTime, PostId)@ pair
+-- and the payload is a @Post a@.  The core type captures the free theorem
+-- that 'fmap' cannot touch the stamp.
 data Stamped a = Stamped
   { timeStamp :: UTCTime,
     stamp :: PostId,
@@ -95,7 +100,7 @@ data Stamped a = Stamped
   deriving (Show, Eq, Functor)
 
 -- | The log image: a stream of stamped posts, oldest first.
-newtype Log a = Log { unLog :: [Stamped a] }
+newtype Log a = Log {unLog :: [Stamped a]}
   deriving (Show, Eq, Functor)
 
 -- | Append is the natural operation: one element at the end.
@@ -124,7 +129,7 @@ parseTimeText :: Text -> Maybe UTCTime
 parseTimeText = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S" . T.unpack
 
 -- | Encode a 'Stamped a' as a single canonical JSON Lines object.
-frameStored :: PostBody a => Stamped a -> Text
+frameStored :: (PostBody a) => Stamped a -> Text
 frameStored (Stamped ts i (Post from' to' thread' body')) =
   decodeUtf8 $
     encodeJson $
@@ -139,7 +144,7 @@ frameStored (Stamped ts i (Post from' to' thread' body')) =
 
 -- | Encode a bare 'Post a' as a single JSON Lines object (the protocol
 -- format sent to the stamping bus daemon).
-framePost :: PostBody a => Post a -> Text
+framePost :: (PostBody a) => Post a -> Text
 framePost p =
   decodeUtf8 $
     encodeJson $
@@ -152,7 +157,7 @@ framePost p =
 
 -- | Parse a canonical stamped storage line.  Returns 'Nothing' if the line is
 -- not valid JSON with the expected fields.
-parseLine :: PostBody a => Text -> Maybe (Stamped a)
+parseLine :: (PostBody a) => Text -> Maybe (Stamped a)
 parseLine line =
   case decodeJson (encodeUtf8 line) of
     Right (JObject o) -> do
@@ -168,7 +173,7 @@ parseLine line =
     _ -> Nothing
 
 -- | Parse a bare 'Post a' line (no stamp).
-parsePost :: PostBody a => Text -> Maybe (Post a)
+parsePost :: (PostBody a) => Text -> Maybe (Post a)
 parsePost line =
   case decodeJson (encodeUtf8 line) of
     Right (JObject o) -> do
@@ -192,17 +197,17 @@ parseLineAt idx line =
 -- and both legacy formats.
 parseMessage :: Text -> Maybe (Text, Text)
 parseMessage line = do
-  Stamped{stamped = p} <- parseLineAt 0 line
+  Stamped {stamped = p} <- parseLineAt 0 line
   pure (from p, body p)
 
 -- | Extract just the timestamp from a raw log line.
 parseMessageTs :: Text -> Maybe Text
 parseMessageTs line = do
-  Stamped{timeStamp = ts} <- parseLineAt 0 line
+  Stamped {timeStamp = ts} <- parseLineAt 0 line
   pure (T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" ts))
 
 -- | Render a 'Stamped a' for human display as @[id@ts] from: body@.
-renderStored :: PostBody a => Stamped a -> Text
+renderStored :: (PostBody a) => Stamped a -> Text
 renderStored (Stamped ts i (Post from' _to' _thread' body')) =
   T.concat ["[", T.pack (show i), "@", T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" ts), "] ", from', ": ", renderBody body']
   where
@@ -214,14 +219,14 @@ renderMessage :: Text -> Maybe Text
 renderMessage line = renderStored <$> parseLineAt 0 line
 
 -- | Read a log file into a 'Log a', oldest first. Malformed lines are skipped.
-readLogFile :: PostBody a => FilePath -> IO (Log a)
+readLogFile :: (PostBody a) => FilePath -> IO (Log a)
 readLogFile path = do
   content <- TIO.readFile path
   let ls = filter (not . T.null) (T.lines content)
   pure (Log (mapMaybe parseLine ls))
 
 -- | Encode a 'Log a' to raw JSONL text for file persistence.
-encodeLog :: PostBody a => Log a -> [Text]
+encodeLog :: (PostBody a) => Log a -> [Text]
 encodeLog = map frameStored . reverse . unLog
 
 -- ---------------------------------------------------------------------------
@@ -276,8 +281,8 @@ parseLegacyBracket :: Int -> Text -> Maybe (Stamped Text)
 parseLegacyBracket idx line =
   case T.breakOnEnd "]" line of
     (pref, rest)
-      | not (T.null pref)
-      , let tsStr = T.dropWhile (== '[') (T.init pref) -> do
+      | not (T.null pref),
+        let tsStr = T.dropWhile (== '[') (T.init pref) -> do
           ts <- parseTimeText tsStr
           let (sender', body') = T.breakOn ":" (T.strip rest)
           guard (not (T.null sender'))

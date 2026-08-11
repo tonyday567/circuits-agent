@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -70,8 +71,9 @@ module Circuit.Agent.StdPorts
 where
 
 import Circuit.Agent (Agent, run1)
+import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category ((.>))
-import Circuit.Ends (Ends (..), HasUnit (..), In (..), Out (..), Queue (..), commit, emit, open, openIO)
+import Circuit.Ends (Ends (..), HasUnit (..), In (..), Out (..), commit, emit, open)
 import Circuit.Loop (Loop (..))
 import Circuit.Poly (Eval (..), fromEvalSystem)
 import Circuit.Poly.Process (iterateSystem, systemAsProcess)
@@ -104,22 +106,23 @@ import Prelude
 -- ---------------------------------------------------------------------------
 
 data ProcConfig = ProcConfig
-  { procCommand    :: String,
-    procArgs       :: [String],
+  { procCommand :: String,
+    procArgs :: [String],
     procWorkingDir :: FilePath,
     -- | Boundary grammar of the stdout stream.  Stderr is line-framed
     -- ('lineMarks'); stderr is diagnostics, not dialogue.
-    procMarks      :: ProcMarks
+    procMarks :: ProcMarks
   }
   deriving (Show, Eq)
 
 defaultProcConfig :: ProcConfig
-defaultProcConfig = ProcConfig
-  { procCommand    = "cabal",
-    procArgs       = ["repl"],
-    procWorkingDir = ".",
-    procMarks      = ghciMarks
-  }
+defaultProcConfig =
+  ProcConfig
+    { procCommand = "cabal",
+      procArgs = ["repl"],
+      procWorkingDir = ".",
+      procMarks = ghciMarks
+    }
 
 -- ---------------------------------------------------------------------------
 -- Stream marks
@@ -171,11 +174,11 @@ splitFrame (ProcMarks marks) buf =
   where
     hits =
       [ (BS.length before, markBytes, before, rest)
-        | mark <- marks,
-          let markBytes = encodeUtf8 mark,
-          not (BS.null markBytes),
-          let (before, rest) = BS.breakSubstring markBytes buf,
-          markBytes `BS.isPrefixOf` rest
+      | mark <- marks,
+        let markBytes = encodeUtf8 mark,
+        not (BS.null markBytes),
+        let (before, rest) = BS.breakSubstring markBytes buf,
+        markBytes `BS.isPrefixOf` rest
       ]
 
 -- ---------------------------------------------------------------------------
@@ -189,9 +192,9 @@ splitFrame (ProcMarks marks) buf =
 -- the queue when the stream has not produced one yet.  There is no
 -- empty-read result — quiet is not an opinion here.
 data StdPorts a b c = StdPorts
-  { stdIn    :: In  (Kleisli IO) a,
-    stdOut   :: Out (Kleisli IO) b,
-    stdErr   :: Out (Kleisli IO) c,
+  { stdIn :: In (Kleisli IO) a,
+    stdOut :: Out (Kleisli IO) b,
+    stdErr :: Out (Kleisli IO) c,
     stdClose :: IO ()
   }
 
@@ -222,8 +225,12 @@ openStdPorts encode decode cfg = Knot (Kleisli step)
       hSetBuffering stdoutH NoBuffering
       hSetBuffering stderrH NoBuffering
 
-      qOut <- openIO Unbounded
-      qErr <- openIO Unbounded
+      -- Mark-carrying stdout uses the linear (empty-residual) mediator so
+      -- halt marks are preserved in order.  Diagnostic stderr uses a bounded
+      -- weakening mediator: old diagnostics may be dropped when the reader
+      -- falls behind, but the process dialogue must never lose a halt.
+      qOut <- openChannel Linear
+      qErr <- openChannel (NewestN 100)
       outTid <- forkIO (pumpFrames (procMarks cfg) decode stdoutH (sink qOut))
       errTid <- forkIO (pumpFrames lineMarks decode stderrH (sink qErr))
 
@@ -242,13 +249,12 @@ openStdPorts encode decode cfg = Knot (Kleisli step)
                   killThread errTid
               }
       pure (Left ports)
-
     step (Left ports) =
       pure (Right ports)
 
 -- | Commit one token to a queue end, plugged with unit ends.
 sink :: Ends (Kleisli IO) a a -> a -> IO ()
-sink q a = runKleisli (commit (conjoint q) outU) a
+sink q = runKleisli (commit (conjoint q) outU)
   where
     Ends _ outU = open :: Ends (Kleisli IO) () ()
 
@@ -265,7 +271,7 @@ frameAgent :: ProcMarks -> (BS.ByteString -> a) -> Agent (->) (BS.ByteString, [a
 frameAgent marks decode = fromEvalSystem $ \(buf, pending) ->
   EP
     ( EK pending,
-      EE $ \input -> case input of
+      EE $ \case
         Just chunk ->
           let (fs, buf') = peel (buf <> chunk)
            in (buf', map decode fs)
@@ -334,19 +340,20 @@ openProc encode decode cfg =
   openStdPorts encode decode cfg .> Lift portsToProcEnds
   where
     portsToProcEnds = Kleisli $ \pp ->
-      pure ProcEnds
-        { procStdio = stdioEnds pp,
-          procStderr = stderrEnds pp,
-          procClose = stdClose pp
-        }
+      pure
+        ProcEnds
+          { procStdio = stdioEnds pp,
+            procStderr = stderrEnds pp,
+            procClose = stdClose pp
+          }
 
 -- | The wire view of 'StdPorts': one nested 'par' morphism.
 portsEnds :: StdPorts a b c -> Loop (,) (Kleisli IO) (a, ((), ())) ((), (b, c))
 portsEnds pp = par commitM (par outM errM)
   where
     commitM = Lift (commit (stdIn pp) outUIn)
-    outM    = Lift (emit (stdOut pp) inUOut)
-    errM    = Lift (emit (stdErr pp) inUErr)
+    outM = Lift (emit (stdOut pp) inUOut)
+    errM = Lift (emit (stdErr pp) inUErr)
     Ends _inUIn outUIn = open
     Ends inUOut _ = open
     Ends inUErr _ = open

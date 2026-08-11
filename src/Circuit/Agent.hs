@@ -178,8 +178,12 @@ module Circuit.Agent
     endsK,
     prefixIn,
     Queue (..),
+    ChannelPolicy (..),
+    openChannel,
+    openChannelSTM,
     openSTM,
     openIO,
+    pipeEnds,
 
     -- * Shard combinators
     prefixShard,
@@ -192,7 +196,6 @@ where
 
 import Circuit
   ( Ends (..),
-    Queue (..),
     close,
     commit,
     composeEnds,
@@ -200,18 +203,16 @@ import Circuit
     emit,
     endsK,
     lmapEnds,
-    openIO,
-    openSTM,
     prefixIn,
     rmapEnds,
     trace,
     (>:>),
   )
-import Circuit.Loop (Loop (..))
+import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openChannelSTM, openIO, openSTM, pipeEnds)
 import Circuit.Layer (run)
+import Circuit.Loop (Loop (..))
 import Circuit.Poly (Eval (..), Mono, System (..), fromEvalSystem, monoDir, monoIn)
 import Circuit.Poly.Process (after, runSystem)
-import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
@@ -219,12 +220,13 @@ import Control.Concurrent.STM (STM, atomically, orElse)
 import Data.Foldable (traverse_)
 import Data.List (find, foldl', genericIndex, genericTake, nub, sort)
 import Data.Map (Map)
-import Numeric.Natural (Natural)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
 import Data.Text (Text, empty)
+import Numeric.Natural (Natural)
+import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 
 -- $setup
 -- >>> :set -XOverloadedStrings
@@ -258,7 +260,7 @@ data Post a = Post
 
 -- | A fresh root post (no parents).
 mkPost :: Name -> [Name] -> a -> Post a
-mkPost f t b = Post f t [] b
+mkPost f t = Post f t []
 
 -- | A reply: the audience is the parent's sender plus the rest of the
 -- parent's audience (minus self); the sole thread edge cites the parent's
@@ -310,7 +312,7 @@ nextId m = if Map.null m then 0 else fst (Map.findMax m) + 1
 -- prop> branches (indexToIdMap prior) (replyTo who i p b)
 --     == map (who :) (branches (Map.filterWithKey (\k _ -> k < i) (indexToIdMap prior)) p)
 branches :: Map PostId (Post a) -> Post a -> [[Name]]
-branches priorMap p0 = go (nextId priorMap) p0
+branches priorMap = go (nextId priorMap)
   where
     go selfId p =
       case thread p of
@@ -581,7 +583,7 @@ turn ::
   AgentState s f ->
   Log f ->
   (AgentState s f, Log f, Maybe (Derivation a))
-turn sys st log0 = turnAs (inboxWho (asInbox st)) sys st log0
+turn sys st = turnAs (inboxWho (asInbox st)) sys st
 
 -- | Whether the agent's inbox has an addressed post waiting.
 hasPending :: forall a s f. (Uncons f (Post a)) => AgentState s f -> Bool
@@ -924,7 +926,7 @@ stepS (System (Kleisli f)) s i = do
 -- produces the concatenated replies.  Factor of 'runAgentS' that stays in
 -- 'STM' so it can sit inside a larger transaction (e.g. a self-loop frame).
 stepsS :: AgentS s a -> s -> [a] -> STM (s, [a])
-stepsS sys s0 ins = go s0 ins
+stepsS sys = go
   where
     go s [] = pure (s, [])
     go s (i : is) = do
@@ -946,7 +948,7 @@ readEndSTM ends = runKleisli (emit (companion ends) (conjoint unitEndsSTM)) ()
 
 -- | Write one token to an STM end.
 writeEndSTM :: Ends (Kleisli STM) a a -> a -> STM ()
-writeEndSTM ends a = runKleisli (commit (conjoint ends) (companion unitEndsSTM)) a
+writeEndSTM ends = runKleisli (commit (conjoint ends) (companion unitEndsSTM))
 
 -- | Wire an STM agent between an inbox and an outbox, running until
 -- quiescence.  Quiescence is detected via 'orElse': if the inbox is empty
@@ -1232,7 +1234,7 @@ portShard ::
   Shard m [Post a] [Post a] ->
   Port m a
 portShard getIn putIn getOut putOut sh =
-  batchEnds getIn putIn >:> sh >:> unbatchEnds getOut putOut
+  composeShard (composeShard (batchEnds getIn putIn) sh) (unbatchEnds getOut putOut)
 
 -- ---------------------------------------------------------------------------
 -- Shard combinators
@@ -1264,5 +1266,5 @@ codecShard f g = dimapEnds (Kleisli $ pure . f) (Kleisli $ pure . g)
 --
 -- The output of the first shard feeds the input of the second.  This is
 -- the same shape as connecting two effectful agents in series.
-composeShard :: (Monad m) => Shard m a b -> Shard m b c -> Shard m a c
-composeShard = composeEnds
+composeShard :: forall m a b c. (Monad m) => Shard m a b -> Shard m b c -> Shard m a c
+composeShard = composeEnds @(Kleisli m) @a @b @c @()

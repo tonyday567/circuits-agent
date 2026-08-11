@@ -61,7 +61,8 @@ import Circuit.Agent.Tensor
     silentShard,
     synthesisSummary,
   )
-import Circuit.Ends (splay)
+import Circuit.Chu qualified as Chu
+import Circuit.Ends (splay0, suffixOut)
 import Circuit.Layer (run)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos, System (..), fromEvalSystem, monoDir, monoIn)
 import Circuit.Poly.Process (after, iterateSystem, runSystem)
@@ -71,7 +72,7 @@ import Control.Category qualified as C
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM
 import Control.Exception (BlockedIndefinitelyOnSTM (..), SomeException, catch, fromException)
-import Control.Monad (replicateM_, unless, when)
+import Control.Monad (replicateM, replicateM_, unless, when)
 import Control.Monad.State (State, StateT, get, gets, modify, put, runState, runStateT)
 import Cursor (newMem, pollNumberedFile)
 import Data.Foldable (traverse_)
@@ -876,31 +877,73 @@ main = do
     -- a separate buffer and pump can feed a multi-read consumer; the composed
     -- end cannot.
     do
-      let pairSumEnd :: IO (Shard IO Int Int)
-          pairSumEnd = do
-            q <- newTQueueIO
+      let pairSumEnd :: TQueue Int -> IO (Shard IO Int Int)
+          pairSumEnd q =
             pure $ endsK (atomically . writeTQueue q) (atomically $ (+) <$> readTQueue q <*> readTQueue q)
       e1 <- openIO Unbounded :: IO (Shard IO Int Int)
-      e2 <- pairSumEnd
+      e2 <- pairSumEnd =<< newTQueueIO
       let e12 = composeShard e1 e2
-          (e1Write, _) = splay e1
-          (_, e12Read) = splay e12
+          (e1Write, _) = splay0 e1
+          (_, e12Read) = splay0 e12
       runKleisli e1Write 1
       runKleisli e1Write 2
       serialResult <- timeout 100000 $ runKleisli e12Read ()
       e1' <- openIO Unbounded :: IO (Shard IO Int Int)
-      midQ <- newTQueueIO :: IO (TQueue Int)
-      let e2' = endsK (atomically . writeTQueue midQ) (atomically $ (+) <$> readTQueue midQ <*> readTQueue midQ)
-          (e1Write', e1Read') = splay e1'
-          (_, e2Read') = splay e2'
+      (ePipe, closePipe) <- pipeEnds e1' pairSumEnd
+      let (e1Write', _) = splay0 e1'
+          (_, ePipeRead) = splay0 ePipe
       runKleisli e1Write' 1
       runKleisli e1Write' 2
-      _ <- forkIO $ replicateM_ 2 $ do
-        x <- runKleisli e1Read' ()
-        atomically $ writeTQueue midQ x
-      pipelinedResult <- timeout 1000000 $ runKleisli e2Read' ()
+      pipelinedResult <- timeout 1000000 $ runKleisli ePipeRead ()
+      closePipe
       assert "composeEnds serialises allocated channels; honest pipeline does not" $
         isNothing serialResult && pipelinedResult == Just 3
+
+  -------------------------------------------------------------------------
+  -- Ends / Chu embedding on allocated channels
+  --
+  -- These oracles need STM/IO, so they live here rather than in core
+  -- circuits-axioma.
+  -------------------------------------------------------------------------
+  putStrLn "Ends / Chu embedding on allocated channels"
+  do
+    e <- openIO Unbounded :: IO (Ends (Kleisli IO) Int Int)
+    x <- runKleisli (close (conjoint e) (companion e)) 42
+    assert "Ends copycat close is identity on fresh queue" $ x == 42
+
+  do
+    e <- openIO Unbounded :: IO (Ends (Kleisli IO) Int Int)
+    let obj = Chu.endsAsChu e
+        obj'' = Chu.negateChu (Chu.negateChu obj)
+    x <- runKleisli (Chu.chuPair obj (conjoint e, companion e)) 42
+    y <- runKleisli (Chu.chuPair obj'' (conjoint e, companion e)) 42
+    assert "Ends negation is involutive in Chu" $ x == y
+
+  do
+    e <- openIO Unbounded :: IO (Ends (Kleisli IO) Int Int)
+    let obj = Chu.endsAsChu e
+        m = Chu.ChuMorphism (prefixIn C.id) (`suffixOut` C.id)
+        lhs = Chu.chuPair obj (Chu.chuForward m (conjoint e), companion e)
+        rhs = Chu.chuPair obj (conjoint e, Chu.chuBackward m (companion e))
+    x <- runKleisli lhs 42
+    y <- runKleisli rhs 42
+    assert "Ends identity endomorphism satisfies Chu law" $ x == y
+
+  do
+    e <- openIO Unbounded :: IO (Ends (Kleisli IO) Int Int)
+    let obj = Chu.endsAsChu e
+        m = Chu.ChuMorphism (prefixIn (Kleisli $ pure . (+ 1))) (`suffixOut` C.id)
+        lhs = Chu.chuPair obj (Chu.chuForward m (conjoint e), companion e)
+        rhs = Chu.chuPair obj (conjoint e, Chu.chuBackward m (companion e))
+    x <- runKleisli lhs 42
+    y <- runKleisli rhs 42
+    assert "Ends dimapEnds-style pair violates Chu law" $ x /= y
+
+  do
+    e <- openIO Unbounded :: IO (Ends (Kleisli IO) Int Int)
+    let e' = Chu.lawfulDimapEnds Chu.idChu e
+    x <- runKleisli (close (conjoint e') (companion e')) 42
+    assert "Ends lawfulDimapEnds with identity Chu morphism preserves close" $ x == 42
 
   -------------------------------------------------------------------------
   -- Agent as Shard: pure Moore citizen at Kleisli Ends (change of base).
@@ -1894,6 +1937,36 @@ main = do
       not (any (\p -> body p == "🟢 landed") accSpin)
     assert "markLoop agrees with spinMark" $
       accLoop == accSpin
+
+  -------------------------------------------------------------------------
+  -- Mark-loss oracle: non-linear channels drop halt marks.
+  --
+  -- A halt mark must ride a linear (empty-residual) channel.  On a SwapQ
+  -- channel every new write overwrites the slot, so the halt mark is lost
+  -- if the reader does not poll between writes.  The linear channel preserves
+  -- every token in order.
+  -------------------------------------------------------------------------
+  putStrLn "mark-loss oracle"
+  do
+    let normal1 = mkPost "human" ["self"] "one"
+        normal2 = mkPost "human" ["self"] "two"
+        halt = mkPost "human" ["self"] "🟢 landed"
+        normal3 = mkPost "human" ["self"] "three"
+        writeAll ends = do
+          writeEndSTM ends normal1
+          writeEndSTM ends normal2
+          writeEndSTM ends halt
+          writeEndSTM ends normal3
+    linearEnds <- atomically $ openChannelSTM (Linear :: ChannelPolicy (Post Text))
+    swapQEnds <- atomically $ openChannelSTM (SwapOne :: ChannelPolicy (Post Text))
+    atomically $ writeAll linearEnds
+    atomically $ writeAll swapQEnds
+    linearTokens <- atomically $ replicateM 4 (readEndSTM linearEnds)
+    swapQToken <- atomically $ readEndSTM swapQEnds
+    assert "linear channel preserves the halt mark in order" $
+      map body linearTokens == ["one", "two", "🟢 landed", "three"]
+    assert "SwapQ channel loses the halt mark" $
+      body swapQToken /= "🟢 landed"
 
   -------------------------------------------------------------------------
   -- Shard-level tensors (StateT [Post Text] IO)

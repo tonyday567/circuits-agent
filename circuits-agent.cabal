@@ -59,6 +59,7 @@ library
   default-extensions: PackageImports
   exposed-modules:
     Circuit.Agent
+    Circuit.Agent.Ends
     Circuit.Agent.Query
     Circuit.Agent.Delivery
     Circuit.Agent.Framing
