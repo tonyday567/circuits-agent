@@ -14,7 +14,7 @@ import Circuit.Agent
 import Data.IntMap (IntMap)
 import Data.IntMap qualified as IntMap
 import Data.List (find, foldl')
-import NumHask.Diff (Diff, Diff' (..), runDiff)
+import Circuit.Diff (Diff, Diff' (..), runDiff)
 import System.Exit (exitFailure)
 
 assert :: String -> Bool -> IO ()
