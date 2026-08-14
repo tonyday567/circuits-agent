@@ -73,7 +73,7 @@ where
 import Circuit.Agent (Agent, run1)
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category ((.>))
-import Circuit.Ends (Ends (..), HasUnit (..), In (..), Out (..), commit, emit, open)
+import Circuit.Ends (Ends (..), In (..), Out (..), commit, emit, open)
 import Circuit.Loop (Loop (..))
 import Circuit.Poly (Eval (..), fromEvalSystem)
 import Circuit.ChannelPoly (iterateSystem, systemAsProcess)

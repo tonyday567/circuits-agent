@@ -218,8 +218,9 @@ import Circuit
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Layer (run)
 import Circuit.Loop (Loop (..))
-import Circuit.Poly (Eval (..), Mono, System (..), fromEvalSystem, monoDir, monoIn)
-import Circuit.ChannelPoly (after, runSystem)
+import Circuit.Poly (Eval (..), Mono, System, fromEvalSystem, monoDir, monoIn, runSystem, system)
+import Circuit.ChannelPoly (after)
+import Circuit.ChannelPoly qualified as ChannelPoly
 import Control.Arrow (Kleisli (..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
@@ -424,14 +425,14 @@ logEnds = endsK
 -- >>> iterateSystem (tape length) [] [1,2,3 :: Int]
 -- [1,2,3]
 tape :: ([i] -> o) -> Agent (->) [i] i o
-tape f = System $ \(hist, d) -> (monoDir d : hist, (f hist, ()))
+tape f = system $ \(hist, d) -> (monoDir d : hist, (f hist, ()))
 
 -- | Like 'tape', but also conses the agent's own output onto its history.
 --
 -- This is the internal-monologue construction: an agent's outputs are on the
 -- same log as its percepts, visible to its own future turns.
 selfrec :: ([i] -> i) -> Agent (->) [i] i i
-selfrec f = System $ \(hist, d) ->
+selfrec f = system $ \(hist, d) ->
   let i = monoDir d
       h' = i : hist
    in (f h' : h', (f hist, ()))
@@ -846,8 +847,8 @@ loopHeteroSubs roster log0 =
 -- 'iterateSystem' timing).
 run1 :: Agent (->) s i o -> s -> i -> (o, s)
 run1 sys s i =
-  let s' = snd (runSystem sys s) i
-      (o, _) = runSystem sys s'
+  let s' = snd (ChannelPoly.runSystem sys s) i
+      (o, _) = ChannelPoly.runSystem sys s'
    in (o, s')
 
 -- | Lift a pure agent into the 'Kleisli' arrow of any functor.
@@ -855,12 +856,12 @@ run1 sys s i =
 -- This is the change of base from @(->)@ to @Kleisli m@ on the agent itself:
 -- the same Moore coalgebra, but each step now lives in @m@.
 agentM :: (Applicative m) => Agent (->) s a b -> Agent (Kleisli m) s a b
-agentM (System f) = System (Kleisli (pure . f))
+agentM sys = system (Kleisli (pure . runSystem sys))
 
 -- | Run one step of a monadic agent.
 runAgentM :: (Monad m) => Agent (Kleisli m) s a b -> s -> a -> m (b, s)
-runAgentM (System (Kleisli f)) s a =
-  f (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
+runAgentM sys s a =
+  runKleisli (runSystem sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
 
 -- | STM agent: state is handled transparently inside an STM transaction.
 type AgentS s a = Agent (Kleisli STM) s a [a]
@@ -871,22 +872,22 @@ type AgentX s a = Agent (Kleisli IO) s a [a]
 
 -- | Cross from the transparent STM world into the IO boundary.
 agentX :: AgentS s a -> AgentX s a
-agentX (System (Kleisli f)) = System (Kleisli (\(s, d) -> atomically (f (s, d))))
+agentX sys = system (Kleisli (\(s, d) -> atomically (runKleisli (runSystem sys) (s, d))))
 
 -- | Seat-level product / await in STM.
 awaitS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
-awaitS (System (Kleisli f1)) (System (Kleisli f2)) =
-  System $ Kleisli $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- f1 (s1, d)
-    (s2', (o2, ())) <- f2 (s2, d)
+awaitS sys1 sys2 =
+  system $ Kleisli $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runKleisli (runSystem sys1) (s1, d)
+    (s2', (o2, ())) <- runKleisli (runSystem sys2) (s2, d)
     pure ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race in STM.
 raceS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
-raceS (System (Kleisli f1)) (System (Kleisli f2)) =
-  System $ Kleisli $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- f1 (s1, d)
-    (s2', (o2, ())) <- f2 (s2, d)
+raceS sys1 sys2 =
+  system $ Kleisli $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runKleisli (runSystem sys1) (s1, d)
+    (s2', (o2, ())) <- runKleisli (runSystem sys2) (s2, d)
     let o = if null o1 then o2 else o1
     pure ((s1', s2'), (o, ()))
 
@@ -898,9 +899,9 @@ raceS (System (Kleisli f1)) (System (Kleisli f2)) =
 -- This is the honest Kleisli-IO refinement of 'raceS': the winner is whichever
 -- step produces a mark first, not the left-biased deterministic rule.
 raceIO :: AgentX s1 a -> AgentX s2 a -> AgentX (s1, s2) a
-raceIO (System (Kleisli f1)) (System (Kleisli f2)) =
-  System $ Kleisli $ \((s1, s2), d) ->
-    raceFirst (f1 (s1, d)) (f2 (s2, d)) >>= \case
+raceIO sys1 sys2 =
+  system $ Kleisli $ \((s1, s2), d) ->
+    raceFirst (runKleisli (runSystem sys1) (s1, d)) (runKleisli (runSystem sys2) (s2, d)) >>= \case
       Left (s1', outs) -> pure ((s1', s2), (outs, ()))
       Right (s2', outs) -> pure ((s1, s2'), (outs, ()))
   where
@@ -923,8 +924,8 @@ raceIO (System (Kleisli f1)) (System (Kleisli f2)) =
 
 -- | Run one step of an STM agent.
 stepS :: AgentS s a -> s -> a -> STM (s, [a])
-stepS (System (Kleisli f)) s i = do
-  (s', (outs, ())) <- f (s, monoIn i)
+stepS sys s i = do
+  (s', (outs, ())) <- runKleisli (runSystem sys) (s, monoIn i)
   pure (s', outs)
 
 -- | Fold an STM agent over a bundle of inputs within one transaction.
@@ -1038,9 +1039,9 @@ beh sys s0 (i : ins) =
 -- is the honest Moore shape: output is a function of state, and the chosen
 -- branch's update function determines the next state.
 branchAgent :: (s -> Bool) -> Agent (->) s a b -> Agent (->) s a b -> Agent (->) s a b
-branchAgent cond (System left) (System right) =
-  System $ \(state, d) ->
-    if cond state then left (state, d) else right (state, d)
+branchAgent cond sys1 sys2 =
+  system $ \(state, d) ->
+    if cond state then runSystem sys1 (state, d) else runSystem sys2 (state, d)
 
 -- | Seat-level product / await: both agents run on the same input; states are
 -- paired; emits are concatenated left-to-right.
@@ -1048,11 +1049,10 @@ awaitA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-awaitA sys1 sys2 = System $ \((s1, s2), d) ->
-  let dir = monoDir d
-      (o1, next1) = runSystem sys1 s1
-      (o2, next2) = runSystem sys2 s2
-   in ((next1 dir, next2 dir), (o1 <> o2, ()))
+awaitA sys1 sys2 = system $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = runSystem sys1 (s1, d)
+      (s2', (o2, ())) = runSystem sys2 (s2, d)
+   in ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race: both agents run on the same input; states are
 -- paired; the left emit wins if non-empty, otherwise the right emit wins.
@@ -1060,12 +1060,11 @@ raceA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-raceA sys1 sys2 = System $ \((s1, s2), d) ->
-  let dir = monoDir d
-      (o1, next1) = runSystem sys1 s1
-      (o2, next2) = runSystem sys2 s2
+raceA sys1 sys2 = system $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = runSystem sys1 (s1, d)
+      (s2', (o2, ())) = runSystem sys2 (s2, d)
       o = if null o1 then o2 else o1
-   in ((next1 dir, next2 dir), (o, ()))
+   in ((s1', s2'), (o, ()))
 
 -- ---------------------------------------------------------------------------
 -- Agent as Shard — change of base into Kleisli Ends

@@ -43,7 +43,7 @@ import Data.Set qualified as Set
 import Data.Text (Text, empty)
 import Data.Vector.Unboxed qualified as VU
 import Harpie.Array qualified as A
-import Harpie.NumHask.Matrix (Matrix (..), fromLists, matTimes, toLists)
+import Circuit.Mat.Dense (Matrix (..), fromLists, matTimes, toLists)
 import NumHask.Algebra.Additive (Additive (..))
 import NumHask.Algebra.Multiplicative (Multiplicative (..))
 import Prelude hiding ((*), (+))

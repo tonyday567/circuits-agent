@@ -42,7 +42,7 @@ module Circuit.Agent.Ends
   )
 where
 
-import Circuit.Ends (Ends (..), HasUnit (..), commit, companion, conjoint, emit, endsK, open, splay0)
+import Circuit.Ends (Ends (..), commit, companion, conjoint, emit, endsK, open, splay0)
 import Control.Applicative
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent.Async (async, cancel)

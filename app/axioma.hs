@@ -65,7 +65,7 @@ import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Ends qualified as Chu
 import Circuit.Ends (commit, emit, open, splay0, suffixOut)
 import Circuit.Layer (run)
-import Circuit.Poly (Dir, Eval (..), Mono, Pos, System (..), fromEvalSystem, monoDir, monoIn)
+import Circuit.Poly (Dir, Eval (..), Mono, Pos, System, fromEvalSystem, monoDir, monoIn, system)
 import Circuit.ChannelPoly (after, iterateSystem, runSystem)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Control.Arrow (Kleisli (..), runKleisli)
@@ -89,7 +89,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Harpie.NumHask.Matrix (Matrix, fromLists, matPlus, starMatrix, toLists)
+import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
@@ -1006,7 +1006,7 @@ main = do
   do
     let liftAgent :: Agent (->) [Post Text] (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         liftAgent sys =
-          System $ \((tag, hist), d) ->
+          system $ \((tag, hist), d) ->
             let inp = monoDir d
                 (outs, next) = runSystem sys hist
              in ((tag, next inp), (outs, ()))
@@ -1680,8 +1680,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = System $ Kleisli $ \(_, _) -> pure ((), ([p], ()))
-        slowRight = System $ Kleisli $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
+        fastLeft = system $ Kleisli $ \(_, _) -> pure ((), ([p], ()))
+        slowRight = system $ Kleisli $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft slowRight) ((), ()) seed
     assert "raceIO: fast left wins" $ outs == [p]
 
@@ -1689,8 +1689,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        slowLeft = System $ Kleisli $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
-        fastRight = System $ Kleisli $ \(_, _) -> pure ((), ([q], ()))
+        slowLeft = system $ Kleisli $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
+        fastRight = system $ Kleisli $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO slowLeft fastRight) ((), ()) seed
     assert "raceIO: fast right wins" $ outs == [q]
 
@@ -1698,8 +1698,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = System $ Kleisli $ \(_, _) -> pure ((), ([p], ()))
-        fastRight = System $ Kleisli $ \(_, _) -> pure ((), ([q], ()))
+        fastLeft = system $ Kleisli $ \(_, _) -> pure ((), ([p], ()))
+        fastRight = system $ Kleisli $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft fastRight) ((), ()) seed
     assert "raceIO: both emit -> one of them" $ outs == [p] || outs == [q]
 
