@@ -88,6 +88,12 @@ import Data.Foldable (traverse_)
 import Data.IORef
 import Data.List (minimumBy)
 import Data.Maybe (fromMaybe)
+
+-- $setup
+-- >>> import Circuit.ChannelPoly (iterateSystem)
+-- >>> import Circuit.Ends (Ends (..), HasDual (..), commit, emit, open)
+-- >>> import Control.Arrow (Kleisli (..), runKleisli)
+-- >>> import Data.Text.Encoding (decodeUtf8)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text.Encoding (encodeUtf8)
@@ -365,9 +371,8 @@ portsEnds pp = par commitM (par outM errM)
 -- | An in-memory echo repl: commit a token, emit the transformed result.
 -- No process, no files.  For fast bus-connector testing.
 --
--- >>> pp <- echo pure
+-- >>> pp <- echo pure :: IO (StdPorts String String ())
 -- >>> runKleisli (commit (stdIn pp) (companion (open :: Ends (Kleisli IO) () ()))) "hi"
--- ()
 -- >>> runKleisli (emit (stdOut pp) (conjoint (open :: Ends (Kleisli IO) () ()))) ()
 -- "hi"
 echo :: (a -> IO a) -> IO (StdPorts a a ())
