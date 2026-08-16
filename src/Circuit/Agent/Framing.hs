@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Bus message framing.
@@ -13,7 +14,7 @@
 -- the same thread DAG, not a different algebra.
 --
 -- 'Log a' stores 'Stamped a' values in memory — no encoding in the hot path.
--- File persistence uses 'frameStored'/'parseLine' via 'PostBody' at the
+-- File persistence uses 'frameStored'/'unframeStored' via 'PostBody' at the
 -- storage boundary.
 --
 -- Backwards compatibility: 'parseLineAt' also accepts the legacy flat triple
@@ -25,7 +26,10 @@ module Circuit.Agent.Framing
   ( -- * Types
     PostId,
     PostBody (..),
-    Stamped (..),
+    Stamped,
+    pattern Stamped,
+    stamp,
+    stamped,
     Log (..),
 
     -- * Stream ends (re-exported from Circuit.Stream)
@@ -39,7 +43,7 @@ module Circuit.Agent.Framing
     framePost,
 
     -- * Parsing
-    parseLine,
+    unframeStored,
     parseLineAt,
     parsePost,
     parseMessage,
@@ -72,6 +76,8 @@ import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime, parseT
 import Data.Vector qualified as V
 import Numeric.Natural (Natural)
 import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
+import "circuits" Circuit.Boundary (stamp, stamped)
+import "circuits" Circuit.Boundary qualified as Boundary
 import "circuits-parser" Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Prelude
 
@@ -89,15 +95,17 @@ instance PostBody Text where
 -- | Storage boundary: a post with its assigned id and timestamp.
 --
 -- This is the agent-side specialisation of 'Circuit.Boundary.Stamped' from
--- @circuits@ core: the occurrence token here is the @(UTCTime, PostId)@ pair
--- and the payload is a @Post a@.  The core type captures the free theorem
--- that 'fmap' cannot touch the stamp.
-data Stamped a = Stamped
-  { timeStamp :: UTCTime,
-    stamp :: PostId,
-    stamped :: Post a
-  }
-  deriving (Show, Eq, Functor)
+-- @circuits@ core: the occurrence token is the @(UTCTime, PostId)@ pair and
+-- the payload is a @Post a@.  The core type carries the free theorem that
+-- 'fmap' cannot touch the stamp, so the agent shares it rather than
+-- duplicating it.
+type Stamped a = Boundary.Stamped (UTCTime, PostId) (Post a)
+
+-- | The core 'Boundary.Stamped' constructor specialised to the agent's
+-- occurrence token @(UTCTime, PostId)@.
+pattern Stamped :: (UTCTime, PostId) -> Post a -> Stamped a
+pattern Stamped tok post = Boundary.Stamped tok post
+{-# COMPLETE Stamped #-}
 
 -- | The log image: a stream of stamped posts, oldest first.
 newtype Log a = Log {unLog :: [Stamped a]}
@@ -130,7 +138,7 @@ parseTimeText = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S" . T.unpack
 
 -- | Encode a 'Stamped a' as a single canonical JSON Lines object.
 frameStored :: (PostBody a) => Stamped a -> Text
-frameStored (Stamped ts i (Post from' to' thread' body')) =
+frameStored (Stamped (ts, i) (Post from' to' thread' body')) =
   decodeUtf8 $
     encodeJson $
       JObject
@@ -155,10 +163,10 @@ framePost p =
           ("body", encodePostBody (body p))
         ]
 
--- | Parse a canonical stamped storage line.  Returns 'Nothing' if the line is
--- not valid JSON with the expected fields.
-parseLine :: (PostBody a) => Text -> Maybe (Stamped a)
-parseLine line =
+-- | Unframe a canonical stamped storage line (the inverse of 'frameStored').
+-- Returns 'Nothing' if the line is not valid JSON with the expected fields.
+unframeStored :: (PostBody a) => Text -> Maybe (Stamped a)
+unframeStored line =
   case decodeJson (encodeUtf8 line) of
     Right (JObject o) -> do
       pid <- lookupNumber "id" (JObject o) >>= naturalFromScientific
@@ -169,7 +177,7 @@ parseLine line =
       thread' <- lookupPostIds "thread" (JObject o)
       bodyVal <- lookup "body" o
       body' <- decodePostBody bodyVal
-      pure (Stamped ts pid (Post from' to' thread' body'))
+      pure (Stamped (ts, pid) (Post from' to' thread' body'))
     _ -> Nothing
 
 -- | Parse a bare 'Post a' line (no stamp).
@@ -185,11 +193,11 @@ parsePost line =
       pure (Post from' to' thread' body')
     _ -> Nothing
 
--- | Like 'parseLine', but also accepts the legacy flat triple and bracket
+-- | Like 'unframeStored', but also accepts the legacy flat triple and bracket
 -- formats, assigning the supplied line index as the id. Legacy-only, 'Text' body.
 parseLineAt :: Int -> Text -> Maybe (Stamped Text)
 parseLineAt idx line =
-  parseLine line
+  unframeStored line
     <|> parseLegacyTriple idx line
     <|> parseLegacyBracket idx line
 
@@ -197,18 +205,18 @@ parseLineAt idx line =
 -- and both legacy formats.
 parseMessage :: Text -> Maybe (Text, Text)
 parseMessage line = do
-  Stamped {stamped = p} <- parseLineAt 0 line
+  Stamped _ p <- parseLineAt 0 line
   pure (from p, body p)
 
 -- | Extract just the timestamp from a raw log line.
 parseMessageTs :: Text -> Maybe Text
 parseMessageTs line = do
-  Stamped {timeStamp = ts} <- parseLineAt 0 line
+  Stamped (ts, _) _ <- parseLineAt 0 line
   pure (T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" ts))
 
 -- | Render a 'Stamped a' for human display as @[id@ts] from: body@.
 renderStored :: (PostBody a) => Stamped a -> Text
-renderStored (Stamped ts i (Post from' _to' _thread' body')) =
+renderStored (Stamped (ts, i) (Post from' _to' _thread' body')) =
   T.concat ["[", T.pack (show i), "@", T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" ts), "] ", from', ": ", renderBody body']
   where
     renderBody b = case decodeUtf8 (encodeJson (encodePostBody b)) of
@@ -223,7 +231,7 @@ readLogFile :: (PostBody a) => FilePath -> IO (Log a)
 readLogFile path = do
   content <- TIO.readFile path
   let ls = filter (not . T.null) (T.lines content)
-  pure (Log (mapMaybe parseLine ls))
+  pure (Log (mapMaybe unframeStored ls))
 
 -- | Encode a 'Log a' to raw JSONL text for file persistence.
 encodeLog :: (PostBody a) => Log a -> [Text]
@@ -273,7 +281,7 @@ parseLegacyTriple idx line =
       ts <- parseTimeText tsStr
       JString sender' <- lookup "sender" o
       JString body' <- lookup "body" o
-      pure (Stamped ts (fromIntegral idx) (Post sender' [] [] body'))
+      pure (Stamped (ts, fromIntegral idx) (Post sender' [] [] body'))
     _ -> Nothing
 
 -- | Legacy bracket format: @[timestamp] sender: body@.
@@ -286,5 +294,5 @@ parseLegacyBracket idx line =
           ts <- parseTimeText tsStr
           let (sender', body') = T.breakOn ":" (T.strip rest)
           guard (not (T.null sender'))
-          pure (Stamped ts (fromIntegral idx) (Post (T.strip sender') [] [] (T.strip (T.drop 1 body'))))
+          pure (Stamped (ts, fromIntegral idx) (Post (T.strip sender') [] [] (T.strip (T.drop 1 body'))))
     _ -> Nothing

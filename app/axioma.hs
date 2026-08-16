@@ -1,4 +1,5 @@
 {-# LANGUAGE ExtendedDefaultRules #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 -- Post is polymorphic in its payload; this file pins everything at Text via
@@ -28,9 +29,12 @@ import Circuit.Agent.Framing
   ( Cons (..),
     Log (..),
     Snoc (..),
-    Stamped (..),
+    Stamped,
+    pattern Stamped,
+    stamp,
+    stamped,
     frameStored,
-    parseLine,
+    unframeStored,
     parseLineAt,
     parseMessage,
     parseTimeText,
@@ -2226,25 +2230,25 @@ main = do
   do
     let p = Post "kimi" ["bus"] [3] ("hello \nworld ♪" :: Text)
         stored = case parseTimeText "2026-08-03T23:10:25" of
-          Just ts -> Stamped {stamp = 42, timeStamp = ts, stamped = p}
+          Just ts -> Stamped (ts, 42) p
           Nothing -> error "bad timestamp"
     assert "F0: round-trip unicode and embedded newlines" $
-      parseLine @Text (frameStored stored) == Just stored
+      unframeStored @Text (frameStored stored) == Just stored
 
   do
     let p = Post "a" ["b"] [2] ("body" :: Text)
         stored = case parseTimeText "2026-08-03T23:10:25" of
-          Just ts -> Stamped {stamp = 7, timeStamp = ts, stamped = p}
+          Just ts -> Stamped (ts, 7) p
           Nothing -> error "bad timestamp"
     assert "F1: id is preserved across round-trip" $
-      maybe False ((== 7) . stamp) (parseLine @Text (frameStored stored))
+      maybe False ((== 7) . snd . stamp) (unframeStored @Text (frameStored stored))
 
   do
     let line = "{\"ts\":\"2026-08-03T12:00:00\",\"sender\":\"kimi\",\"body\":\"legacy\"}" :: Text
     assert "F2: legacy triple round-trip" $
       case parseLineAt 5 line of
         Just s ->
-          stamp s == 5
+          snd (stamp s) == 5
             && from (stamped s) == "kimi"
             && body (stamped s) == "legacy"
             && to (stamped s) == []
@@ -2256,7 +2260,7 @@ main = do
     assert "F3: legacy bracket round-trip" $
       case parseLineAt 3 line of
         Just s ->
-          stamp s == 3
+          snd (stamp s) == 3
             && from (stamped s) == "kimi"
             && body (stamped s) == "legacy bracket"
         Nothing -> False
@@ -2264,7 +2268,7 @@ main = do
   do
     let p = Post "kimi" ["bus"] [] ("hi" :: Text)
         stored = case parseTimeText "2026-08-03T23:10:25" of
-          Just ts -> Stamped {stamp = 1, timeStamp = ts, stamped = p}
+          Just ts -> Stamped (ts, 1) p
           Nothing -> error "bad timestamp"
     assert "F4: parseMessage extracts (from, body) on stamped line" $
       parseMessage (frameStored stored) == Just ("kimi", "hi")
@@ -2272,7 +2276,7 @@ main = do
   do
     let p = Post "kimi" ["bus"] [] ("hi" :: Text)
         s = case parseTimeText "2026-08-03T23:10:25" of
-          Just ts -> Stamped {stamp = 9, timeStamp = ts, stamped = p}
+          Just ts -> Stamped (ts, 9) p
           Nothing -> error "bad timestamp"
         rendered = renderStored s
     assert "F5: renderStored includes id@ts" $
@@ -2284,8 +2288,8 @@ main = do
     let dummyTS = case parseTimeText "2026-01-01T00:00:00" of
           Just ts -> ts
           Nothing -> error "bad timestamp"
-        a = Stamped {stamp = 0, timeStamp = dummyTS, stamped = Post "a" [] [] "A"}
-        b = Stamped {stamp = 1, timeStamp = dummyTS, stamped = Post "b" [] [] "B"}
+        a = Stamped (dummyTS, 0) (Post "a" [] [] "A")
+        b = Stamped (dummyTS, 1) (Post "b" [] [] "B")
         j :: Framing.Log Text
         j = snoc (snoc (Log []) a) b
     assert "F7: Snoc then Uncons peels oldest first" $
@@ -2302,9 +2306,9 @@ main = do
           Just ts -> ts
           Nothing -> error "bad timestamp"
         posts =
-          [ Stamped {stamp = 0, timeStamp = dummyTS, stamped = Post "a" ["x"] [1, 2] "multi\nline ♪"},
-            Stamped {stamp = 1, timeStamp = dummyTS, stamped = Post "b" ["y"] [] "body2"},
-            Stamped {stamp = 2, timeStamp = dummyTS, stamped = Post "c" [] [] "body3"}
+          [ Stamped (dummyTS, 0) (Post "a" ["x"] [1, 2] "multi\nline ♪"),
+            Stamped (dummyTS, 1) (Post "b" ["y"] [] "body2"),
+            Stamped (dummyTS, 2) (Post "c" [] [] "body3")
           ] ::
             [Stamped Text]
         j :: Framing.Log Text
