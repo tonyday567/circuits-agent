@@ -435,10 +435,8 @@ main = do
         n = 3
         eye = fromLists [[True, False, False], [False, True, False], [False, False, True]]
         finiteSum = foldl' matPlus eye (matrixPowers (n - 1) d)
-    -- DISABLED: see circuits-residual.md § Disabled oracles
-    -- assert "G3 star of nilpotent boolean matrix equals finite sum" $
-    --   starMatrix d == finiteSum
-    pure ()
+    assert "G3 star of nilpotent boolean matrix equals finite sum" $
+      starMatrix d == finiteSum
 
   -------------------------------------------------------------------------
   -- FinRel delivery (F1)
