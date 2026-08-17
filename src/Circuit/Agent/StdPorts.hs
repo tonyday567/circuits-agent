@@ -73,10 +73,10 @@ where
 import Circuit.Agent (Agent, run1)
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category ((.>))
+import Circuit.ChannelPoly (iterateSystem, systemAsProcess)
 import Circuit.Ends (Ends (..), In (..), Out (..), commit, emit, open)
 import Circuit.Loop (Loop (..))
 import Circuit.Poly (Eval (..), fromEvalSystem)
-import Circuit.ChannelPoly (iterateSystem, systemAsProcess)
 import Circuit.Process (Process)
 import Circuit.Tensor (Tensor (..))
 import Control.Arrow (Kleisli (..), runKleisli)
@@ -88,8 +88,7 @@ import Data.Foldable (traverse_)
 import Data.IORef
 import Data.List (minimumBy)
 import Data.Maybe (fromMaybe)
-
--- $setup
+-- \$setup
 -- >>> import Circuit.ChannelPoly (iterateSystem)
 -- >>> import Circuit.Ends (Ends (..), HasDual (..), commit, emit, open)
 -- >>> import Control.Arrow (Kleisli (..), runKleisli)

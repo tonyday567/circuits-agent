@@ -75,9 +75,9 @@ import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime, parseTimeM)
 import Data.Vector qualified as V
 import Numeric.Natural (Natural)
-import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import "circuits" Circuit.Boundary (stamp, stamped)
 import "circuits" Circuit.Boundary qualified as Boundary
+import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import "circuits-parser" Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Prelude
 
@@ -105,6 +105,7 @@ type Stamped a = Boundary.Stamped (UTCTime, PostId) (Post a)
 -- occurrence token @(UTCTime, PostId)@.
 pattern Stamped :: (UTCTime, PostId) -> Post a -> Stamped a
 pattern Stamped tok post = Boundary.Stamped tok post
+
 {-# COMPLETE Stamped #-}
 
 -- | The log image: a stream of stamped posts, oldest first.

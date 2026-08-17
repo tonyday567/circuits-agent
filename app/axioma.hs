@@ -1,6 +1,6 @@
 {-# LANGUAGE ExtendedDefaultRules #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeApplications #-}
 -- Post is polymorphic in its payload; this file pins everything at Text via
 -- the module 'default' declaration, so -Wtype-defaults would be noise.
@@ -30,15 +30,15 @@ import Circuit.Agent.Framing
     Log (..),
     Snoc (..),
     Stamped,
-    pattern Stamped,
-    stamp,
-    stamped,
     frameStored,
-    unframeStored,
     parseLineAt,
     parseMessage,
     parseTimeText,
     renderStored,
+    stamp,
+    stamped,
+    unframeStored,
+    pattern Stamped,
   )
 import Circuit.Agent.Framing qualified as Framing
 import Circuit.Agent.Graph
@@ -66,11 +66,12 @@ import Circuit.Agent.Tensor
     synthesisSummary,
   )
 import Circuit.Agent.Turn qualified as TurnPort
+import Circuit.ChannelPoly (after, iterateSystem, runSystem)
 import Circuit.Chu qualified as Chu
 import Circuit.Ends (commit, emit, endsAsChu, lawfulDimapEnds, open, splay0, suffixOut)
 import Circuit.Layer (run)
+import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos, System, fromEvalSystem, monoDir, monoIn, system)
-import Circuit.ChannelPoly (after, iterateSystem, runSystem)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Category qualified as C
@@ -93,7 +94,6 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
@@ -774,7 +774,7 @@ main = do
     assert "replies are from alpha and beta" $
       sort (map from replies) == ["alpha", "beta"]
     assert "replies are addressed to the original sender" $
-      all (== ["human"]) (map to replies)
+      all ((== ["human"]) . to) replies
     assert "derivations name the subscriber agents, not the card" $
       sort (map dAgent cardDerivs) == ["alpha", "beta"]
 
