@@ -2,12 +2,15 @@ packages:
   .
   ../circuits/circuits.cabal
   ../circuits-diff/circuits-diff.cabal
-  ../string-diagrams/string-diagrams.cabal
+  ../circuits-diagrams/circuits-diagrams.cabal
   ../circuits-parser/circuits-parser.cabal
-  ../harpie/harpie.cabal
-  ../numhask/numhask.cabal
-  ../circuits-diff/circuits-diff.cabal
   ../circuits-stats/circuits-stats.cabal
   ../circuits-mat/circuits-mat.cabal
+  ../chart-svg/chart-svg.cabal
+  ../formatn/formatn.cabal
+  ../harpie/harpie.cabal
+  ../markup-parse/markup-parse.cabal
+  ../numhask/numhask.cabal
+  ../numhask-space/numhask-space.cabal
 
 write-ghc-environment-files: always

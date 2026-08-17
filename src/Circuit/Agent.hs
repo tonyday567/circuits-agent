@@ -317,8 +317,14 @@ nextId m = if Map.null m then 0 else fst (Map.findMax m) + 1
 -- branch; every parent edge contributes its own path.  Branches of replies
 -- are pure cons:
 --
--- prop> branches (indexToIdMap prior) (replyTo who i p b)
+-- > branches (indexToIdMap prior) (replyTo who i p b)
 --     == map (who :) (branches (Map.filterWithKey (\k _ -> k < i) (indexToIdMap prior)) p)
+--
+-- >>> let p1 = mkPost "tony" ["grok"] "hi" :: Post String; p2 = mkPost "grok" ["tony"] "hello"; r = replyTo "kimi" 1 p2 "a" in branchesByIndex [p1, p2] r == map ("kimi" :) (branchesByIndex [p1, p2] p2)
+-- True
+--
+-- >>> let p1 = mkPost "tony" ["grok"] "hi" :: Post String; p2 = mkPost "grok" ["tony"] "hello"; r1 = replyTo "kimi" 1 p2 "a"; r2 = replyTo "tony" 2 r1 "b" in branchesByIndex [p1, p2, r1] r2
+-- [["tony","kimi","grok"]]
 branches :: Map PostId (Post a) -> Post a -> [[Name]]
 branches priorMap = go (nextId priorMap)
   where
@@ -345,8 +351,14 @@ branchesByIndex prior = branches (indexToIdMap prior)
 --
 -- Cone-union law:
 --
--- prop> cone (indexToIdMap prior) (synthesis who aud is b)
+-- > cone (indexToIdMap prior) (synthesis who aud is b)
 --     == sortNub (who : concatMap (cone (Map.filterWithKey (\k _ -> k < i) (indexToIdMap prior)) . (priorMap Map.!)) is)
+--
+-- >>> let p1 = mkPost "tony" ["grok"] "hi" :: Post String; p2 = mkPost "grok" ["tony"] "hello"; r1 = replyTo "kimi" 1 p2 "a"; prior = [p2, p1, r1] in coneByIndex prior (synthesis "sum" [] [2, 0] "Σ") == sortNub ("sum" : concatMap (coneByIndex prior) [r1, p2])
+-- True
+--
+-- >>> let p1 = mkPost "tony" ["grok"] "hi" :: Post String; p2 = mkPost "grok" ["tony"] "hello"; r1 = replyTo "kimi" 1 p2 "a"; prior = [p2, p1, r1] in coneByIndex prior (synthesis "sum" [] [2, 0] "Σ")
+-- ["grok","kimi","sum","tony"]
 cone :: Map PostId (Post a) -> Post a -> [Name]
 cone priorMap p = sortNub (concat (branches priorMap p))
 
