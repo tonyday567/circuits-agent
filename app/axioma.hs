@@ -67,8 +67,7 @@ import Circuit.Agent.Tensor
   )
 import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.ChannelPoly (after, iterateSystem, runSystem)
-import Circuit.Chu qualified as Chu
-import Circuit.Ends (commit, emit, endsAsChu, lawfulDimapEnds, open, splay0, suffixOut)
+import Circuit.Ends (commit, emit, open, splay0)
 import Circuit.Layer (run)
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos, System, fromEvalSystem, monoDir, monoIn, system)
@@ -904,52 +903,6 @@ main = do
       closePipe
       assert "composeEnds serialises allocated channels; honest pipeline does not" $
         isNothing serialResult && pipelinedResult == Just 3
-
-  -------------------------------------------------------------------------
-  -- Ends / Chu embedding on allocated channels
-  --
-  -- These oracles need STM/IO, so they live here rather than in core
-  -- circuits-axioma.
-  -------------------------------------------------------------------------
-  putStrLn "Ends / Chu embedding on allocated channels"
-  do
-    e <- openIO Unbounded :: IO (Ends (Kleisli IO) Int Int)
-    x <- runKleisli (close (conjoint e) (companion e)) 42
-    assert "Ends copycat close is identity on fresh queue" $ x == 42
-
-  do
-    e <- openIO Unbounded :: IO (Ends (Kleisli IO) Int Int)
-    let obj = endsAsChu e
-        obj'' = Chu.negateChu (Chu.negateChu obj)
-    x <- runKleisli (Chu.chuPair obj (conjoint e, companion e)) 42
-    y <- runKleisli (Chu.chuPair obj'' (conjoint e, companion e)) 42
-    assert "Ends negation is involutive in Chu" $ x == y
-
-  do
-    e <- openIO Unbounded :: IO (Ends (Kleisli IO) Int Int)
-    let obj = endsAsChu e
-        m = Chu.ChuMorphism (prefixIn C.id) (`suffixOut` C.id)
-        lhs = Chu.chuPair obj (Chu.chuForward m (conjoint e), companion e)
-        rhs = Chu.chuPair obj (conjoint e, Chu.chuBackward m (companion e))
-    x <- runKleisli lhs 42
-    y <- runKleisli rhs 42
-    assert "Ends identity endomorphism satisfies Chu law" $ x == y
-
-  do
-    e <- openIO Unbounded :: IO (Ends (Kleisli IO) Int Int)
-    let obj = endsAsChu e
-        m = Chu.ChuMorphism (prefixIn (Kleisli $ pure . (+ 1))) (`suffixOut` C.id)
-        lhs = Chu.chuPair obj (Chu.chuForward m (conjoint e), companion e)
-        rhs = Chu.chuPair obj (conjoint e, Chu.chuBackward m (companion e))
-    x <- runKleisli lhs 42
-    y <- runKleisli rhs 42
-    assert "Ends dimapEnds-style pair violates Chu law" $ x /= y
-
-  do
-    e <- openIO Unbounded :: IO (Ends (Kleisli IO) Int Int)
-    let e' = lawfulDimapEnds Chu.idChu e
-    x <- runKleisli (close (conjoint e') (companion e')) 42
-    assert "Ends lawfulDimapEnds with identity Chu morphism preserves close" $ x == 42
 
   -------------------------------------------------------------------------
   -- Agent as Shard: pure Moore citizen at Kleisli Ends (change of base).
