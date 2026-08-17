@@ -1,0 +1,12 @@
+# house hlint policy — suppress point-free rewrites that conflict with explicit witnesses
+- ignore: {name: "Avoid lambda"}
+- ignore: {name: "Avoid lambda using `infix`"}
+- ignore: {name: "Eta reduce"}
+- ignore: {name: "Use tuple-section"}
+- ignore: {name: "Use null"}
+- ignore: {name: "Use const"}
+- ignore: {name: "Use bimap"}
+- ignore: {name: "Use replicateM"}
+- ignore: {name: "Use replicateM_"}
+- ignore: {name: "Use curry"}
+- ignore: {name: "Use second"}
