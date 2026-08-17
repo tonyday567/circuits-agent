@@ -59,13 +59,13 @@ library
   default-extensions: PackageImports
   exposed-modules:
     Circuit.Agent
-    Circuit.Agent.Ends
-    Circuit.Agent.Query
     Circuit.Agent.Delivery
+    Circuit.Agent.Ends
     Circuit.Agent.Framing
     Circuit.Agent.Graph
     Circuit.Agent.Machina.Mark
     Circuit.Agent.Mark
+    Circuit.Agent.Query
     Circuit.Agent.StdPorts
     Circuit.Agent.Tensor
     Circuit.Agent.Turn
@@ -77,9 +77,9 @@ library
     base >=4.18 && <5,
     bytestring >=0.11 && <0.13,
     circuits >=0.3 && <0.5,
+    circuits-diagrams >=0.1 && <0.2,
     circuits-mat >=0.1 && <0.2,
     circuits-parser >=0.1 && <0.2,
-    circuits-diagrams >=0.1 && <0.2,
     containers >=0.6 && <0.9,
     directory >=1.3 && <1.4,
     filepath >=1.4 && <1.6,
@@ -104,11 +104,11 @@ executable circuits-agent-axioma
     base >=4.18 && <5,
     circuits >=0.3 && <0.5,
     circuits-agent,
+    circuits-diagrams,
     circuits-mat,
     containers >=0.6 && <0.9,
     directory >=1.3 && <1.4,
     filepath >=1.4 && <1.6,
-    circuits-diagrams,
     harpie >=0.3 && <0.4,
     mtl >=2.3 && <2.4,
     numhask >=0.14 && <0.15,
@@ -125,8 +125,8 @@ executable circuits-agent-tape-axioma
   build-depends:
     base >=4.18 && <5,
     circuits-agent,
-    containers >=0.6 && <0.9,
     circuits-diff >=0.1 && <0.2,
+    containers >=0.6 && <0.9,
     text >=2.0 && <3,
 
   default-language: GHC2024
@@ -142,6 +142,5 @@ executable circuits-agent-graph-axioma
     circuits-agent,
     containers >=0.6 && <0.9,
     text >=2.0 && <3,
-    QuickCheck >=2.14 && <2.16,
 
   default-language: GHC2024
