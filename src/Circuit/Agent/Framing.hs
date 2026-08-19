@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 
 -- | Bus message framing.
 --
@@ -253,21 +254,17 @@ lookupNumber k (JObject o) = case lookup k o of
   _ -> Nothing
 lookupNumber _ _ = Nothing
 
-lookupString :: Text -> Json -> Maybe Text
-lookupString k (JObject o) = case lookup k o of
-  Just (JString s) -> Just s
-  _ -> Nothing
-lookupString _ _ = Nothing
-
 lookupStrings :: Text -> Json -> Maybe [Text]
 lookupStrings k (JObject o) = case lookup k o of
   Just (JArray vs) -> Just [s | JString s <- V.toList vs]
   _ -> Nothing
+lookupStrings _ _ = Nothing
 
 lookupPostIds :: Text -> Json -> Maybe [PostId]
 lookupPostIds k (JObject o) = case lookup k o of
   Just (JArray vs) -> Just [i | JNumber s <- V.toList vs, Just i <- [naturalFromScientific s]]
   _ -> Nothing
+lookupPostIds _ _ = Nothing
 
 -- ---------------------------------------------------------------------------
 -- Legacy formats

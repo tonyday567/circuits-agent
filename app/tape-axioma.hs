@@ -318,7 +318,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "O5: linearization invariance"
   let orderB = [1, 0, 2, 3, 4, 5, 6, 7] :: [PostId]
-      postsB = map (ps !!) (map fromIntegral orderB)
+      postsB = map ((ps !!) . fromIntegral) orderB
       nodesB = buildTapeWithIds postsB orderB
       cotB = sweep nodesB
       allIds :: [PostId]

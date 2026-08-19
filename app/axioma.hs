@@ -2,6 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeApplications #-}
+{-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 -- Post is polymorphic in its payload; this file pins everything at Text via
 -- the module 'default' declaration, so -Wtype-defaults would be noise.
 {-# OPTIONS_GHC -Wno-type-defaults #-}
@@ -624,14 +625,14 @@ main = do
           let ps = softmax ws
               l = sum (zipWith (*) ps values)
            in zipWith (\p v -> p * (v - l)) ps values
-        ws = [0.5, -0.3] :: [Double]
+        weights = [0.5, -0.3] :: [Double]
         eps = 1e-5
-        analytic = grad ws
+        analytic = grad weights
         fd k =
-          let wsPlus = take k ws ++ [ws !! k + eps] ++ drop (k + 1) ws
-              wsMinus = take k ws ++ [ws !! k - eps] ++ drop (k + 1) ws
+          let wsPlus = take k weights ++ [weights !! k + eps] ++ drop (k + 1) weights
+              wsMinus = take k weights ++ [weights !! k - eps] ++ drop (k + 1) weights
            in (loss wsPlus - loss wsMinus) / (2 * eps)
-        fds = map fd [0 .. length ws - 1]
+        fds = map fd [0 .. length weights - 1]
     assert "S0b soft-routing gradient matches finite difference" $
       all (\(a, f) -> abs (a - f) < 1e-8) (zip analytic fds)
 
@@ -1127,9 +1128,7 @@ main = do
   do
     let echo name hist =
           let p = peek hist
-           in if from p == "human"
-                then [mkPost name [] ("ack:" <> body p)]
-                else []
+           in [mkPost name [] ("ack:" <> body p) | from p == "human"]
         reg :: AgentRegistry
         reg =
           Map.fromList
@@ -1145,15 +1144,11 @@ main = do
     let summary :: [Post Text] -> [Post Text]
         summary hist =
           let p = peek hist
-           in if from p == "leaf"
-                then [mkPost "hub" [] ("summary: " <> body p)]
-                else []
+           in [mkPost "hub" [] ("summary: " <> body p) | from p == "leaf"]
         leafEcho :: [Post Text] -> [Post Text]
         leafEcho hist =
           let p = peek hist
-           in if from p == "human"
-                then [mkPost "leaf" [] ("leaf:" <> body p)]
-                else []
+           in [mkPost "leaf" [] ("leaf:" <> body p) | from p == "human"]
         reg :: AgentRegistry
         reg =
           Map.fromList
@@ -1170,9 +1165,7 @@ main = do
   do
     let echo name hist =
           let p = peek hist
-           in if from p == "human"
-                then [mkPost name [] ("ack:" <> body p)]
-                else []
+           in [mkPost name [] ("ack:" <> body p) | from p == "human"]
         reg :: AgentRegistry
         reg =
           Map.fromList
@@ -1497,7 +1490,7 @@ main = do
     q <- newTQueueIO
     -- An empty queue makes 'readTQueue' retry; timeout observes the block.
     blocked <- timeout 100000 (atomically (readTQueue q))
-    assert "retry: empty commit blocks" $ blocked == Nothing
+    assert "retry: empty commit blocks" $ isNothing blocked
     -- Once a writer fills the queue, the retry resumes.
     let p = mkPost "stm" [] "hello"
     _ <- forkIO $ do
@@ -1690,9 +1683,7 @@ main = do
     let k = 3 :: Int
         selfEcho :: AgentS [Post Text] (Post Text)
         selfEcho = agentM $ tape $ \hist ->
-          if length hist >= k
-            then []
-            else [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1)))]
+          [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
         drainEnd ends = go []
           where
@@ -1726,9 +1717,7 @@ main = do
     let k = 3 :: Int
         selfEcho :: AgentS [Post Text] (Post Text)
         selfEcho = agentM $ tape $ \hist ->
-          if length hist >= k
-            then []
-            else [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1)))]
+          [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
         drainEnd :: Ends (Kleisli STM) a a -> STM [a]
         drainEnd ends = go []
@@ -1805,9 +1794,7 @@ main = do
     let k = 3 :: Int
         selfEcho :: AgentS [Post Text] (Post Text)
         selfEcho = agentM $ tape $ \hist ->
-          if length hist >= k
-            then []
-            else [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1)))]
+          [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
         drainEnd :: Ends (Kleisli STM) a a -> STM [a]
         drainEnd ends = go []
@@ -1850,7 +1837,7 @@ main = do
       parseMark "↩️ amend this" == Just Amendment
         && parseMark "🟢\xFE0F landed" == Just Landed
     assert "plain bodies carry no mark" $
-      parseMark "hello" == Nothing && parseMark "" == Nothing
+      isNothing (parseMark "hello") && isNothing (parseMark "")
     assert "halt marks are Landed and StandDown" $
       all isHalt [Landed, StandDown]
         && not (any isHalt [Motion, Consent, Amendment, Escalate])
@@ -1858,7 +1845,7 @@ main = do
       isEscalate Escalate && not (isEscalate Landed)
     assert "markOf reads the post body" $
       markOf (mkPost "a" ["b"] "🟢 landed") == Just Landed
-        && markOf (mkPost "a" ["b"] "no mark") == Nothing
+        && isNothing (markOf (mkPost "a" ["b"] "no mark"))
     -- The pinned collision: legacy quiescence posts used 🟡, which is a
     -- Motion here.  That ambiguity is why quiescence moved to 🔵; this
     -- oracle stops anyone reintroducing it quietly.
@@ -1995,12 +1982,12 @@ main = do
           cmd <- runKleisli (emit (companion processEnds) inU) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
           runKleisli (commit (conjoint processEnds) outU) resp
-    loop <- TurnPort.turn runnerEnds
+    turnLoop <- TurnPort.turn runnerEnds
     -- Run the responder in parallel with the turn, but wait for the turn
     -- result before cancelling the responder.  A raw race cancels the loser
     -- as soon as the responder writes, so the turn might not finish reading.
     responderA <- async responder
-    result <- runKleisli (run loop) "hello"
+    result <- runKleisli (run turnLoop) "hello"
     cancel responderA
     assert "turn correlates response by thread content" $
       result == "ack: hello"
@@ -2018,9 +2005,9 @@ main = do
           cmd <- runKleisli (emit (companion processEnds) inU) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
           runKleisli (commit (conjoint processEnds) outU) resp
-    loop <- TurnPort.turnTimeout 100000 runnerEnds
+    turnLoop <- TurnPort.turnTimeout 100000 runnerEnds
     responderA <- async responder
-    result <- runKleisli (run loop) "hello"
+    result <- runKleisli (run turnLoop) "hello"
     cancel responderA
     assert "turnTimeout correlates response by thread content" $
       result == Just "ack: hello"
@@ -2030,8 +2017,8 @@ main = do
     respQ <- newTQueueIO
     let runnerEnds :: Ends (Kleisli IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerEnds = endsK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-    loop <- TurnPort.turnTimeout 10000 runnerEnds
-    result <- runKleisli (run loop) "hello"
+    turnLoop <- TurnPort.turnTimeout 10000 runnerEnds
+    result <- runKleisli (run turnLoop) "hello"
     assert "turnTimeout returns Nothing on expiry" $
       isNothing result
 
@@ -2472,6 +2459,4 @@ main = do
     cardEcho :: Text -> [Post Text] -> [Post Text]
     cardEcho name hist =
       let p = peek hist
-       in if from p == "human"
-            then [mkPost name ["xyzzy"] ("🟢 echo: " <> body p)]
-            else []
+       in [mkPost name ["xyzzy"] ("🟢 echo: " <> body p) | from p == "human"]

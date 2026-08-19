@@ -84,15 +84,16 @@ matchResponse st@TurnState {pending = Just (cmdId, cmd)} resp
 -- * A token with non-empty thread is treated as a response: it matches when
 --   its thread equals the pending command's id, emitting the pair.
 turnMediator :: Mediator (TurnState a) (TurnToken a) (TurnToken a, TurnToken a)
-turnMediator = Mediator
-  { medInit = emptyTurnState,
-    medStep = \st tok ->
-      if null (turnThread tok)
-        then (fst (injectCommand st (turnBody tok)), Nothing)
-        else matchResponse st tok,
-    medOwed = const False,
-    medDraw = \_ _ -> Nothing
-  }
+turnMediator =
+  Mediator
+    { medInit = emptyTurnState,
+      medStep = \st tok ->
+        if null (turnThread tok)
+          then (fst (injectCommand st (turnBody tok)), Nothing)
+          else matchResponse st tok,
+      medOwed = \st -> case pending st of Nothing -> False; Just _ -> True,
+      medDraw = \_ _ -> Nothing
+    }
 
 -- | Read the unit ends used to plug the unused side of a commit or emit.
 unitEnds :: Ends (Kleisli IO) () ()

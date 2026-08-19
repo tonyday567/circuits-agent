@@ -775,7 +775,7 @@ meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roste
 -- Backwards-compatible wrapper; for explicit subscriptions use 'loopsSubs'.
 loops ::
   forall a s f.
-  (Snoc s (Post a), Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
+  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
   [(Name, Agent (->) s (Post a) [Post a])] ->
   [(Name, AgentState s f)] ->
   Log f ->
