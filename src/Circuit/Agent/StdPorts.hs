@@ -88,11 +88,13 @@ import Data.Foldable (traverse_)
 import Data.IORef
 import Data.List (minimumBy)
 import Data.Maybe (fromMaybe)
--- \$setup
+{- ORMOLU_DISABLE -}
+-- $setup
 -- >>> import Circuit.ChannelPoly (iterateSystem)
 -- >>> import Circuit.Ends (Ends (..), HasDual (..), commit, emit, open)
 -- >>> import Control.Arrow (Kleisli (..), runKleisli)
 -- >>> import Data.Text.Encoding (decodeUtf8)
+{- ORMOLU_ENABLE -}
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text.Encoding (encodeUtf8)
