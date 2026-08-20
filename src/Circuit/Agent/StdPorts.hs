@@ -90,6 +90,7 @@ import Data.List (minimumBy)
 import Data.Maybe (fromMaybe)
 {- ORMOLU_DISABLE -}
 -- $setup
+--
 -- >>> import Circuit.ChannelPoly (iterateSystem)
 -- >>> import Circuit.Ends (Ends (..), HasDual (..), commit, emit, open)
 -- >>> import Control.Arrow (Kleisli (..), runKleisli)
