@@ -11,6 +11,7 @@
 module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
+import Circuit (Body (..))
 import Circuit.Agent
 import Circuit.Agent.Delivery
   ( DelRel,
@@ -59,9 +60,11 @@ import Circuit.Agent.Query
     synthesisPosts,
   )
 import Circuit.Agent.Tensor
-  ( awaitShard,
+  ( AgentShard,
+    awaitShard,
     fanInShard,
     fanOutShard,
+    ioShard,
     raceShard,
     silentShard,
     synthesisSummary,
@@ -115,10 +118,11 @@ wipe f = do
   e <- doesFileExist f
   when e (removeFile f)
 
--- | Close a same-type shard once under 'StateT [Post Text] IO'.
-closeShardIO :: Shard (StateT [Post Text] IO) [Post Text] [Post Text] -> [Post Text] -> [Post Text] -> IO ([Post Text], [Post Text])
-closeShardIO sh x s0 =
-  runStateT (runKleisli (close (conjoint sh) (companion sh)) x) s0
+-- | Close a same-type agent shard once.
+closeShardIO :: AgentShard [Post Text] [Post Text] -> [Post Text] -> [Post Text] -> IO ([Post Text], [Post Text])
+closeShardIO sh x s0 = do
+  (s', outs) <- runKleisli (runBody (close (conjoint sh) (companion sh))) (s0, x)
+  pure (outs, s')
 
 peek :: [Post Text] -> Post Text
 peek [] = error "verify: empty history"
@@ -1663,7 +1667,7 @@ main = do
         b = mkPost "bob" [] "b"
         c = mkPost "carol" [] "c"
         outPost x = x {body = "out:" <> body x}
-        sh = shard (\xs -> put xs) (do xs <- get; put []; pure (map outPost xs))
+        sh = ioShard (pure . map outPost)
         runBag sh' ins = do
           (outs, _) <- closeShardIO sh' ins []
           pure (toBag outs)
@@ -2028,18 +2032,9 @@ main = do
   -- These are the semantic citizens that free-agent 'FreeSeat' terms fold
   -- into.  Laws are tested directly on shards, independent of any free syntax.
   -------------------------------------------------------------------------
-  let constShard outs =
-        shard
-          (\xs -> put xs)
-          (put [] >> pure outs)
+  let constShard outs = ioShard (const (pure outs))
       tagShard suffix =
-        shard
-          (\xs -> put xs)
-          ( do
-              xs <- get
-              put []
-              pure [x {body = body x <> suffix} | x <- xs]
-          )
+        ioShard (pure . map (\x -> x {body = body x <> suffix}))
 
   putStrLn "shard-level tensors"
 

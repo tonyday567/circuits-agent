@@ -1,111 +1,126 @@
-{-# LANGUAGE GADTs #-}
-
--- | Seat-level tensor combinators over 'Shard' values in 'StateT [Post Text] IO'.
+-- | Seat-level tensor combinators over 'Ends' with state carried by
+-- 'Body'.
 --
 -- These are the semantic citizens that free-agent 'FreeSeat' terms fold into.
--- They live in circuits-agent because they mention no free syntax: only
--- 'Shard', 'Post', and the shared 'StateT [Post Text] IO' buffer.
+-- The buffer state is part of the base arrow ('Body (,) (Kleisli IO)
+-- [Post Text]') rather than a monad transformer.
 module Circuit.Agent.Tensor
-  ( silentShard,
+  ( AgentShard,
+    silentShard,
     awaitShard,
     raceShard,
     fanOutShard,
     fanInShard,
+    runSubShard,
+    closeShardIO,
+    ioShard,
+    writeBatch,
+    readBatch,
     synthesisSummary,
   )
 where
 
-import Circuit (Ends (..), close, companion, conjoint, endsK)
-import Circuit.Agent (Name, Post (..), PostId, Shard, mkPost, synthesis)
+import Circuit (Body (..), close, companion, conjoint)
+import Circuit.Agent (Name, Post (..), PostId, mkPost, synthesis)
+import Circuit.Ends (Ends, ends0)
 import Control.Arrow (Kleisli (..), runKleisli)
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.State (StateT, get, put, runStateT)
 import Data.Text (Text)
 import Data.Text qualified as T
+
+-- | An effectful agent shard with a '[Post Text]' buffer threaded through the
+-- arrow.
+type AgentShard a b = Ends (Body (,) (Kleisli IO) [Post Text]) a b
 
 -- | Run a child shard in isolation on the given input, discarding its
 -- residual state.  Branches in await / race / fan-out have private scratch
 -- state; only their emits rejoin the main stream.
-runSubShard :: Shard (StateT [Post Text] IO) [Post Text] [Post Text] -> [Post Text] -> StateT [Post Text] IO [Post Text]
+runSubShard :: AgentShard [Post Text] [Post Text] -> [Post Text] -> IO [Post Text]
 runSubShard sh xs = do
-  let kleisli = close (conjoint sh) (companion sh)
-  liftIO (fmap fst (runStateT (runKleisli kleisli xs) []))
+  let thread = close (conjoint sh) (companion sh)
+  (_, ys) <- runKleisli (runBody thread) ([], xs)
+  pure ys
 
--- | Silent shard: commit replaces state, emit clears it and returns [].
-silentShard :: Shard (StateT [Post Text] IO) [Post Text] [Post Text]
-silentShard =
-  endsK
-    (\xs -> put xs)
-    (put [] >> pure [])
+-- | Close a same-type shard once, exposing both the output and the residual
+-- state.  Works for any state carrier @s@ and payload @a@.
+closeShardIO :: Ends (Body (,) (Kleisli IO) s) a a -> a -> s -> IO (a, s)
+closeShardIO sh x s0 = do
+  let thread = close (conjoint sh) (companion sh)
+  (s', y) <- runKleisli (runBody thread) (s0, x)
+  pure (y, s')
+
+-- | Helper: store the input batch as the buffer.
+writeBatch :: Body (,) (Kleisli IO) [Post Text] [Post Text] ()
+writeBatch = Body $ Kleisli $ \(_, xs) -> pure (xs, ())
+
+-- | Helper: return the buffer as output and clear it.
+readBatch :: Body (,) (Kleisli IO) [Post Text] () [Post Text]
+readBatch = Body $ Kleisli $ \(s, ()) -> pure ([], s)
+
+-- | Build an agent shard that stores the input batch, then computes outputs
+-- from that batch in 'IO'.
+ioShard :: ([Post Text] -> IO [Post Text]) -> AgentShard [Post Text] [Post Text]
+ioShard emit = ends0 writeBatch read'
+  where
+    read' = Body $ Kleisli $ \(s, ()) -> do
+      outs <- emit s
+      pure ([], outs)
+
+-- | Silent shard: commit replaces the buffer; emit clears it and returns [].
+silentShard :: AgentShard [Post Text] [Post Text]
+silentShard = ioShard (pure . const [])
 
 -- | Product / await shard: both sub-shards see the same input; emits are
 -- concatenated left-to-right.
 awaitShard ::
-  Shard (StateT [Post Text] IO) [Post Text] [Post Text] ->
-  Shard (StateT [Post Text] IO) [Post Text] [Post Text] ->
-  Shard (StateT [Post Text] IO) [Post Text] [Post Text]
-awaitShard sh1 sh2 =
-  endsK
-    (\xs -> put xs)
-    ( do
-        xs <- get
-        put []
-        o1 <- runSubShard sh1 xs
-        o2 <- runSubShard sh2 xs
-        pure (o1 ++ o2)
-    )
+  AgentShard [Post Text] [Post Text] ->
+  AgentShard [Post Text] [Post Text] ->
+  AgentShard [Post Text] [Post Text]
+awaitShard sh1 sh2 = ends0 writeBatch read'
+  where
+    read' = Body $ Kleisli $ \(s, ()) -> do
+      o1 <- runSubShard sh1 s
+      o2 <- runSubShard sh2 s
+      pure ([], o1 ++ o2)
 
 -- | Coproduct / race shard: left emit wins if non-empty, otherwise right.
 raceShard ::
-  Shard (StateT [Post Text] IO) [Post Text] [Post Text] ->
-  Shard (StateT [Post Text] IO) [Post Text] [Post Text] ->
-  Shard (StateT [Post Text] IO) [Post Text] [Post Text]
-raceShard sh1 sh2 =
-  endsK
-    (\xs -> put xs)
-    ( do
-        xs <- get
-        put []
-        o1 <- runSubShard sh1 xs
-        o2 <- runSubShard sh2 xs
-        pure (if null o1 then o2 else o1)
-    )
+  AgentShard [Post Text] [Post Text] ->
+  AgentShard [Post Text] [Post Text] ->
+  AgentShard [Post Text] [Post Text]
+raceShard sh1 sh2 = ends0 writeBatch read'
+  where
+    read' = Body $ Kleisli $ \(s, ()) -> do
+      o1 <- runSubShard sh1 s
+      o2 <- runSubShard sh2 s
+      pure ([], if null o1 then o2 else o1)
 
 -- | Fan-out shard: every sub-shard sees the same input; emits are concatenated
 -- in branch order.
 fanOutShard ::
-  [Shard (StateT [Post Text] IO) [Post Text] [Post Text]] ->
-  Shard (StateT [Post Text] IO) [Post Text] [Post Text]
-fanOutShard shs =
-  endsK
-    (\xs -> put xs)
-    ( do
-        xs <- get
-        put []
-        os <- traverse (`runSubShard` xs) shs
-        pure (concat os)
-    )
+  [AgentShard [Post Text] [Post Text]] ->
+  AgentShard [Post Text] [Post Text]
+fanOutShard shs = ends0 writeBatch read'
+  where
+    read' = Body $ Kleisli $ \(s, ()) -> do
+      os <- traverse (`runSubShard` s) shs
+      pure ([], concat os)
 
 -- | Fan-in shard: fan-out, then collapse the collected branch outputs with the
 -- supplied summary function.
 fanInShard ::
   ([[Post Text]] -> [Post Text]) ->
-  [Shard (StateT [Post Text] IO) [Post Text] [Post Text]] ->
-  Shard (StateT [Post Text] IO) [Post Text] [Post Text]
-fanInShard summary shs =
-  endsK
-    (\xs -> put xs)
-    ( do
-        xs <- get
-        put []
-        os <- traverse (`runSubShard` xs) shs
-        pure (summary os)
-    )
+  [AgentShard [Post Text] [Post Text]] ->
+  AgentShard [Post Text] [Post Text]
+fanInShard summary shs = ends0 writeBatch read'
+  where
+    read' = Body $ Kleisli $ \(s, ()) -> do
+      os <- traverse (`runSubShard` s) shs
+      pure ([], summary os)
 
 -- | A fan-in summary honest by construction: the single output post is a
--- 'synthesis' of the supplied parent ids, so its ancestry cites every
--- branch output by exact reference.  The supplied function computes the body.
--- No branch outputs, or an empty body → no posts (quiet).
+-- 'synthesis' of the supplied parent ids, so its ancestry cites every branch
+-- output by exact reference.  The supplied function computes the body.
+-- No branch outputs, or an empty body -> no posts (quiet).
 --
 -- The caller supplies one 'PostId' per branch output (in the order produced
 -- by @concat oss@).  When ids are not available, pass @[]@ and the summary
