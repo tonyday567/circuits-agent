@@ -11,7 +11,7 @@
 module Main (main) where
 
 import Circuit.Agent
-import Circuit.Diff (Diff, Diff' (..), runDiff)
+import Circuit.Diff (Diff (..), Diff', runDiff)
 import Data.IntMap (IntMap)
 import Data.IntMap qualified as IntMap
 import Data.List (find, foldl')
@@ -154,8 +154,8 @@ partials name parVs = case name of
   _ -> [] -- root posts: no parents, no partials
 
 -- | Pullback of a unary body function at a point, seeded with 1.
-unary :: (Diff Double Double -> Diff Double Double) -> Double -> Double
-unary f x = snd (runDiff (f (Diff' (\s -> (s, id)))) x) 1.0
+unary :: (Diff' Double Double -> Diff' Double Double) -> Double -> Double
+unary f x = snd (runDiff (f (Diff (\s -> (s, id)))) x) 1.0
 
 -- | A two-slot input vector, so a two-parent merge can be a 'Diff' input.
 data V2 = V2 Double Double
@@ -170,8 +170,8 @@ instance Num V2 where
   fromInteger n = V2 (fromInteger n) (fromInteger n)
 
 -- | The merge as a differentiable arrow, parents in thread order.
-fmDiff :: Diff V2 Double
-fmDiff = fm (Diff' (\(V2 xk _) -> (xk, \db -> V2 db 0))) (Diff' (\(V2 _ xh) -> (xh, \db -> V2 0 db)))
+fmDiff :: Diff' V2 Double
+fmDiff = fm (Diff (\(V2 xk _) -> (xk, \db -> V2 db 0))) (Diff (\(V2 _ xh) -> (xh, \db -> V2 0 db)))
 
 -------------------------------------------------------------------------
 -- The reverse sweep and the forward re-run.
