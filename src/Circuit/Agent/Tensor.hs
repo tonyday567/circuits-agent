@@ -22,8 +22,8 @@ where
 
 import Circuit (Body (..), close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), PostId, mkPost, synthesis)
-import Circuit.Ends (Ends, ends0)
 import Circuit.Category (K (..))
+import Circuit.Ends (Ends, ends0)
 import Data.Text (Text)
 import Data.Text qualified as T
 

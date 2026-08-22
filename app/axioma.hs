@@ -70,14 +70,14 @@ import Circuit.Agent.Tensor
     synthesisSummary,
   )
 import Circuit.Agent.Turn qualified as TurnPort
+import Circuit.Category (K (..))
+import Circuit.Category qualified as C
 import Circuit.ChannelPoly (after, iterateSystem, runSystem)
 import Circuit.Ends (commit, emit, open, splay0)
 import Circuit.Layer (run)
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos, System, fromEvalSystem, monoDir, monoIn, system)
-import Circuit.Category (K (..))
 import Circuit.Stream (These (..), Uncons, uncons)
-import Circuit.Category qualified as C
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (async, cancel, race)
 import Control.Concurrent.STM

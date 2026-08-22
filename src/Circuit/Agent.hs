@@ -216,12 +216,12 @@ import Circuit
     (>:>),
   )
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
+import Circuit.Category (K (..))
 import Circuit.ChannelPoly (after)
 import Circuit.ChannelPoly qualified as ChannelPoly
 import Circuit.Layer (run)
 import Circuit.Loop (Loop (..))
 import Circuit.Poly (Eval (..), Mono, System, fromEvalSystem, monoDir, monoIn, runSystem, system)
-import Circuit.Category (K (..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
 import Control.Concurrent.STM (STM, atomically, orElse)

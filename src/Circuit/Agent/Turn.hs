@@ -34,8 +34,8 @@ where
 
 import Circuit (Loop (..))
 import Circuit.Agent (PostId)
-import Circuit.Ends (Ends (..), commit, emit, open)
 import Circuit.Category (K (..))
+import Circuit.Ends (Ends (..), commit, emit, open)
 import Circuit.Mediate (Mediator (..))
 import Data.IORef
 import Data.Text (Text)
