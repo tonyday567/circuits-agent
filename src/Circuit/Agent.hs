@@ -204,11 +204,11 @@ where
 import Circuit hiding (eval)
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
-import Circuit.Poles (compose, dimap, lmap, rmap)
-import Circuit.System (after, runSystemMono)
-import Circuit.System qualified as System
+import Circuit.Poles (compose, imap, iomap, omap)
 import Circuit.Poly (Eval (..), Mono, System, fromEvalSystem, monoDir, monoIn, runSystem, system)
 import Circuit.Syntax (eval)
+import Circuit.System (after, runSystemMono)
+import Circuit.System qualified as System
 import Circuit.Trace (Trace (..), base, yank)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
@@ -1252,7 +1252,7 @@ portShard getIn putIn getOut putOut sh =
 -- session assembly: @prefixShard session@ changes the payload that the
 -- shard posts.
 prefixShard :: (Monad m) => (a' -> a) -> Shard m a b -> Shard m a' b
-prefixShard f = lmap (K $ pure . f)
+prefixShard f = imap (K $ pure . f)
 
 -- | Adapt a shard on the emit side (covariant).
 --
@@ -1260,13 +1260,13 @@ prefixShard f = lmap (K $ pure . f)
 -- transport envelope: @suffixShard (map addHeader)@ decorates every
 -- emitted post.
 suffixShard :: (Monad m) => (b -> b') -> Shard m a b -> Shard m a b'
-suffixShard g = rmap (K $ pure . g)
+suffixShard g = omap (K $ pure . g)
 
 -- | Adapt both sides of a shard at once.
 --
 -- @codecShard f g = prefixShard f . suffixShard g@.
 codecShard :: (Monad m) => (a' -> a) -> (b -> b') -> Shard m a b -> Shard m a' b'
-codecShard f g = dimap (K $ pure . f) (K $ pure . g)
+codecShard f g = iomap (K $ pure . f) (K $ pure . g)
 
 -- | Sequential composition of shards.
 --
