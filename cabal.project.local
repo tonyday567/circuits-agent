@@ -1,0 +1,11 @@
+packages:
+  ./circuits-agent.cabal
+  ../circuits/circuits.cabal
+  ../circuits-diff/circuits-diff.cabal
+  ../circuits-mat/circuits-mat.cabal
+  ../circuits-parser/circuits-parser.cabal
+  ../circuits-tools/circuits-tools.cabal
+  ../harpie/harpie.cabal
+  ../numhask/numhask.cabal
+
+write-ghc-environment-files: always
