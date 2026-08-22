@@ -353,9 +353,9 @@ openProc encode decode cfg =
             procClose = stdClose pp
           }
 
--- | The wire view of 'StdPorts': one nested 'par' morphism.
+-- | The wire view of 'StdPorts': one nested 'tensor' morphism.
 portsEnds :: StdPorts a b c -> Trace (,) (K IO) (a, ((), ())) ((), (b, c))
-portsEnds pp = par commitM (par outM errM)
+portsEnds pp = tensor commitM (tensor outM errM)
   where
     commitM = base (commit (stdIn pp) outUIn)
     outM = base (emit (stdOut pp) inUOut)
