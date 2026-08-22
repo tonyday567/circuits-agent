@@ -21,7 +21,7 @@ module Circuit.Agent.Query
   )
 where
 
-import Circuit.Agent (Ends (..), Post (..), PostId, Shard, close, mkPost, replyTo, shard, sortNub, synthesis)
+import Circuit.Agent (Poles (..), Post (..), PostId, Shard, close, mkPost, replyTo, shard, sortNub, synthesis)
 import Circuit.Category (K (..))
 import Data.IORef (atomicModifyIORef', newIORef, writeIORef)
 import Data.Maybe (listToMaybe)

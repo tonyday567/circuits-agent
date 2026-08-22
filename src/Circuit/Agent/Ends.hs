@@ -5,10 +5,10 @@
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE TypeFamilies #-}
 
--- | Effectful 'Circuit.Ends.Ends' constructors and queueing strategies.
+-- | Effectful 'Circuit.Poles.Poles' constructors and queueing strategies.
 --
 -- This module lives in @circuits-agent@ because it needs @STM@.  Core
--- 'Circuit.Ends' is pure in the base arrow; the queue implementations here
+-- 'Circuit.Poles' is pure in the base arrow; the queue implementations here
 -- are one possible effectful instantiation, placed beside their consumers
 -- rather than forcing the core library to depend on @stm@.
 module Circuit.Agent.Ends
@@ -43,7 +43,7 @@ module Circuit.Agent.Ends
 where
 
 import Circuit.Category (K (..))
-import Circuit.Ends (Ends (..), commit, companion, conjoint, emit, endsK, open, splay0)
+import Circuit.Poles (HasDual (..), Poles (..), commit, companion, conjoint, emit, open, polesK, splay0)
 import Control.Applicative
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM
@@ -77,7 +77,7 @@ data Queue a
 -- which halt marks are safe.
 data ChannelPolicy a
   = -- | Unbounded FIFO: empty residual, preserves every token in order.
-    -- This is the effectful face of 'Circuit.Mediate.linear'.
+    -- This is the effectful face of a linear process.
     Linear
   | -- | Single-slot buffer with backpressure (write blocks when full).
     SingleSlot
@@ -104,23 +104,23 @@ policyToQueue = \case
   BoundedN n -> Bounded n
   NewestN n -> Newest n
 
--- | Open a channel policy as IO @Ends@.
-openChannel :: ChannelPolicy a -> IO (Ends (K IO) a a)
+-- | Open a channel policy as IO @Poles@.
+openChannel :: ChannelPolicy a -> IO (Poles (K IO) a a)
 openChannel = openIO . policyToQueue
 
--- | Open a channel policy as STM @Ends@.
-openChannelSTM :: ChannelPolicy a -> STM (Ends (K STM) a a)
+-- | Open a channel policy as STM @Poles@.
+openChannelSTM :: ChannelPolicy a -> STM (Poles (K STM) a a)
 openChannelSTM = openSTM . policyToQueue
 
--- | Open a linear channel as IO @Ends@.
+-- | Open a linear channel as IO @Poles@.
 --
 -- 'Linear' is the default policy: unbounded FIFO, empty residual, preserves
--- every token in order.  This is the effectful face of 'Circuit.Mediate.linear'.
-openLinearChannel :: IO (Ends (K IO) a a)
+-- every token in order.  This is the effectful face of a linear process.
+openLinearChannel :: IO (Poles (K IO) a a)
 openLinearChannel = openChannel Linear
 
--- | Open a linear channel as STM @Ends@.
-openLinearChannelSTM :: STM (Ends (K STM) a a)
+-- | Open a linear channel as STM @Poles@.
+openLinearChannelSTM :: STM (Poles (K STM) a a)
 openLinearChannelSTM = openChannelSTM Linear
 
 -- | Type-level witness that a channel policy is linear.
@@ -138,7 +138,7 @@ type family IsLinear (p :: ChannelPolicy a) :: Constraint where
 -- to typecheck.
 type HaltChannel :: ChannelPolicy a -> Type
 data HaltChannel p where
-  HaltChannel :: (IsLinear p) => Ends (K STM) a a -> HaltChannel (p :: ChannelPolicy a)
+  HaltChannel :: (IsLinear p) => Poles (K STM) a a -> HaltChannel (p :: ChannelPolicy a)
 
 -- | Open a halt-mark channel.  This is 'openLinearChannelSTM' with a
 -- type-level certificate.
@@ -149,17 +149,17 @@ openHaltChannel = HaltChannel <$> openLinearChannelSTM
 writeHaltChannel :: forall a (p :: ChannelPolicy a). HaltChannel p -> a -> STM ()
 writeHaltChannel (HaltChannel ends) = runK (commit (conjoint ends) haltOut)
   where
-    haltOut = companion (unitEndsSTM :: Ends (K STM) () ())
+    haltOut = companion (unitEndsSTM :: Poles (K STM) () ())
 
 -- | Read a token from a halt-mark channel.
 readHaltChannel :: forall a (p :: ChannelPolicy a). HaltChannel p -> STM a
 readHaltChannel (HaltChannel ends) = runK (emit (companion ends) haltIn) ()
   where
-    haltIn = conjoint (unitEndsSTM :: Ends (K STM) () ())
+    haltIn = conjoint (unitEndsSTM :: Poles (K STM) () ())
 
 -- | Unit ends specialised to 'K STM'.
-unitEndsSTM :: Ends (K STM) () ()
-unitEndsSTM = endsK (const (pure ())) (pure ())
+unitEndsSTM :: Poles (K STM) () ()
+unitEndsSTM = polesK (const (pure ())) (pure ())
 
 -- | Internal STM primitive for a queue strategy.
 --
@@ -188,48 +188,48 @@ endsSTM = \case
     let write x = writeTBQueue q x <|> (tryReadTBQueue q *> write x)
     pure (write, readTBQueue q)
 
--- | Open a queue strategy as STM @Ends@.
+-- | Open a queue strategy as STM @Poles@.
 --
 -- Allocates STM primitives and returns a matched pair of ends sharing
 -- the same mutable channel.  Both ends live in 'STM', so you can compose
 -- operations across channels in a single 'atomically' block.
-openSTM :: Queue a -> STM (Ends (K STM) a a)
+openSTM :: Queue a -> STM (Poles (K STM) a a)
 openSTM q = do
   (write, read') <- endsSTM q
-  pure (endsK write read')
+  pure (polesK write read')
 
--- | Open a queue strategy as IO @Ends@.
+-- | Open a queue strategy as IO @Poles@.
 --
 -- Like 'openSTM', but each primitive operation is wrapped in its own
 -- 'atomically'.  You cannot batch multiple writes or a write-plus-read
 -- into a single STM transaction; for that use 'openSTM' and wrap in
 -- 'atomically' yourself.
-openIO :: Queue a -> IO (Ends (K IO) a a)
+openIO :: Queue a -> IO (Poles (K IO) a a)
 openIO q = do
   e <- atomically (openSTM q)
   let (K write, K receive) = splay0 e
-  pure (endsK (atomically . write) (atomically (receive ())))
+  pure (polesK (atomically . write) (atomically (receive ())))
 
 -- | Honest sequential composition of two allocated ends via an intermediate
 -- queue and a pump.
 --
 -- @pipeEnds e1 makeE2@ allocates a queue of @b@ values, builds the right end
 -- around that queue with @makeE2@, and starts a pump that moves values from
--- @e1@ into the right end.  The returned 'Ends' uses @e1@ for input and the
+-- @e1@ into the right end.  The returned 'Poles' uses @e1@ for input and the
 -- built right end for output; the close action cancels the pump.
 --
--- This is the coend-style composition that 'composeEnds' cannot express: the
+-- This is the coend-style composition that 'composePoles' cannot express: the
 -- intermediate carrier is a real queue (the residual's home) rather than the
 -- unit type, so a multi-read consumer can accumulate inputs before emitting.
 pipeEnds ::
   forall a b c.
-  Ends (K IO) a b ->
-  (TQueue b -> IO (Ends (K IO) b c)) ->
-  IO (Ends (K IO) a c, IO ())
+  Poles (K IO) a b ->
+  (TQueue b -> IO (Poles (K IO) b c)) ->
+  IO (Poles (K IO) a c, IO ())
 pipeEnds e1 makeE2 = do
   q <- newTQueueIO
   e2 <- makeE2 q
-  let unitEnds :: Ends (K IO) () ()
+  let unitEnds :: Poles (K IO) () ()
       unitEnds = open
       readFromE1 :: IO b
       readFromE1 = runK (emit (companion e1) (conjoint unitEnds)) ()
@@ -238,4 +238,4 @@ pipeEnds e1 makeE2 = do
   pump <- async . forever $ do
     x <- readFromE1
     writeToE2 x
-  pure (Ends (conjoint e1) (companion e2), cancel pump)
+  pure (Poles (conjoint e1) (companion e2), cancel pump)

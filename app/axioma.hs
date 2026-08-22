@@ -11,7 +11,7 @@
 module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
-import Circuit (Body (..))
+import Circuit hiding (Stamped, eval)
 import Circuit.Agent
 import Circuit.Agent.Delivery
   ( DelRel,
@@ -72,11 +72,12 @@ import Circuit.Agent.Tensor
 import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
-import Circuit.ChannelPoly (after, iterateSystem, runSystem)
-import Circuit.Ends (commit, emit, open, splay0)
-import Circuit.Layer (run)
+import Circuit.System (after, iterateSystem, runSystemMono)
+import Circuit.System qualified as System
+import Circuit.Poles (HasDual (..), Poles (..), commit, emit, open, splay0)
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos, System, fromEvalSystem, monoDir, monoIn, system)
+import Circuit.Syntax (eval)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (async, cancel, race)
@@ -121,7 +122,7 @@ wipe f = do
 -- | Close a same-type agent shard once.
 closeShardIO :: AgentShard [Post Text] [Post Text] -> [Post Text] -> [Post Text] -> IO ([Post Text], [Post Text])
 closeShardIO sh x s0 = do
-  (s', outs) <- runK (runBody (close (conjoint sh) (companion sh))) (s0, x)
+  (s', outs) <- runK (morphism (close (conjoint sh) (companion sh))) (s0, x)
   pure (outs, s')
 
 peek :: [Post Text] -> Post Text
@@ -753,7 +754,7 @@ main = do
     let states0 = [(n, feedState (watch @Text [n] t0) (emptyAgentState @Text [n])) | (n, _) <- roster]
         bundle0 = (states0, t0, [])
     assert "meetingLoop run agrees with loopWith" $
-      run (meetingLoop roster) bundle0 == loopWith roster states0 t0
+      eval (meetingLoop roster) bundle0 == loopWith roster states0 t0
 
   -------------------------------------------------------------------------
   -- Multi-seat card: two agents share one card subscription.
@@ -862,34 +863,34 @@ main = do
       all (\p -> from p /= "nudge" || body p == "tell me more.") tF
 
   -------------------------------------------------------------------------
-  -- Shard combinators: composition and codec adapters on Ends.
+  -- Shard combinators: composition and codec adapters on Poles.
   -------------------------------------------------------------------------
   putStrLn "shard combinators"
   do
     let p1 = mkPost "human" ["j"] "hi"
         p2 = mkPost "j" ["human"] "ack"
         fixedShard :: Shard Identity [Post Text] [Post Text]
-        fixedShard = endsK (\_ -> pure ()) (pure [p2])
+        fixedShard = polesK (\_ -> pure ()) (pure [p2])
         coded = codecShard (map (\p -> p {body = "in:" <> body p})) (map (\p -> p {body = body p <> ":out"})) fixedShard
         out = runIdentity (runK (close (conjoint coded) (companion coded)) [p1])
     assert "codec transforms commit and emit" $
       map body out == ["ack:out"]
 
     let accumShard :: Shard (State [Post Text]) [Post Text] [Post Text]
-        accumShard = endsK (\ps -> modify (ps ++)) get
+        accumShard = polesK (\ps -> modify (ps ++)) get
         composed = composeShard accumShard (suffixShard (map (\p -> p {body = body p <> "!"})) accumShard)
         (out2, st) = runState (runK (close (conjoint composed) (companion composed)) [p1]) []
     assert "compose chains shards through the monad" $
       map body out2 == ["hi!", "hi!"] && length st == 2
 
-    -- Degeneracy warning: composeEnds over allocated channels splays through
+    -- Degeneracy warning: composePoles over allocated channels splays through
     -- the unit and serialises the intermediate wire.  An honest pipeline with
     -- a separate buffer and pump can feed a multi-read consumer; the composed
     -- end cannot.
     do
       let pairSumEnd :: TQueue Int -> IO (Shard IO Int Int)
           pairSumEnd q =
-            pure $ endsK (atomically . writeTQueue q) (atomically $ (+) <$> readTQueue q <*> readTQueue q)
+            pure $ polesK (atomically . writeTQueue q) (atomically $ (+) <$> readTQueue q <*> readTQueue q)
       e1 <- openIO Unbounded :: IO (Shard IO Int Int)
       e2 <- pairSumEnd =<< newTQueueIO
       let e12 = composeShard e1 e2
@@ -906,11 +907,11 @@ main = do
       runK e1Write' 2
       pipelinedResult <- timeout 1000000 $ runK ePipeRead ()
       closePipe
-      assert "composeEnds serialises allocated channels; honest pipeline does not" $
+      assert "composePoles serialises allocated channels; honest pipeline does not" $
         isNothing serialResult && pipelinedResult == Just 3
 
   -------------------------------------------------------------------------
-  -- Agent as Shard: pure Moore citizen at K Ends (change of base).
+  -- Agent as Shard: pure Moore citizen at K Poles (change of base).
   -------------------------------------------------------------------------
   putStrLn "agent as shard"
   do
@@ -922,7 +923,7 @@ main = do
     assert "runAgentShard one ack" $
       map body outs == ["ack: hi"] && length (asState seat) == 1
 
-    -- same citizen as Ends (K State) — commit/emit only at the boundary
+    -- same citizen as Poles (K State) — commit/emit only at the boundary
     let sh :: Shard (State (AgentSeat [Post Text] Text)) [Post Text] [Post Text]
         sh = agentShard get put ack
         (outs2, seat2) =
@@ -970,7 +971,7 @@ main = do
         liftAgent sys =
           system $ \((tag, hist), d) ->
             let inp = monoDir d
-                (outs, next) = runSystem sys hist
+                (outs, next) = System.runSystemMono sys hist
              in ((tag, next inp), (outs, ()))
         calcOnly :: Agent (->) [Post Text] (Post Text) [Post Text]
         calcOnly = tape calc
@@ -1064,7 +1065,7 @@ main = do
         [p] -> to p == ["calc"] && body p == "1 2 3"
         _ -> False
 
-    -- example: Port (Ends Post Post) — one token in, tool-call token out
+    -- example: Port (Poles Post Post) — one token in, tool-call token out
     let sh :: Shard (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) [Post Text] [Post Text]
         sh =
           agentShard
@@ -1723,7 +1724,7 @@ main = do
         selfEcho = agentM $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
-        drainEnd :: Ends (K STM) a a -> STM [a]
+        drainEnd :: Poles (K STM) a a -> STM [a]
         drainEnd ends = go []
           where
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
@@ -1737,17 +1738,17 @@ main = do
         quiesce frame = fix $ \go -> (frame C..> go) `orElseA` C.id
 
         -- \| Spike A: one token per frame, no do/bind in the frame.
-        frameToken :: AgentS s a -> Ends (K STM) a a -> Ends (K STM) a a -> K STM s s
+        frameToken :: AgentS s a -> Poles (K STM) a a -> Poles (K STM) a a -> K STM s s
         frameToken agent inbox outbox =
           K (\s -> (s,) <$> readEndSTM inbox)
-            C..> K (uncurry (stepS agent))
+            C..> K (Prelude.uncurry (stepS agent))
             C..> K (\(s', outs) -> s' <$ traverse_ (writeEndSTM outbox) outs)
 
         -- \| Spike B: one bundle per frame over a bundle wire.
-        frameBundle :: AgentS s a -> Ends (K STM) [a] [a] -> Ends (K STM) [a] [a] -> K STM s s
+        frameBundle :: AgentS s a -> Poles (K STM) [a] [a] -> Poles (K STM) [a] [a] -> K STM s s
         frameBundle agent inbox outbox =
           K (\s -> (s,) <$> readEndSTM inbox)
-            C..> K (uncurry (stepsS agent))
+            C..> K (Prelude.uncurry (stepsS agent))
             C..> K (\(s', outs) -> s' <$ unless (null outs) (writeEndSTM outbox outs))
 
     -- Spike A: composed token frame
@@ -1800,7 +1801,7 @@ main = do
         selfEcho = agentM $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
-        drainEnd :: Ends (K STM) a a -> STM [a]
+        drainEnd :: Poles (K STM) a a -> STM [a]
         drainEnd ends = go []
           where
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
@@ -1880,7 +1881,7 @@ main = do
     accSpin <- atomically $ runK (spinMark isHaltMark step endsSpin) []
     endsLoop <- atomically $ openChannelSTM (Linear :: ChannelPolicy (Post Text))
     atomically $ writeAll endsLoop
-    accLoop <- atomically $ runK (run (markLoop isHaltMark step endsLoop)) []
+    accLoop <- atomically $ runK (eval (markLoop isHaltMark step endsLoop)) []
     assert "spinMark accumulated the three normal posts" $
       length accSpin == 3
     assert "spinMark consumed the halt mark as the halt token" $
@@ -1907,12 +1908,12 @@ main = do
           writeEndSTM ends normal2
           writeEndSTM ends halt
           writeEndSTM ends normal3
-    linearEnds <- atomically $ openChannelSTM (Linear :: ChannelPolicy (Post Text))
-    swapQEnds <- atomically $ openChannelSTM (SwapOne :: ChannelPolicy (Post Text))
-    atomically $ writeAll linearEnds
-    atomically $ writeAll swapQEnds
-    linearTokens <- atomically $ replicateM 4 (readEndSTM linearEnds)
-    swapQToken <- atomically $ readEndSTM swapQEnds
+    linearPoles <- atomically $ openChannelSTM (Linear :: ChannelPolicy (Post Text))
+    swapQPoles <- atomically $ openChannelSTM (SwapOne :: ChannelPolicy (Post Text))
+    atomically $ writeAll linearPoles
+    atomically $ writeAll swapQPoles
+    linearTokens <- atomically $ replicateM 4 (readEndSTM linearPoles)
+    swapQToken <- atomically $ readEndSTM swapQPoles
     assert "linear channel preserves the halt mark in order" $
       map body linearTokens == ["one", "two", "🟢 landed", "three"]
     assert "SwapQ channel loses the halt mark" $
@@ -1927,13 +1928,13 @@ main = do
         two = mkPost "human" ["self"] "two"
         three = mkPost "human" ["self"] "three"
         four = mkPost "human" ["self"] "four"
-    defaultEnds <- atomically openLinearChannelSTM
+    defaultPoles <- atomically openLinearChannelSTM
     atomically $ do
-      writeEndSTM defaultEnds one
-      writeEndSTM defaultEnds two
-      writeEndSTM defaultEnds three
-      writeEndSTM defaultEnds four
-    tokens <- atomically $ replicateM 4 (readEndSTM defaultEnds)
+      writeEndSTM defaultPoles one
+      writeEndSTM defaultPoles two
+      writeEndSTM defaultPoles three
+      writeEndSTM defaultPoles four
+    tokens <- atomically $ replicateM 4 (readEndSTM defaultPoles)
     assert "openLinearChannelSTM preserves four sequential writes in order" $
       map body tokens == ["one", "two", "three", "four"]
 
@@ -1950,17 +1951,17 @@ main = do
     let one = mkPost "human" ["self"] "one"
         two = mkPost "human" ["self"] "two"
         halt = mkPost "human" ["self"] "🟢 landed"
-    haltEnds <- atomically openHaltChannel
+    haltPoles <- atomically openHaltChannel
     atomically $ do
-      writeHaltChannel haltEnds one
-      writeHaltChannel haltEnds two
-      writeHaltChannel haltEnds halt
-    tokens <- atomically $ replicateM 3 (readHaltChannel haltEnds)
+      writeHaltChannel haltPoles one
+      writeHaltChannel haltPoles two
+      writeHaltChannel haltPoles halt
+    tokens <- atomically $ replicateM 3 (readHaltChannel haltPoles)
     assert "HaltChannel (Linear) preserves halt mark in order" $
       map body tokens == ["one", "two", "🟢 landed"]
   -- The following would not compile:
-  -- badEnds <- atomically openHaltChannel
-  -- let bad = HaltChannel @'SwapOne badEnds
+  -- badPoles <- atomically openHaltChannel
+  -- let bad = HaltChannel @'SwapOne badPoles
 
   -------------------------------------------------------------------------
   -- Content-decided turn correlation (Circuit.Agent.Turn)
@@ -1975,23 +1976,23 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let Ends _ outU = open :: Ends (K IO) () ()
-        Ends inU _ = open :: Ends (K IO) () ()
-        runnerEnds :: Ends (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
-        runnerEnds = endsK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-        processEnds :: Ends (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
-        processEnds = endsK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
+    let Poles _ outU = open :: Poles (K IO) () ()
+        Poles inU _ = open :: Poles (K IO) () ()
+        runnerPoles :: Poles (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
+        processPoles :: Poles (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         -- Responder: read one command and reply with the command id in thread.
         responder = do
-          cmd <- runK (emit (companion processEnds) inU) ()
+          cmd <- runK (emit (companion processPoles) inU) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runK (commit (conjoint processEnds) outU) resp
-    turnLoop <- TurnPort.turn runnerEnds
+          runK (commit (conjoint processPoles) outU) resp
+    turnLoop <- TurnPort.turn runnerPoles
     -- Run the responder in parallel with the turn, but wait for the turn
     -- result before cancelling the responder.  A raw race cancels the loser
     -- as soon as the responder writes, so the turn might not finish reading.
     responderA <- async responder
-    result <- runK (run turnLoop) "hello"
+    result <- runK (eval turnLoop) "hello"
     cancel responderA
     assert "turn correlates response by thread content" $
       result == "ack: hello"
@@ -1999,19 +2000,19 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let Ends _ outU = open :: Ends (K IO) () ()
-        Ends inU _ = open :: Ends (K IO) () ()
-        runnerEnds :: Ends (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
-        runnerEnds = endsK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-        processEnds :: Ends (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
-        processEnds = endsK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
+    let Poles _ outU = open :: Poles (K IO) () ()
+        Poles inU _ = open :: Poles (K IO) () ()
+        runnerPoles :: Poles (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
+        processPoles :: Poles (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         responder = do
-          cmd <- runK (emit (companion processEnds) inU) ()
+          cmd <- runK (emit (companion processPoles) inU) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runK (commit (conjoint processEnds) outU) resp
-    turnLoop <- TurnPort.turnTimeout 100000 runnerEnds
+          runK (commit (conjoint processPoles) outU) resp
+    turnLoop <- TurnPort.turnTimeout 100000 runnerPoles
     responderA <- async responder
-    result <- runK (run turnLoop) "hello"
+    result <- runK (eval turnLoop) "hello"
     cancel responderA
     assert "turnTimeout correlates response by thread content" $
       result == Just "ack: hello"
@@ -2019,10 +2020,10 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let runnerEnds :: Ends (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
-        runnerEnds = endsK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-    turnLoop <- TurnPort.turnTimeout 10000 runnerEnds
-    result <- runK (run turnLoop) "hello"
+    let runnerPoles :: Poles (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
+    turnLoop <- TurnPort.turnTimeout 10000 runnerPoles
+    result <- runK (eval turnLoop) "hello"
     assert "turnTimeout returns Nothing on expiry" $
       isNothing result
 

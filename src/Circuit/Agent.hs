@@ -173,9 +173,9 @@ module Circuit.Agent
     raceA,
 
     -- * Re-exports for end construction
-    Ends (..),
+    Poles (..),
     close,
-    endsK,
+    polesK,
     prefixIn,
     Queue (..),
     ChannelPolicy (..),
@@ -201,27 +201,15 @@ module Circuit.Agent
   )
 where
 
-import Circuit
-  ( Ends (..),
-    close,
-    commit,
-    composeEnds,
-    dimapEnds,
-    emit,
-    endsK,
-    lmapEnds,
-    prefixIn,
-    rmapEnds,
-    trace,
-    (>:>),
-  )
+import Circuit hiding (eval)
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
-import Circuit.ChannelPoly (after)
-import Circuit.ChannelPoly qualified as ChannelPoly
-import Circuit.Layer (run)
-import Circuit.Loop (Loop (..))
+import Circuit.Poles (compose, dimap, lmap, rmap)
+import Circuit.System (after, runSystemMono)
+import Circuit.System qualified as System
 import Circuit.Poly (Eval (..), Mono, System, fromEvalSystem, monoDir, monoIn, runSystem, system)
+import Circuit.Syntax (eval)
+import Circuit.Trace (Trace (..), base, yank)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
 import Control.Concurrent.STM (STM, atomically, orElse)
@@ -239,7 +227,7 @@ import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
--- >>> import Circuit.ChannelPoly (iterateSystem)
+-- >>> import Circuit.System (iterateSystem)
 
 -- | Agent name on the shared log.
 type Name = Text
@@ -419,18 +407,18 @@ type Agent arr s a b = System arr s (Mono a b)
 -- @
 --
 -- Emit is an onslaught of posts (empty = quiet \/ done for that poll).
-type Shard m a b = Ends (K m) a b
+type Shard m a b = Poles (K m) a b
 
 -- | Same ends shape as 'Shard' — dual seat on the log (journal 013).
 type LogEnds m a b = Shard m a b
 
 -- | Build a 'Shard' from monadic commit and emit actions.
 shard :: (Monad m) => (a -> m ()) -> m a -> Shard m a a
-shard = endsK
+shard = polesK
 
 -- | Build log ends (same as 'shard'; dual seat).
 logEnds :: (Monad m) => (a -> m ()) -> m a -> LogEnds m a a
-logEnds = endsK
+logEnds = polesK
 
 -- | Born empty, conses each received input onto its history.
 --
@@ -698,7 +686,7 @@ loopWithSubs roster states0 log0 = trace body ()
             else Right bundle'
     fst3 (x, _, _) = x
 
--- | The same meeting as a 'Loop' value: 'Knot' body over the 'Either'
+-- | The same meeting as a 'Trace' value: 'yank' body over the 'Either'
 -- tensor, quiescence returned as a 'Right' payload.
 --
 -- Backwards-compatible wrapper; for explicit subscriptions use 'meetingLoopSubs'.
@@ -706,7 +694,7 @@ meetingLoop ::
   forall a s f.
   (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
   [(Name, Agent (->) s (Post a) [Post a])] ->
-  Loop Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
+  Trace Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
 meetingLoop roster = meetingLoopSubs [(n, [n], a) | (n, a) <- roster]
 
 -- | Multi-seat-card variant of 'meetingLoop'.
@@ -714,8 +702,8 @@ meetingLoopSubs ::
   forall a s f.
   (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
   [RosterEntry s a] ->
-  Loop Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
-meetingLoopSubs roster = Knot body
+  Trace Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
+meetingLoopSubs roster = yank (base body)
   where
     body (Right bundle@(states, _, _)) =
       if any (hasPending @a . snd) states
@@ -859,8 +847,8 @@ loopHeteroSubs roster log0 =
 -- 'iterateSystem' timing).
 run1 :: Agent (->) s i o -> s -> i -> (o, s)
 run1 sys s i =
-  let s' = snd (ChannelPoly.runSystem sys s) i
-      (o, _) = ChannelPoly.runSystem sys s'
+  let s' = snd (System.runSystemMono sys s) i
+      (o, _) = System.runSystemMono sys s'
    in (o, s')
 
 -- | Lift a pure agent into the 'K' arrow of any functor.
@@ -958,22 +946,22 @@ stepsS sys = go
 runAgentS :: AgentS s a -> s -> [a] -> IO ([a], s)
 runAgentS sys s0 ins = (\(s, os) -> (os, s)) <$> atomically (stepsS sys s0 ins)
 
--- | Unit ends for lifting single-token reads/writes out of an 'Ends' value.
-unitEndsSTM :: Ends (K STM) () ()
-unitEndsSTM = endsK (const (pure ())) (pure ())
+-- | Unit poles for lifting single-token reads/writes out of a 'Poles' value.
+unitEndsSTM :: Poles (K STM) () ()
+unitEndsSTM = polesK (const (pure ())) (pure ())
 
--- | Read one token from an STM end.
-readEndSTM :: Ends (K STM) a a -> STM a
+-- | Read one token from an STM pole.
+readEndSTM :: Poles (K STM) a a -> STM a
 readEndSTM ends = runK (emit (companion ends) (conjoint unitEndsSTM)) ()
 
--- | Write one token to an STM end.
-writeEndSTM :: Ends (K STM) a a -> a -> STM ()
+-- | Write one token to an STM pole.
+writeEndSTM :: Poles (K STM) a a -> a -> STM ()
 writeEndSTM ends = runK (commit (conjoint ends) (companion unitEndsSTM))
 
 -- | Wire an STM agent between an inbox and an outbox, running until
 -- quiescence.  Quiescence is detected via 'orElse': if the inbox is empty
 -- (retry), the loop returns the current state.
-agentLoopS :: AgentS s a -> s -> Ends (K STM) a a -> Ends (K STM) a a -> STM s
+agentLoopS :: AgentS s a -> s -> Poles (K STM) a a -> Poles (K STM) a a -> STM s
 agentLoopS agent s0 inbox outbox = go s0
   where
     go s =
@@ -986,15 +974,15 @@ agentLoopS agent s0 inbox outbox = go s0
         `orElse` pure s
 
 -- | Self-loop: the agent reads from and writes to the same STM end.
-selfLoopS :: AgentS s a -> s -> Ends (K STM) a a -> STM s
+selfLoopS :: AgentS s a -> s -> Poles (K STM) a a -> STM s
 selfLoopS agent s0 ends = agentLoopS agent s0 ends ends
 
 -- | One frame of the bundle self-loop, expressed in the Either-trace halt
 -- alphabet: 'Left' = continue, 'Right' = quiesce and return this state.
 selfLoopFrame ::
   AgentS s a ->
-  Ends (K STM) [a] [a] ->
-  Ends (K STM) [a] [a] ->
+  Poles (K STM) [a] [a] ->
+  Poles (K STM) [a] [a] ->
   K STM (Either s s) (Either s s)
 selfLoopFrame agent inbox outbox = K $ \case
   Right s -> step s
@@ -1013,21 +1001,21 @@ selfLoopFrame agent inbox outbox = K $ \case
               pure (Left s')
 
 -- | Wire an STM agent between an inbox and an outbox, running until
--- quiescence, expressed as a 'Loop Either' value.
+-- quiescence, expressed as a 'Trace Either' value.
 agentLoopL ::
   AgentS s a ->
-  Ends (K STM) [a] [a] ->
-  Ends (K STM) [a] [a] ->
-  Loop Either (K STM) s s
-agentLoopL agent inbox outbox = trace (Lift (selfLoopFrame agent inbox outbox))
+  Poles (K STM) [a] [a] ->
+  Poles (K STM) [a] [a] ->
+  Trace Either (K STM) s s
+agentLoopL agent inbox outbox = yank (base (selfLoopFrame agent inbox outbox))
 
--- | Self-loop as a 'Loop Either' citizen.
+-- | Self-loop as a 'Trace Either' citizen.
 selfLoopL ::
   AgentS s a ->
   s ->
-  Ends (K STM) [a] [a] ->
+  Poles (K STM) [a] [a] ->
   STM s
-selfLoopL agent s0 ends = runK (run (agentLoopL agent ends ends)) s0
+selfLoopL agent s0 ends = runK (eval (agentLoopL agent ends ends)) s0
 
 -- | Agent behaviour: a pure function from an input stream to an output stream.
 --
@@ -1170,7 +1158,7 @@ runAgentShard sys seat ins =
 -- A /tool call/ from an agent is just a 'Post': the 'to' list names the
 -- tool, 'body' carries the arguments. No extra type — emit that 'Post' on a
 -- 'Port' (or post it on the log for the tool agent to 'watch').
-type Port m a = Ends (K m) (Post a) (Post a)
+type Port m a = Poles (K m) (Post a) (Post a)
 
 -- 'Snoc' is re-exported from 'Circuit.Stream' (construction dual of 'Uncons').
 
@@ -1189,7 +1177,7 @@ batchEnds ::
   (f -> m ()) ->
   Shard m s f
 batchEnds getBuf putBuf =
-  endsK
+  polesK
     ( \x -> do
         xs <- getBuf
         putBuf (snoc xs x)
@@ -1215,7 +1203,7 @@ unbatchEnds ::
   (f -> m ()) ->
   Shard m f s
 unbatchEnds getBuf putBuf =
-  endsK
+  polesK
     ( \ys -> do
         xs <- getBuf
         putBuf (xs <> ys)
@@ -1264,7 +1252,7 @@ portShard getIn putIn getOut putOut sh =
 -- session assembly: @prefixShard session@ changes the payload that the
 -- shard posts.
 prefixShard :: (Monad m) => (a' -> a) -> Shard m a b -> Shard m a' b
-prefixShard f = lmapEnds (K $ pure . f)
+prefixShard f = lmap (K $ pure . f)
 
 -- | Adapt a shard on the emit side (covariant).
 --
@@ -1272,17 +1260,17 @@ prefixShard f = lmapEnds (K $ pure . f)
 -- transport envelope: @suffixShard (map addHeader)@ decorates every
 -- emitted post.
 suffixShard :: (Monad m) => (b -> b') -> Shard m a b -> Shard m a b'
-suffixShard g = rmapEnds (K $ pure . g)
+suffixShard g = rmap (K $ pure . g)
 
 -- | Adapt both sides of a shard at once.
 --
 -- @codecShard f g = prefixShard f . suffixShard g@.
 codecShard :: (Monad m) => (a' -> a) -> (b -> b') -> Shard m a b -> Shard m a' b'
-codecShard f g = dimapEnds (K $ pure . f) (K $ pure . g)
+codecShard f g = dimap (K $ pure . f) (K $ pure . g)
 
 -- | Sequential composition of shards.
 --
 -- The output of the first shard feeds the input of the second.  This is
 -- the same shape as connecting two effectful agents in series.
 composeShard :: forall m a b c. (Monad m) => Shard m a b -> Shard m b c -> Shard m a c
-composeShard = composeEnds @(K m) @a @b @c @()
+composeShard = compose @(K m) @a @b @c @()

@@ -2,10 +2,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Process ports: stdin / stdout / stderr as free dual ends.
+-- | Process ports: stdin / stdout / stderr as free dual poles.
 --
 -- A 'StdPorts' handle is a persistent child process viewed through three
--- independent 'Circuit.Ends' seats plus a close action.  Pipes all the way
+-- independent 'Circuit.Poles' seats plus a close action.  Pipes all the way
 -- down: no FIFO, no log files, no byte-offset polling.
 --
 -- Internal I/O is 'ByteString'.  Constructors take encode/decode adapters:
@@ -73,9 +73,9 @@ where
 import Circuit.Agent (Agent, run1)
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
-import Circuit.ChannelPoly (iterateSystem, systemAsProcess)
-import Circuit.Ends (Ends (..), In (..), Out (..), commit, emit, open)
-import Circuit.Loop (Loop (..))
+import Circuit.System (iterateSystem, systemAsProcess)
+import Circuit.Poles (HasDual (..), Poles (..), In (..), Out (..), commit, emit, open)
+import Circuit.Trace (Trace, base, yank)
 import Circuit.Poly (Eval (..), fromEvalSystem)
 import Circuit.Process (Process)
 import Circuit.Tensor (Tensor (..))
@@ -102,8 +102,8 @@ import Prelude
 
 -- $setup
 --
--- >>> import Circuit.ChannelPoly (iterateSystem)
--- >>> import Circuit.Ends (Ends (..), HasDual (..), commit, emit, open)
+-- >>> import Circuit.System (iterateSystem)
+-- >>> import Circuit.Poles (Poles (..), HasDual (..), commit, emit, open)
 -- >>> import Circuit.Category (K (..))
 -- >>> import Data.Text.Encoding (decodeUtf8)
 
@@ -204,7 +204,7 @@ data StdPorts a b c = StdPorts
     stdClose :: IO ()
   }
 
--- | Spawn a process and open its ports as a 'Loop' 'Either'.
+-- | Spawn a process and open its ports as a 'Trace' 'Either'.
 --
 -- @encode@ converts a token to bytes written to stdin (+ newline).
 -- @decode@ converts a framed payload's bytes back to a token.
@@ -215,8 +215,8 @@ openStdPorts ::
   (a -> BS.ByteString) ->
   (BS.ByteString -> a) ->
   ProcConfig ->
-  Loop Either (K IO) () (StdPorts a a a)
-openStdPorts encode decode cfg = Knot (K step)
+  Trace Either (K IO) () (StdPorts a a a)
+openStdPorts encode decode cfg = yank (base (K step))
   where
     step (Right ()) = do
       let procSpec =
@@ -258,11 +258,11 @@ openStdPorts encode decode cfg = Knot (K step)
     step (Left ports) =
       pure (Right ports)
 
--- | Commit one token to a queue end, plugged with unit ends.
-sink :: Ends (K IO) a a -> a -> IO ()
+-- | Commit one token to a queue end, plugged with unit poles.
+sink :: Poles (K IO) a a -> a -> IO ()
 sink q = runK (commit (conjoint q) outU)
   where
-    Ends _ outU = open :: Ends (K IO) () ()
+    Poles _ outU = open :: Poles (K IO) () ()
 
 -- | The pumper as an agent: a Moore machine from maybe-chunks to frame
 -- lists.  The carrier is @(buffer, pending)@ — the unexplained suffix and
@@ -321,29 +321,29 @@ pumpFrames marks decode h snk = go (BS.empty, [])
 -- Ends / seat view
 -- ---------------------------------------------------------------------------
 
--- | Client view of a process: two 'Ends' sharing stdin, plus resource close.
+-- | Client view of a process: two 'Poles' sharing stdin, plus resource close.
 data ProcEnds a b c = ProcEnds
-  { procStdio :: Ends (K IO) a b,
-    procStderr :: Ends (K IO) a c,
+  { procStdio :: Poles (K IO) a b,
+    procStderr :: Poles (K IO) a c,
     procClose :: IO ()
   }
 
--- | Stdin commit + stdout emit as matched 'Ends'.
-stdioEnds :: StdPorts a b c -> Ends (K IO) a b
-stdioEnds pp = Ends (stdIn pp) (stdOut pp)
+-- | Stdin commit + stdout emit as matched 'Poles'.
+stdioEnds :: StdPorts a b c -> Poles (K IO) a b
+stdioEnds pp = Poles (stdIn pp) (stdOut pp)
 
--- | Stdin commit + stderr emit as matched 'Ends'.
-stderrEnds :: StdPorts a b c -> Ends (K IO) a c
-stderrEnds pp = Ends (stdIn pp) (stdErr pp)
+-- | Stdin commit + stderr emit as matched 'Poles'.
+stderrEnds :: StdPorts a b c -> Poles (K IO) a c
+stderrEnds pp = Poles (stdIn pp) (stdErr pp)
 
--- | Open a process and return the dual-seat client view as a 'Loop' 'Either'.
+-- | Open a process and return the dual-seat client view as a 'Trace' 'Either'.
 openProc ::
   (a -> BS.ByteString) ->
   (BS.ByteString -> a) ->
   ProcConfig ->
-  Loop Either (K IO) () (ProcEnds a a a)
+  Trace Either (K IO) () (ProcEnds a a a)
 openProc encode decode cfg =
-  openStdPorts encode decode cfg .> Lift portsToProcEnds
+  openStdPorts encode decode cfg .> base portsToProcEnds
   where
     portsToProcEnds = K $ \pp ->
       pure
@@ -354,15 +354,15 @@ openProc encode decode cfg =
           }
 
 -- | The wire view of 'StdPorts': one nested 'par' morphism.
-portsEnds :: StdPorts a b c -> Loop (,) (K IO) (a, ((), ())) ((), (b, c))
+portsEnds :: StdPorts a b c -> Trace (,) (K IO) (a, ((), ())) ((), (b, c))
 portsEnds pp = par commitM (par outM errM)
   where
-    commitM = Lift (commit (stdIn pp) outUIn)
-    outM = Lift (emit (stdOut pp) inUOut)
-    errM = Lift (emit (stdErr pp) inUErr)
-    Ends _inUIn outUIn = open
-    Ends inUOut _ = open
-    Ends inUErr _ = open
+    commitM = base (commit (stdIn pp) outUIn)
+    outM = base (emit (stdOut pp) inUOut)
+    errM = base (emit (stdErr pp) inUErr)
+    Poles _inUIn outUIn = open
+    Poles inUOut _ = open
+    Poles inUErr _ = open
 
 -- ---------------------------------------------------------------------------
 -- In-memory test harness
@@ -372,8 +372,8 @@ portsEnds pp = par commitM (par outM errM)
 -- No process, no files.  For fast bus-connector testing.
 --
 -- >>> pp <- echo pure :: IO (StdPorts String String ())
--- >>> runK (commit (stdIn pp) (companion (open :: Ends (K IO) () ()))) "hi"
--- >>> runK (emit (stdOut pp) (conjoint (open :: Ends (K IO) () ()))) ()
+-- >>> runK (commit (stdIn pp) (companion (open :: Poles (K IO) () ()))) "hi"
+-- >>> runK (emit (stdOut pp) (conjoint (open :: Poles (K IO) () ()))) ()
 -- "hi"
 echo :: (a -> IO a) -> IO (StdPorts a a ())
 echo f = do

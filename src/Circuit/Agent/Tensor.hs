@@ -23,13 +23,13 @@ where
 import Circuit (Body (..), close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), PostId, mkPost, synthesis)
 import Circuit.Category (K (..))
-import Circuit.Ends (Ends, ends0)
+import Circuit.Poles (Poles, poles0)
 import Data.Text (Text)
 import Data.Text qualified as T
 
 -- | An effectful agent shard with a '[Post Text]' buffer threaded through the
 -- arrow.
-type AgentShard a b = Ends (Body (,) (K IO) [Post Text]) a b
+type AgentShard a b = Poles (Body (,) [Post Text] (K IO)) a b
 
 -- | Run a child shard in isolation on the given input, discarding its
 -- residual state.  Branches in await / race / fan-out have private scratch
@@ -37,29 +37,29 @@ type AgentShard a b = Ends (Body (,) (K IO) [Post Text]) a b
 runSubShard :: AgentShard [Post Text] [Post Text] -> [Post Text] -> IO [Post Text]
 runSubShard sh xs = do
   let thread = close (conjoint sh) (companion sh)
-  (_, ys) <- runK (runBody thread) ([], xs)
+  (_, ys) <- runK (morphism thread) ([], xs)
   pure ys
 
 -- | Close a same-type shard once, exposing both the output and the residual
 -- state.  Works for any state carrier @s@ and payload @a@.
-closeShardIO :: Ends (Body (,) (K IO) s) a a -> a -> s -> IO (a, s)
+closeShardIO :: Poles (Body (,) s (K IO)) a a -> a -> s -> IO (a, s)
 closeShardIO sh x s0 = do
   let thread = close (conjoint sh) (companion sh)
-  (s', y) <- runK (runBody thread) (s0, x)
+  (s', y) <- runK (morphism thread) (s0, x)
   pure (y, s')
 
 -- | Helper: store the input batch as the buffer.
-writeBatch :: Body (,) (K IO) [Post Text] [Post Text] ()
+writeBatch :: Body (,) [Post Text] (K IO) [Post Text] ()
 writeBatch = Body $ K $ \(_, xs) -> pure (xs, ())
 
 -- | Helper: return the buffer as output and clear it.
-readBatch :: Body (,) (K IO) [Post Text] () [Post Text]
+readBatch :: Body (,) [Post Text] (K IO) () [Post Text]
 readBatch = Body $ K $ \(s, ()) -> pure ([], s)
 
 -- | Build an agent shard that stores the input batch, then computes outputs
 -- from that batch in 'IO'.
 ioShard :: ([Post Text] -> IO [Post Text]) -> AgentShard [Post Text] [Post Text]
-ioShard emit = ends0 writeBatch read'
+ioShard emit = poles0 writeBatch read'
   where
     read' = Body $ K $ \(s, ()) -> do
       outs <- emit s
@@ -75,7 +75,7 @@ awaitShard ::
   AgentShard [Post Text] [Post Text] ->
   AgentShard [Post Text] [Post Text] ->
   AgentShard [Post Text] [Post Text]
-awaitShard sh1 sh2 = ends0 writeBatch read'
+awaitShard sh1 sh2 = poles0 writeBatch read'
   where
     read' = Body $ K $ \(s, ()) -> do
       o1 <- runSubShard sh1 s
@@ -87,7 +87,7 @@ raceShard ::
   AgentShard [Post Text] [Post Text] ->
   AgentShard [Post Text] [Post Text] ->
   AgentShard [Post Text] [Post Text]
-raceShard sh1 sh2 = ends0 writeBatch read'
+raceShard sh1 sh2 = poles0 writeBatch read'
   where
     read' = Body $ K $ \(s, ()) -> do
       o1 <- runSubShard sh1 s
@@ -99,7 +99,7 @@ raceShard sh1 sh2 = ends0 writeBatch read'
 fanOutShard ::
   [AgentShard [Post Text] [Post Text]] ->
   AgentShard [Post Text] [Post Text]
-fanOutShard shs = ends0 writeBatch read'
+fanOutShard shs = poles0 writeBatch read'
   where
     read' = Body $ K $ \(s, ()) -> do
       os <- traverse (`runSubShard` s) shs
@@ -111,7 +111,7 @@ fanInShard ::
   ([[Post Text]] -> [Post Text]) ->
   [AgentShard [Post Text] [Post Text]] ->
   AgentShard [Post Text] [Post Text]
-fanInShard summary shs = ends0 writeBatch read'
+fanInShard summary shs = poles0 writeBatch read'
   where
     read' = Body $ K $ \(s, ()) -> do
       os <- traverse (`runSubShard` s) shs

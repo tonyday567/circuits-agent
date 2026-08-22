@@ -22,9 +22,9 @@ module Circuit.Agent.Turn
   ( -- * Turn envelope
     TurnToken (..),
 
-    -- * Turn mediator
+    -- * Turn process
     TurnState (..),
-    turnMediator,
+    turnProcess,
 
     -- * Runner circuits
     turn,
@@ -32,11 +32,11 @@ module Circuit.Agent.Turn
   )
 where
 
-import Circuit (Loop (..))
+import Circuit (Trace, base)
 import Circuit.Agent (PostId)
 import Circuit.Category (K (..))
-import Circuit.Ends (Ends (..), commit, emit, open)
-import Circuit.Mediate (Mediator (..))
+import Circuit.Poles (HasDual (..), Poles (..), commit, emit, open)
+import Circuit.Process (Process, mealy)
 import Data.IORef
 import Data.Text (Text)
 import System.Timeout (timeout)
@@ -77,36 +77,31 @@ matchResponse st@TurnState {pending = Just (cmdId, cmd)} resp
   | turnThread resp == [cmdId] = (st {pending = Nothing}, Just (cmd, resp))
   | otherwise = (st, Nothing)
 
--- | Mediator that correlates responses with the pending command by thread.
+-- | Process that correlates responses with the pending command by thread.
 --
 -- * A token with empty thread is treated as a command: it receives the next
 --   id and is stored as the pending command.
 -- * A token with non-empty thread is treated as a response: it matches when
 --   its thread equals the pending command's id, emitting the pair.
-turnMediator :: Mediator (TurnState a) (TurnToken a) (TurnToken a, TurnToken a)
-turnMediator =
-  Mediator
-    { medInit = emptyTurnState,
-      medStep = \st tok ->
-        if null (turnThread tok)
-          then (fst (injectCommand st (turnBody tok)), Nothing)
-          else matchResponse st tok,
-      medOwed = \st -> case pending st of Nothing -> False; Just _ -> True,
-      medDraw = \_ _ -> Nothing
-    }
+turnProcess :: Process (TurnToken a) (Maybe (TurnToken a, TurnToken a))
+turnProcess =
+  mealy emptyTurnState $ \st tok ->
+    if null (turnThread tok)
+      then (fst (injectCommand st (turnBody tok)), Nothing)
+      else matchResponse st tok
 
--- | Read the unit ends used to plug the unused side of a commit or emit.
-unitEnds :: Ends (K IO) () ()
+-- | Read the unit poles used to plug the unused side of a commit or emit.
+unitEnds :: Poles (K IO) () ()
 unitEnds = open
 
 -- | Run one turn: commit a body, then block until a matching response
 -- arrives.  The correlation is by 'thread', not by position.
 turn ::
-  Ends (K IO) (TurnToken Text) (TurnToken Text) ->
-  IO (Loop (,) (K IO) Text Text)
+  Poles (K IO) (TurnToken Text) (TurnToken Text) ->
+  IO (Trace (,) (K IO) Text Text)
 turn e = do
   ref <- newIORef emptyTurnState
-  pure . Lift . K $ \body -> do
+  pure . base . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
     runK (commit (conjoint e) outU) cmd
     let loop = do
@@ -117,18 +112,18 @@ turn e = do
             Nothing -> loop
     loop
   where
-    Ends _ outU = unitEnds
-    Ends inU _ = unitEnds
+    Poles _ outU = unitEnds
+    Poles inU _ = unitEnds
 
 -- | 'turn' under a deadline (microseconds).  'Nothing' on expiry; the
 -- unarrived response is not lost — the next emit still receives it.
 turnTimeout ::
   Int ->
-  Ends (K IO) (TurnToken Text) (TurnToken Text) ->
-  IO (Loop (,) (K IO) Text (Maybe Text))
+  Poles (K IO) (TurnToken Text) (TurnToken Text) ->
+  IO (Trace (,) (K IO) Text (Maybe Text))
 turnTimeout us e = do
   ref <- newIORef emptyTurnState
-  pure . Lift . K $ \body -> do
+  pure . base . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
     runK (commit (conjoint e) outU) cmd
     timeout us $ do
@@ -140,5 +135,5 @@ turnTimeout us e = do
               Nothing -> loop
       loop
   where
-    Ends _ outU = unitEnds
-    Ends inU _ = unitEnds
+    Poles _ outU = unitEnds
+    Poles inU _ = unitEnds
