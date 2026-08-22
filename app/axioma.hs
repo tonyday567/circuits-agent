@@ -75,9 +75,9 @@ import Circuit.Ends (commit, emit, open, splay0)
 import Circuit.Layer (run)
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos, System, fromEvalSystem, monoDir, monoIn, system)
+import Circuit.Category (K (..))
 import Circuit.Stream (These (..), Uncons, uncons)
-import Control.Arrow (Kleisli (..), runKleisli)
-import Control.Category qualified as C
+import Circuit.Category qualified as C
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (async, cancel, race)
 import Control.Concurrent.STM
@@ -121,7 +121,7 @@ wipe f = do
 -- | Close a same-type agent shard once.
 closeShardIO :: AgentShard [Post Text] [Post Text] -> [Post Text] -> [Post Text] -> IO ([Post Text], [Post Text])
 closeShardIO sh x s0 = do
-  (s', outs) <- runKleisli (runBody (close (conjoint sh) (companion sh))) (s0, x)
+  (s', outs) <- runK (runBody (close (conjoint sh) (companion sh))) (s0, x)
   pure (outs, s')
 
 peek :: [Post Text] -> Post Text
@@ -871,14 +871,14 @@ main = do
         fixedShard :: Shard Identity [Post Text] [Post Text]
         fixedShard = endsK (\_ -> pure ()) (pure [p2])
         coded = codecShard (map (\p -> p {body = "in:" <> body p})) (map (\p -> p {body = body p <> ":out"})) fixedShard
-        out = runIdentity (runKleisli (close (conjoint coded) (companion coded)) [p1])
+        out = runIdentity (runK (close (conjoint coded) (companion coded)) [p1])
     assert "codec transforms commit and emit" $
       map body out == ["ack:out"]
 
     let accumShard :: Shard (State [Post Text]) [Post Text] [Post Text]
         accumShard = endsK (\ps -> modify (ps ++)) get
         composed = composeShard accumShard (suffixShard (map (\p -> p {body = body p <> "!"})) accumShard)
-        (out2, st) = runState (runKleisli (close (conjoint composed) (companion composed)) [p1]) []
+        (out2, st) = runState (runK (close (conjoint composed) (companion composed)) [p1]) []
     assert "compose chains shards through the monad" $
       map body out2 == ["hi!", "hi!"] && length st == 2
 
@@ -895,22 +895,22 @@ main = do
       let e12 = composeShard e1 e2
           (e1Write, _) = splay0 e1
           (_, e12Read) = splay0 e12
-      runKleisli e1Write 1
-      runKleisli e1Write 2
-      serialResult <- timeout 100000 $ runKleisli e12Read ()
+      runK e1Write 1
+      runK e1Write 2
+      serialResult <- timeout 100000 $ runK e12Read ()
       e1' <- openIO Unbounded :: IO (Shard IO Int Int)
       (ePipe, closePipe) <- pipeEnds e1' pairSumEnd
       let (e1Write', _) = splay0 e1'
           (_, ePipeRead) = splay0 ePipe
-      runKleisli e1Write' 1
-      runKleisli e1Write' 2
-      pipelinedResult <- timeout 1000000 $ runKleisli ePipeRead ()
+      runK e1Write' 1
+      runK e1Write' 2
+      pipelinedResult <- timeout 1000000 $ runK ePipeRead ()
       closePipe
       assert "composeEnds serialises allocated channels; honest pipeline does not" $
         isNothing serialResult && pipelinedResult == Just 3
 
   -------------------------------------------------------------------------
-  -- Agent as Shard: pure Moore citizen at Kleisli Ends (change of base).
+  -- Agent as Shard: pure Moore citizen at K Ends (change of base).
   -------------------------------------------------------------------------
   putStrLn "agent as shard"
   do
@@ -922,12 +922,12 @@ main = do
     assert "runAgentShard one ack" $
       map body outs == ["ack: hi"] && length (asState seat) == 1
 
-    -- same citizen as Ends (Kleisli State) — commit/emit only at the boundary
+    -- same citizen as Ends (K State) — commit/emit only at the boundary
     let sh :: Shard (State (AgentSeat [Post Text] Text)) [Post Text] [Post Text]
         sh = agentShard get put ack
         (outs2, seat2) =
           runState
-            (runKleisli (close (conjoint sh) (companion sh)) [pIn])
+            (runK (close (conjoint sh) (companion sh)) [pIn])
             (AgentSeat [] [])
     assert "agentShard close matches runAgentShard" $
       outs2 == outs && asState seat2 == asState seat
@@ -1020,7 +1020,7 @@ main = do
             sh
         (pOut, (seat', inB, outB)) =
           runState
-            (runKleisli (close (conjoint port) (companion port)) pIn)
+            (runK (close (conjoint port) (companion port)) pIn)
             (AgentSeat [] [], [], [])
     assert "port close: one Post in, one Post out" $
       body pOut == "ack: hi"
@@ -1030,7 +1030,7 @@ main = do
     let pIn2 = mkPost "human" ["j"] "again"
         (pOut2, (seat2, _, _)) =
           runState
-            (runKleisli (close (conjoint port) (companion port)) pIn2)
+            (runK (close (conjoint port) (companion port)) pIn2)
             (seat', [], [])
     assert "port keeps agent carrier across token turns" $
       body pOut2 == "ack: again" && length (asState seat2) == 2
@@ -1081,7 +1081,7 @@ main = do
             sh
         (pOut, (seatPort, _, _)) =
           runState
-            (runKleisli (close (conjoint port) (companion port)) human)
+            (runK (close (conjoint port) (companion port)) human)
             (AgentSeat [] [], [], [])
     assert "port example: human Post in → tool-call Post out" $
       from pOut == "j" && to pOut == ["calc"] && body pOut == "1 2 3"
@@ -1547,10 +1547,10 @@ main = do
     assert "dormancy: all-retry raises BlockedIndefinitelyOnSTM" dormant
 
   -------------------------------------------------------------------------
-  -- Kleisli STM tensors
+  -- K STM tensors
   --
   -- The same product/coproduct tensors, now effectful: state lives in STM,
-  -- composition is Kleisli sequential, and the oracles mirror the pure
+  -- composition is K sequential, and the oracles mirror the pure
   -- seat-level ones.
   -------------------------------------------------------------------------
   putStrLn "S-agent tensors"
@@ -1634,8 +1634,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = system $ Kleisli $ \(_, _) -> pure ((), ([p], ()))
-        slowRight = system $ Kleisli $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
+        fastLeft = system $ K $ \(_, _) -> pure ((), ([p], ()))
+        slowRight = system $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft slowRight) ((), ()) seed
     assert "raceIO: fast left wins" $ outs == [p]
 
@@ -1643,8 +1643,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        slowLeft = system $ Kleisli $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
-        fastRight = system $ Kleisli $ \(_, _) -> pure ((), ([q], ()))
+        slowLeft = system $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
+        fastRight = system $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO slowLeft fastRight) ((), ()) seed
     assert "raceIO: fast right wins" $ outs == [q]
 
@@ -1652,8 +1652,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = system $ Kleisli $ \(_, _) -> pure ((), ([p], ()))
-        fastRight = system $ Kleisli $ \(_, _) -> pure ((), ([q], ()))
+        fastLeft = system $ K $ \(_, _) -> pure ((), ([p], ()))
+        fastRight = system $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft fastRight) ((), ()) seed
     assert "raceIO: both emit -> one of them" $ outs == [p] || outs == [q]
 
@@ -1708,7 +1708,7 @@ main = do
   -------------------------------------------------------------------------
   -- Spikes: re-spellings of the self-loop frame
   --
-  -- Spike A (composition): the frame as Kleisli composition; the loop is
+  -- Spike A (composition): the frame as K composition; the loop is
   -- 'fix' plus 'orElse'.  No do-notation or bind in the frame itself.
   --
   -- Spike B (bundles): the same composition, but the wire carries @[a]@;
@@ -1723,39 +1723,39 @@ main = do
         selfEcho = agentM $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
-        drainEnd :: Ends (Kleisli STM) a a -> STM [a]
+        drainEnd :: Ends (K STM) a a -> STM [a]
         drainEnd ends = go []
           where
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
 
-        -- \| orElse lifted to state-threading Kleisli arrows.
-        orElseA :: Kleisli STM s s -> Kleisli STM s s -> Kleisli STM s s
-        orElseA (Kleisli f) (Kleisli g) = Kleisli $ \s -> f s `orElse` g s
+        -- \| orElse lifted to state-threading K arrows.
+        orElseA :: K STM s s -> K STM s s -> K STM s s
+        orElseA (K f) (K g) = K $ \s -> f s `orElse` g s
 
         -- \| Run a frame until the read end retries (quiescence).
-        quiesce :: Kleisli STM s s -> Kleisli STM s s
-        quiesce frame = fix $ \go -> (frame C.>>> go) `orElseA` C.id
+        quiesce :: K STM s s -> K STM s s
+        quiesce frame = fix $ \go -> (frame C..> go) `orElseA` C.id
 
         -- \| Spike A: one token per frame, no do/bind in the frame.
-        frameToken :: AgentS s a -> Ends (Kleisli STM) a a -> Ends (Kleisli STM) a a -> Kleisli STM s s
+        frameToken :: AgentS s a -> Ends (K STM) a a -> Ends (K STM) a a -> K STM s s
         frameToken agent inbox outbox =
-          Kleisli (\s -> (s,) <$> readEndSTM inbox)
-            C.>>> Kleisli (uncurry (stepS agent))
-            C.>>> Kleisli (\(s', outs) -> s' <$ traverse_ (writeEndSTM outbox) outs)
+          K (\s -> (s,) <$> readEndSTM inbox)
+            C..> K (uncurry (stepS agent))
+            C..> K (\(s', outs) -> s' <$ traverse_ (writeEndSTM outbox) outs)
 
         -- \| Spike B: one bundle per frame over a bundle wire.
-        frameBundle :: AgentS s a -> Ends (Kleisli STM) [a] [a] -> Ends (Kleisli STM) [a] [a] -> Kleisli STM s s
+        frameBundle :: AgentS s a -> Ends (K STM) [a] [a] -> Ends (K STM) [a] [a] -> K STM s s
         frameBundle agent inbox outbox =
-          Kleisli (\s -> (s,) <$> readEndSTM inbox)
-            C.>>> Kleisli (uncurry (stepsS agent))
-            C.>>> Kleisli (\(s', outs) -> s' <$ unless (null outs) (writeEndSTM outbox outs))
+          K (\s -> (s,) <$> readEndSTM inbox)
+            C..> K (uncurry (stepsS agent))
+            C..> K (\(s', outs) -> s' <$ unless (null outs) (writeEndSTM outbox outs))
 
     -- Spike A: composed token frame
     (sTok, remTok) <- do
       ends <- atomically $ openSTM (Unbounded :: Queue (Post Text))
       atomically $ writeEndSTM ends seed
       atomically $ do
-        s' <- runKleisli (quiesce (frameToken selfEcho ends ends)) []
+        s' <- runK (quiesce (frameToken selfEcho ends ends)) []
         leftover <- drainEnd ends
         pure (s', leftover)
     assert "spike A (composed token frame) processed seed plus k echoes" $ length sTok == k + 1
@@ -1770,7 +1770,7 @@ main = do
       ends <- atomically $ openSTM (Unbounded :: Queue [Post Text])
       atomically $ writeEndSTM ends [seed]
       atomically $ do
-        s' <- runKleisli (quiesce (frameBundle selfEcho ends ends)) []
+        s' <- runK (quiesce (frameBundle selfEcho ends ends)) []
         leftover <- drainEnd ends
         pure (s', leftover)
     assert "spike B (bundle frame) processed seed plus k echoes" $ length sBun == k + 1
@@ -1800,7 +1800,7 @@ main = do
         selfEcho = agentM $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
-        drainEnd :: Ends (Kleisli STM) a a -> STM [a]
+        drainEnd :: Ends (K STM) a a -> STM [a]
         drainEnd ends = go []
           where
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
@@ -1877,10 +1877,10 @@ main = do
           writeEndSTM ends halt
     endsSpin <- atomically $ openChannelSTM (Linear :: ChannelPolicy (Post Text))
     atomically $ writeAll endsSpin
-    accSpin <- atomically $ runKleisli (spinMark isHaltMark step endsSpin) []
+    accSpin <- atomically $ runK (spinMark isHaltMark step endsSpin) []
     endsLoop <- atomically $ openChannelSTM (Linear :: ChannelPolicy (Post Text))
     atomically $ writeAll endsLoop
-    accLoop <- atomically $ runKleisli (run (markLoop isHaltMark step endsLoop)) []
+    accLoop <- atomically $ runK (run (markLoop isHaltMark step endsLoop)) []
     assert "spinMark accumulated the three normal posts" $
       length accSpin == 3
     assert "spinMark consumed the halt mark as the halt token" $
@@ -1975,23 +1975,23 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let Ends _ outU = open :: Ends (Kleisli IO) () ()
-        Ends inU _ = open :: Ends (Kleisli IO) () ()
-        runnerEnds :: Ends (Kleisli IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let Ends _ outU = open :: Ends (K IO) () ()
+        Ends inU _ = open :: Ends (K IO) () ()
+        runnerEnds :: Ends (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerEnds = endsK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-        processEnds :: Ends (Kleisli IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processEnds :: Ends (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         processEnds = endsK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         -- Responder: read one command and reply with the command id in thread.
         responder = do
-          cmd <- runKleisli (emit (companion processEnds) inU) ()
+          cmd <- runK (emit (companion processEnds) inU) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runKleisli (commit (conjoint processEnds) outU) resp
+          runK (commit (conjoint processEnds) outU) resp
     turnLoop <- TurnPort.turn runnerEnds
     -- Run the responder in parallel with the turn, but wait for the turn
     -- result before cancelling the responder.  A raw race cancels the loser
     -- as soon as the responder writes, so the turn might not finish reading.
     responderA <- async responder
-    result <- runKleisli (run turnLoop) "hello"
+    result <- runK (run turnLoop) "hello"
     cancel responderA
     assert "turn correlates response by thread content" $
       result == "ack: hello"
@@ -1999,19 +1999,19 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let Ends _ outU = open :: Ends (Kleisli IO) () ()
-        Ends inU _ = open :: Ends (Kleisli IO) () ()
-        runnerEnds :: Ends (Kleisli IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let Ends _ outU = open :: Ends (K IO) () ()
+        Ends inU _ = open :: Ends (K IO) () ()
+        runnerEnds :: Ends (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerEnds = endsK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-        processEnds :: Ends (Kleisli IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processEnds :: Ends (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         processEnds = endsK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         responder = do
-          cmd <- runKleisli (emit (companion processEnds) inU) ()
+          cmd <- runK (emit (companion processEnds) inU) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runKleisli (commit (conjoint processEnds) outU) resp
+          runK (commit (conjoint processEnds) outU) resp
     turnLoop <- TurnPort.turnTimeout 100000 runnerEnds
     responderA <- async responder
-    result <- runKleisli (run turnLoop) "hello"
+    result <- runK (run turnLoop) "hello"
     cancel responderA
     assert "turnTimeout correlates response by thread content" $
       result == Just "ack: hello"
@@ -2019,10 +2019,10 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let runnerEnds :: Ends (Kleisli IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let runnerEnds :: Ends (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerEnds = endsK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
     turnLoop <- TurnPort.turnTimeout 10000 runnerEnds
-    result <- runKleisli (run turnLoop) "hello"
+    result <- runK (run turnLoop) "hello"
     assert "turnTimeout returns Nothing on expiry" $
       isNothing result
 

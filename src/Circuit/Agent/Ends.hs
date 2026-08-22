@@ -42,9 +42,9 @@ module Circuit.Agent.Ends
   )
 where
 
+import Circuit.Category (K (..))
 import Circuit.Ends (Ends (..), commit, companion, conjoint, emit, endsK, open, splay0)
 import Control.Applicative
-import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM
 import Control.Monad (forever, void)
@@ -105,22 +105,22 @@ policyToQueue = \case
   NewestN n -> Newest n
 
 -- | Open a channel policy as IO @Ends@.
-openChannel :: ChannelPolicy a -> IO (Ends (Kleisli IO) a a)
+openChannel :: ChannelPolicy a -> IO (Ends (K IO) a a)
 openChannel = openIO . policyToQueue
 
 -- | Open a channel policy as STM @Ends@.
-openChannelSTM :: ChannelPolicy a -> STM (Ends (Kleisli STM) a a)
+openChannelSTM :: ChannelPolicy a -> STM (Ends (K STM) a a)
 openChannelSTM = openSTM . policyToQueue
 
 -- | Open a linear channel as IO @Ends@.
 --
 -- 'Linear' is the default policy: unbounded FIFO, empty residual, preserves
 -- every token in order.  This is the effectful face of 'Circuit.Mediate.linear'.
-openLinearChannel :: IO (Ends (Kleisli IO) a a)
+openLinearChannel :: IO (Ends (K IO) a a)
 openLinearChannel = openChannel Linear
 
 -- | Open a linear channel as STM @Ends@.
-openLinearChannelSTM :: STM (Ends (Kleisli STM) a a)
+openLinearChannelSTM :: STM (Ends (K STM) a a)
 openLinearChannelSTM = openChannelSTM Linear
 
 -- | Type-level witness that a channel policy is linear.
@@ -138,7 +138,7 @@ type family IsLinear (p :: ChannelPolicy a) :: Constraint where
 -- to typecheck.
 type HaltChannel :: ChannelPolicy a -> Type
 data HaltChannel p where
-  HaltChannel :: (IsLinear p) => Ends (Kleisli STM) a a -> HaltChannel (p :: ChannelPolicy a)
+  HaltChannel :: (IsLinear p) => Ends (K STM) a a -> HaltChannel (p :: ChannelPolicy a)
 
 -- | Open a halt-mark channel.  This is 'openLinearChannelSTM' with a
 -- type-level certificate.
@@ -147,18 +147,18 @@ openHaltChannel = HaltChannel <$> openLinearChannelSTM
 
 -- | Write a token to a halt-mark channel.
 writeHaltChannel :: forall a (p :: ChannelPolicy a). HaltChannel p -> a -> STM ()
-writeHaltChannel (HaltChannel ends) = runKleisli (commit (conjoint ends) haltOut)
+writeHaltChannel (HaltChannel ends) = runK (commit (conjoint ends) haltOut)
   where
-    haltOut = companion (unitEndsSTM :: Ends (Kleisli STM) () ())
+    haltOut = companion (unitEndsSTM :: Ends (K STM) () ())
 
 -- | Read a token from a halt-mark channel.
 readHaltChannel :: forall a (p :: ChannelPolicy a). HaltChannel p -> STM a
-readHaltChannel (HaltChannel ends) = runKleisli (emit (companion ends) haltIn) ()
+readHaltChannel (HaltChannel ends) = runK (emit (companion ends) haltIn) ()
   where
-    haltIn = conjoint (unitEndsSTM :: Ends (Kleisli STM) () ())
+    haltIn = conjoint (unitEndsSTM :: Ends (K STM) () ())
 
--- | Unit ends specialised to 'Kleisli STM'.
-unitEndsSTM :: Ends (Kleisli STM) () ()
+-- | Unit ends specialised to 'K STM'.
+unitEndsSTM :: Ends (K STM) () ()
 unitEndsSTM = endsK (const (pure ())) (pure ())
 
 -- | Internal STM primitive for a queue strategy.
@@ -193,7 +193,7 @@ endsSTM = \case
 -- Allocates STM primitives and returns a matched pair of ends sharing
 -- the same mutable channel.  Both ends live in 'STM', so you can compose
 -- operations across channels in a single 'atomically' block.
-openSTM :: Queue a -> STM (Ends (Kleisli STM) a a)
+openSTM :: Queue a -> STM (Ends (K STM) a a)
 openSTM q = do
   (write, read') <- endsSTM q
   pure (endsK write read')
@@ -204,10 +204,10 @@ openSTM q = do
 -- 'atomically'.  You cannot batch multiple writes or a write-plus-read
 -- into a single STM transaction; for that use 'openSTM' and wrap in
 -- 'atomically' yourself.
-openIO :: Queue a -> IO (Ends (Kleisli IO) a a)
+openIO :: Queue a -> IO (Ends (K IO) a a)
 openIO q = do
   e <- atomically (openSTM q)
-  let (Kleisli write, Kleisli receive) = splay0 e
+  let (K write, K receive) = splay0 e
   pure (endsK (atomically . write) (atomically (receive ())))
 
 -- | Honest sequential composition of two allocated ends via an intermediate
@@ -223,18 +223,18 @@ openIO q = do
 -- unit type, so a multi-read consumer can accumulate inputs before emitting.
 pipeEnds ::
   forall a b c.
-  Ends (Kleisli IO) a b ->
-  (TQueue b -> IO (Ends (Kleisli IO) b c)) ->
-  IO (Ends (Kleisli IO) a c, IO ())
+  Ends (K IO) a b ->
+  (TQueue b -> IO (Ends (K IO) b c)) ->
+  IO (Ends (K IO) a c, IO ())
 pipeEnds e1 makeE2 = do
   q <- newTQueueIO
   e2 <- makeE2 q
-  let unitEnds :: Ends (Kleisli IO) () ()
+  let unitEnds :: Ends (K IO) () ()
       unitEnds = open
       readFromE1 :: IO b
-      readFromE1 = runKleisli (emit (companion e1) (conjoint unitEnds)) ()
+      readFromE1 = runK (emit (companion e1) (conjoint unitEnds)) ()
       writeToE2 :: b -> IO ()
-      writeToE2 = runKleisli (commit (conjoint e2) (companion unitEnds))
+      writeToE2 = runK (commit (conjoint e2) (companion unitEnds))
   pump <- async . forever $ do
     x <- readFromE1
     writeToE2 x

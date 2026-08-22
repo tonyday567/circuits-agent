@@ -72,14 +72,13 @@ where
 
 import Circuit.Agent (Agent, run1)
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
-import Circuit.Category ((.>))
+import Circuit.Category (K (..), (.>))
 import Circuit.ChannelPoly (iterateSystem, systemAsProcess)
 import Circuit.Ends (Ends (..), In (..), Out (..), commit, emit, open)
 import Circuit.Loop (Loop (..))
 import Circuit.Poly (Eval (..), fromEvalSystem)
 import Circuit.Process (Process)
 import Circuit.Tensor (Tensor (..))
-import Control.Arrow (Kleisli (..), runKleisli)
 import Control.Concurrent (forkIO, killThread)
 import Control.Exception (IOException, try)
 import Control.Monad (void)
@@ -105,7 +104,7 @@ import Prelude
 --
 -- >>> import Circuit.ChannelPoly (iterateSystem)
 -- >>> import Circuit.Ends (Ends (..), HasDual (..), commit, emit, open)
--- >>> import Control.Arrow (Kleisli (..), runKleisli)
+-- >>> import Circuit.Category (K (..))
 -- >>> import Data.Text.Encoding (decodeUtf8)
 
 -- ---------------------------------------------------------------------------
@@ -199,9 +198,9 @@ splitFrame (ProcMarks marks) buf =
 -- the queue when the stream has not produced one yet.  There is no
 -- empty-read result — quiet is not an opinion here.
 data StdPorts a b c = StdPorts
-  { stdIn :: In (Kleisli IO) a,
-    stdOut :: Out (Kleisli IO) b,
-    stdErr :: Out (Kleisli IO) c,
+  { stdIn :: In (K IO) a,
+    stdOut :: Out (K IO) b,
+    stdErr :: Out (K IO) c,
     stdClose :: IO ()
   }
 
@@ -216,8 +215,8 @@ openStdPorts ::
   (a -> BS.ByteString) ->
   (BS.ByteString -> a) ->
   ProcConfig ->
-  Loop Either (Kleisli IO) () (StdPorts a a a)
-openStdPorts encode decode cfg = Knot (Kleisli step)
+  Loop Either (K IO) () (StdPorts a a a)
+openStdPorts encode decode cfg = Knot (K step)
   where
     step (Right ()) = do
       let procSpec =
@@ -243,10 +242,10 @@ openStdPorts encode decode cfg = Knot (Kleisli step)
 
       let ports =
             StdPorts
-              { stdIn = In $ \o -> Kleisli $ \a -> do
+              { stdIn = In $ \o -> K $ \a -> do
                   BS.hPutStr stdinH (encode a <> "\n")
                   hFlush stdinH
-                  runKleisli (emit o (stdIn ports)) a,
+                  runK (emit o (stdIn ports)) a,
                 stdOut = companion qOut,
                 stdErr = companion qErr,
                 stdClose = do
@@ -260,10 +259,10 @@ openStdPorts encode decode cfg = Knot (Kleisli step)
       pure (Right ports)
 
 -- | Commit one token to a queue end, plugged with unit ends.
-sink :: Ends (Kleisli IO) a a -> a -> IO ()
-sink q = runKleisli (commit (conjoint q) outU)
+sink :: Ends (K IO) a a -> a -> IO ()
+sink q = runK (commit (conjoint q) outU)
   where
-    Ends _ outU = open :: Ends (Kleisli IO) () ()
+    Ends _ outU = open :: Ends (K IO) () ()
 
 -- | The pumper as an agent: a Moore machine from maybe-chunks to frame
 -- lists.  The carrier is @(buffer, pending)@ — the unexplained suffix and
@@ -324,17 +323,17 @@ pumpFrames marks decode h snk = go (BS.empty, [])
 
 -- | Client view of a process: two 'Ends' sharing stdin, plus resource close.
 data ProcEnds a b c = ProcEnds
-  { procStdio :: Ends (Kleisli IO) a b,
-    procStderr :: Ends (Kleisli IO) a c,
+  { procStdio :: Ends (K IO) a b,
+    procStderr :: Ends (K IO) a c,
     procClose :: IO ()
   }
 
 -- | Stdin commit + stdout emit as matched 'Ends'.
-stdioEnds :: StdPorts a b c -> Ends (Kleisli IO) a b
+stdioEnds :: StdPorts a b c -> Ends (K IO) a b
 stdioEnds pp = Ends (stdIn pp) (stdOut pp)
 
 -- | Stdin commit + stderr emit as matched 'Ends'.
-stderrEnds :: StdPorts a b c -> Ends (Kleisli IO) a c
+stderrEnds :: StdPorts a b c -> Ends (K IO) a c
 stderrEnds pp = Ends (stdIn pp) (stdErr pp)
 
 -- | Open a process and return the dual-seat client view as a 'Loop' 'Either'.
@@ -342,11 +341,11 @@ openProc ::
   (a -> BS.ByteString) ->
   (BS.ByteString -> a) ->
   ProcConfig ->
-  Loop Either (Kleisli IO) () (ProcEnds a a a)
+  Loop Either (K IO) () (ProcEnds a a a)
 openProc encode decode cfg =
   openStdPorts encode decode cfg .> Lift portsToProcEnds
   where
-    portsToProcEnds = Kleisli $ \pp ->
+    portsToProcEnds = K $ \pp ->
       pure
         ProcEnds
           { procStdio = stdioEnds pp,
@@ -355,7 +354,7 @@ openProc encode decode cfg =
           }
 
 -- | The wire view of 'StdPorts': one nested 'par' morphism.
-portsEnds :: StdPorts a b c -> Loop (,) (Kleisli IO) (a, ((), ())) ((), (b, c))
+portsEnds :: StdPorts a b c -> Loop (,) (K IO) (a, ((), ())) ((), (b, c))
 portsEnds pp = par commitM (par outM errM)
   where
     commitM = Lift (commit (stdIn pp) outUIn)
@@ -373,23 +372,23 @@ portsEnds pp = par commitM (par outM errM)
 -- No process, no files.  For fast bus-connector testing.
 --
 -- >>> pp <- echo pure :: IO (StdPorts String String ())
--- >>> runKleisli (commit (stdIn pp) (companion (open :: Ends (Kleisli IO) () ()))) "hi"
--- >>> runKleisli (emit (stdOut pp) (conjoint (open :: Ends (Kleisli IO) () ()))) ()
+-- >>> runK (commit (stdIn pp) (companion (open :: Ends (K IO) () ()))) "hi"
+-- >>> runK (emit (stdOut pp) (conjoint (open :: Ends (K IO) () ()))) ()
 -- "hi"
 echo :: (a -> IO a) -> IO (StdPorts a a ())
 echo f = do
   ref <- newIORef Nothing
   let ports =
         StdPorts
-          { stdIn = In $ \o -> Kleisli $ \a -> do
+          { stdIn = In $ \o -> K $ \a -> do
               result <- f a
               writeIORef ref (Just result)
-              runKleisli (emit o (stdIn ports)) a,
-            stdOut = Out $ \_ -> Kleisli $ \_ -> do
+              runK (emit o (stdIn ports)) a,
+            stdOut = Out $ \_ -> K $ \_ -> do
               m <- readIORef ref
               writeIORef ref Nothing
               pure (fromMaybe (error "echo: no input yet") m),
-            stdErr = Out $ \_ -> Kleisli $ \_ -> pure (),
+            stdErr = Out $ \_ -> K $ \_ -> pure (),
             stdClose = pure ()
           }
   pure ports

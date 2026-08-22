@@ -22,7 +22,7 @@ module Circuit.Agent.Query
 where
 
 import Circuit.Agent (Ends (..), Post (..), PostId, Shard, close, mkPost, replyTo, shard, sortNub, synthesis)
-import Control.Arrow (runKleisli)
+import Circuit.Category (K (..))
 import Data.IORef (atomicModifyIORef', newIORef, writeIORef)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
@@ -125,4 +125,4 @@ echoShard who = queryShard who pure
 
 -- | One closed shard turn: commit @ins@, emit replies.
 runShardIO :: Shard IO [Post Text] [Post Text] -> [Post Text] -> IO [Post Text]
-runShardIO sh = runKleisli (close (conjoint sh) (companion sh))
+runShardIO sh = runK (close (conjoint sh) (companion sh))

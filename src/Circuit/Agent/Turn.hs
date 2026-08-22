@@ -15,8 +15,8 @@
 -- can drop a command or response and break correlation.
 --
 -- @
---   turn e        :: IO (Loop (,) (Kleisli IO) Text Text)
---   turnTimeout u e :: IO (Loop (,) (Kleisli IO) Text (Maybe Text))
+--   turn e        :: IO (Loop (,) (K IO) Text Text)
+--   turnTimeout u e :: IO (Loop (,) (K IO) Text (Maybe Text))
 -- @
 module Circuit.Agent.Turn
   ( -- * Turn envelope
@@ -35,8 +35,8 @@ where
 import Circuit (Loop (..))
 import Circuit.Agent (PostId)
 import Circuit.Ends (Ends (..), commit, emit, open)
+import Circuit.Category (K (..))
 import Circuit.Mediate (Mediator (..))
-import Control.Arrow (Kleisli (..), runKleisli)
 import Data.IORef
 import Data.Text (Text)
 import System.Timeout (timeout)
@@ -96,21 +96,21 @@ turnMediator =
     }
 
 -- | Read the unit ends used to plug the unused side of a commit or emit.
-unitEnds :: Ends (Kleisli IO) () ()
+unitEnds :: Ends (K IO) () ()
 unitEnds = open
 
 -- | Run one turn: commit a body, then block until a matching response
 -- arrives.  The correlation is by 'thread', not by position.
 turn ::
-  Ends (Kleisli IO) (TurnToken Text) (TurnToken Text) ->
-  IO (Loop (,) (Kleisli IO) Text Text)
+  Ends (K IO) (TurnToken Text) (TurnToken Text) ->
+  IO (Loop (,) (K IO) Text Text)
 turn e = do
   ref <- newIORef emptyTurnState
-  pure . Lift . Kleisli $ \body -> do
+  pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
-    runKleisli (commit (conjoint e) outU) cmd
+    runK (commit (conjoint e) outU) cmd
     let loop = do
-          resp <- runKleisli (emit (companion e) inU) ()
+          resp <- runK (emit (companion e) inU) ()
           mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
           case mResult of
             Just (_, resp') -> pure (turnBody resp')
@@ -124,16 +124,16 @@ turn e = do
 -- unarrived response is not lost — the next emit still receives it.
 turnTimeout ::
   Int ->
-  Ends (Kleisli IO) (TurnToken Text) (TurnToken Text) ->
-  IO (Loop (,) (Kleisli IO) Text (Maybe Text))
+  Ends (K IO) (TurnToken Text) (TurnToken Text) ->
+  IO (Loop (,) (K IO) Text (Maybe Text))
 turnTimeout us e = do
   ref <- newIORef emptyTurnState
-  pure . Lift . Kleisli $ \body -> do
+  pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
-    runKleisli (commit (conjoint e) outU) cmd
+    runK (commit (conjoint e) outU) cmd
     timeout us $ do
       let loop = do
-            resp <- runKleisli (emit (companion e) inU) ()
+            resp <- runK (emit (companion e) inU) ()
             mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
             case mResult of
               Just (_, resp') -> pure (turnBody resp')

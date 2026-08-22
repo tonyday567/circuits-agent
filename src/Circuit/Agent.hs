@@ -18,7 +18,7 @@
 -- Effectful boundary (preferred pin):
 --
 -- @
--- type Shard m a b = Ends (Kleisli m) a b
+-- type Shard m a b = Ends (K m) a b
 -- @
 --
 -- Symmetric in the common log case: commit a list of posts, emit a list of
@@ -27,7 +27,7 @@
 -- the log).  Opacity is commit\/emit only; no interior.
 --
 -- Change of base (circuits-parser sense): 'agentShard' reinterprets a pure
--- 'Agent' at @Kleisli m@ ends — same Moore citizen, effectful interface.
+-- 'Agent' at @K m@ ends — same Moore citizen, effectful interface.
 -- Direct shards (hermes session, muster-agent) skip the pure coalgebra and
 -- inhabit 'Shard' only.
 --
@@ -87,7 +87,7 @@ module Circuit.Agent
     shard,
     logEnds,
 
-    -- * Agent as Shard (change of base into Kleisli)
+    -- * Agent as Shard (change of base into K)
     AgentSeat (..),
     feedAgent,
     flushOutbox,
@@ -221,7 +221,7 @@ import Circuit.ChannelPoly qualified as ChannelPoly
 import Circuit.Layer (run)
 import Circuit.Loop (Loop (..))
 import Circuit.Poly (Eval (..), Mono, System, fromEvalSystem, monoDir, monoIn, runSystem, system)
-import Control.Arrow (Kleisli (..))
+import Circuit.Category (K (..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
 import Control.Concurrent.STM (STM, atomically, orElse)
@@ -405,7 +405,7 @@ type TurnLog a = Seq (Bag a)
 --
 -- @System arr s (Mono a b) ≅ arr (s, a) (s, b)@ after collapsing unit
 -- positions.  Common log case: @Agent (->) s (Post a) [Post a]@ (input = one post,
--- output = list of posts).  @Agent (Kleisli m) s a b@ is the monadic Moore
+-- output = list of posts).  @Agent (K m) s a b@ is the monadic Moore
 -- machine.
 type Agent arr s a b = System arr s (Mono a b)
 
@@ -419,7 +419,7 @@ type Agent arr s a b = System arr s (Mono a b)
 -- @
 --
 -- Emit is an onslaught of posts (empty = quiet \/ done for that poll).
-type Shard m a b = Ends (Kleisli m) a b
+type Shard m a b = Ends (K m) a b
 
 -- | Same ends shape as 'Shard' — dual seat on the log (journal 013).
 type LogEnds m a b = Shard m a b
@@ -863,43 +863,43 @@ run1 sys s i =
       (o, _) = ChannelPoly.runSystem sys s'
    in (o, s')
 
--- | Lift a pure agent into the 'Kleisli' arrow of any functor.
+-- | Lift a pure agent into the 'K' arrow of any functor.
 --
--- This is the change of base from @(->)@ to @Kleisli m@ on the agent itself:
+-- This is the change of base from @(->)@ to @K m@ on the agent itself:
 -- the same Moore coalgebra, but each step now lives in @m@.
-agentM :: (Applicative m) => Agent (->) s a b -> Agent (Kleisli m) s a b
-agentM sys = system (Kleisli (pure . runSystem sys))
+agentM :: (Applicative m) => Agent (->) s a b -> Agent (K m) s a b
+agentM sys = system (K (pure . runSystem sys))
 
 -- | Run one step of a monadic agent.
-runAgentM :: (Monad m) => Agent (Kleisli m) s a b -> s -> a -> m (b, s)
+runAgentM :: (Monad m) => Agent (K m) s a b -> s -> a -> m (b, s)
 runAgentM sys s a =
-  runKleisli (runSystem sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
+  runK (runSystem sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
 
 -- | STM agent: state is handled transparently inside an STM transaction.
-type AgentS s a = Agent (Kleisli STM) s a [a]
+type AgentS s a = Agent (K STM) s a [a]
 
 -- | IO agent: the STM boundary has been crossed; state is no longer
 -- transparently handled.
-type AgentX s a = Agent (Kleisli IO) s a [a]
+type AgentX s a = Agent (K IO) s a [a]
 
 -- | Cross from the transparent STM world into the IO boundary.
 agentX :: AgentS s a -> AgentX s a
-agentX sys = system (Kleisli (\(s, d) -> atomically (runKleisli (runSystem sys) (s, d))))
+agentX sys = system (K (\(s, d) -> atomically (runK (runSystem sys) (s, d))))
 
 -- | Seat-level product / await in STM.
 awaitS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 awaitS sys1 sys2 =
-  system $ Kleisli $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runKleisli (runSystem sys1) (s1, d)
-    (s2', (o2, ())) <- runKleisli (runSystem sys2) (s2, d)
+  system $ K $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runK (runSystem sys1) (s1, d)
+    (s2', (o2, ())) <- runK (runSystem sys2) (s2, d)
     pure ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race in STM.
 raceS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 raceS sys1 sys2 =
-  system $ Kleisli $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runKleisli (runSystem sys1) (s1, d)
-    (s2', (o2, ())) <- runKleisli (runSystem sys2) (s2, d)
+  system $ K $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runK (runSystem sys1) (s1, d)
+    (s2', (o2, ())) <- runK (runSystem sys2) (s2, d)
     let o = if null o1 then o2 else o1
     pure ((s1', s2'), (o, ()))
 
@@ -908,12 +908,12 @@ raceS sys1 sys2 =
 -- to finish emits nothing, wait for the other branch. If both emit nothing, the
 -- right branch's (empty) result is returned.
 --
--- This is the honest Kleisli-IO refinement of 'raceS': the winner is whichever
+-- This is the honest K-IO refinement of 'raceS': the winner is whichever
 -- step produces a mark first, not the left-biased deterministic rule.
 raceIO :: AgentX s1 a -> AgentX s2 a -> AgentX (s1, s2) a
 raceIO sys1 sys2 =
-  system $ Kleisli $ \((s1, s2), d) ->
-    raceFirst (runKleisli (runSystem sys1) (s1, d)) (runKleisli (runSystem sys2) (s2, d)) >>= \case
+  system $ K $ \((s1, s2), d) ->
+    raceFirst (runK (runSystem sys1) (s1, d)) (runK (runSystem sys2) (s2, d)) >>= \case
       Left (s1', outs) -> pure ((s1', s2), (outs, ()))
       Right (s2', outs) -> pure ((s1, s2'), (outs, ()))
   where
@@ -937,7 +937,7 @@ raceIO sys1 sys2 =
 -- | Run one step of an STM agent.
 stepS :: AgentS s a -> s -> a -> STM (s, [a])
 stepS sys s i = do
-  (s', (outs, ())) <- runKleisli (runSystem sys) (s, monoIn i)
+  (s', (outs, ())) <- runK (runSystem sys) (s, monoIn i)
   pure (s', outs)
 
 -- | Fold an STM agent over a bundle of inputs within one transaction.
@@ -959,21 +959,21 @@ runAgentS :: AgentS s a -> s -> [a] -> IO ([a], s)
 runAgentS sys s0 ins = (\(s, os) -> (os, s)) <$> atomically (stepsS sys s0 ins)
 
 -- | Unit ends for lifting single-token reads/writes out of an 'Ends' value.
-unitEndsSTM :: Ends (Kleisli STM) () ()
+unitEndsSTM :: Ends (K STM) () ()
 unitEndsSTM = endsK (const (pure ())) (pure ())
 
 -- | Read one token from an STM end.
-readEndSTM :: Ends (Kleisli STM) a a -> STM a
-readEndSTM ends = runKleisli (emit (companion ends) (conjoint unitEndsSTM)) ()
+readEndSTM :: Ends (K STM) a a -> STM a
+readEndSTM ends = runK (emit (companion ends) (conjoint unitEndsSTM)) ()
 
 -- | Write one token to an STM end.
-writeEndSTM :: Ends (Kleisli STM) a a -> a -> STM ()
-writeEndSTM ends = runKleisli (commit (conjoint ends) (companion unitEndsSTM))
+writeEndSTM :: Ends (K STM) a a -> a -> STM ()
+writeEndSTM ends = runK (commit (conjoint ends) (companion unitEndsSTM))
 
 -- | Wire an STM agent between an inbox and an outbox, running until
 -- quiescence.  Quiescence is detected via 'orElse': if the inbox is empty
 -- (retry), the loop returns the current state.
-agentLoopS :: AgentS s a -> s -> Ends (Kleisli STM) a a -> Ends (Kleisli STM) a a -> STM s
+agentLoopS :: AgentS s a -> s -> Ends (K STM) a a -> Ends (K STM) a a -> STM s
 agentLoopS agent s0 inbox outbox = go s0
   where
     go s =
@@ -986,17 +986,17 @@ agentLoopS agent s0 inbox outbox = go s0
         `orElse` pure s
 
 -- | Self-loop: the agent reads from and writes to the same STM end.
-selfLoopS :: AgentS s a -> s -> Ends (Kleisli STM) a a -> STM s
+selfLoopS :: AgentS s a -> s -> Ends (K STM) a a -> STM s
 selfLoopS agent s0 ends = agentLoopS agent s0 ends ends
 
 -- | One frame of the bundle self-loop, expressed in the Either-trace halt
 -- alphabet: 'Left' = continue, 'Right' = quiesce and return this state.
 selfLoopFrame ::
   AgentS s a ->
-  Ends (Kleisli STM) [a] [a] ->
-  Ends (Kleisli STM) [a] [a] ->
-  Kleisli STM (Either s s) (Either s s)
-selfLoopFrame agent inbox outbox = Kleisli $ \case
+  Ends (K STM) [a] [a] ->
+  Ends (K STM) [a] [a] ->
+  K STM (Either s s) (Either s s)
+selfLoopFrame agent inbox outbox = K $ \case
   Right s -> step s
   Left s -> step s
   where
@@ -1016,18 +1016,18 @@ selfLoopFrame agent inbox outbox = Kleisli $ \case
 -- quiescence, expressed as a 'Loop Either' value.
 agentLoopL ::
   AgentS s a ->
-  Ends (Kleisli STM) [a] [a] ->
-  Ends (Kleisli STM) [a] [a] ->
-  Loop Either (Kleisli STM) s s
+  Ends (K STM) [a] [a] ->
+  Ends (K STM) [a] [a] ->
+  Loop Either (K STM) s s
 agentLoopL agent inbox outbox = trace (Lift (selfLoopFrame agent inbox outbox))
 
 -- | Self-loop as a 'Loop Either' citizen.
 selfLoopL ::
   AgentS s a ->
   s ->
-  Ends (Kleisli STM) [a] [a] ->
+  Ends (K STM) [a] [a] ->
   STM s
-selfLoopL agent s0 ends = runKleisli (run (agentLoopL agent ends ends)) s0
+selfLoopL agent s0 ends = runK (run (agentLoopL agent ends ends)) s0
 
 -- | Agent behaviour: a pure function from an input stream to an output stream.
 --
@@ -1079,7 +1079,7 @@ raceA sys1 sys2 = system $ \((s1, s2), d) ->
    in ((s1', s2'), (o, ()))
 
 -- ---------------------------------------------------------------------------
--- Agent as Shard — change of base into Kleisli Ends
+-- Agent as Shard — change of base into K Ends
 -- ---------------------------------------------------------------------------
 
 -- | State behind an 'agentShard': free carrier plus a pending emit queue.
@@ -1117,7 +1117,7 @@ flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 -- @
 --
 -- is the change of base from @(->)@ (the Moore coalgebra) into
--- @Kleisli m@ ends: commit = parse inputs, emit = flush replies.  The
+-- @K m@ ends: commit = parse inputs, emit = flush replies.  The
 -- interior stays opaque at the 'Shard' boundary — only @[Post]@ in and out.
 --
 -- @get@ \/ @put@ hold the 'AgentSeat' (e.g. 'Data.IORef' in @IO@, or
@@ -1126,7 +1126,7 @@ flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 -- @
 -- let sys = tape (\\hist -> (peek hist) { from = "j", to = [from (peek hist)], body = "ack: " <> body (peek hist) })
 --     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post])) [Post] [Post]
--- in  evalState (runKleisli (close (conjoint sh) (companion sh)) [humanPost]) (AgentSeat [] [])
+-- in  evalState (runK (close (conjoint sh) (companion sh)) [humanPost]) (AgentSeat [] [])
 -- @
 agentShard ::
   (Monad m) =>
@@ -1170,7 +1170,7 @@ runAgentShard sys seat ins =
 -- A /tool call/ from an agent is just a 'Post': the 'to' list names the
 -- tool, 'body' carries the arguments. No extra type — emit that 'Post' on a
 -- 'Port' (or post it on the log for the tool agent to 'watch').
-type Port m a = Ends (Kleisli m) (Post a) (Post a)
+type Port m a = Ends (K m) (Post a) (Post a)
 
 -- 'Snoc' is re-exported from 'Circuit.Stream' (construction dual of 'Uncons').
 
@@ -1264,7 +1264,7 @@ portShard getIn putIn getOut putOut sh =
 -- session assembly: @prefixShard session@ changes the payload that the
 -- shard posts.
 prefixShard :: (Monad m) => (a' -> a) -> Shard m a b -> Shard m a' b
-prefixShard f = lmapEnds (Kleisli $ pure . f)
+prefixShard f = lmapEnds (K $ pure . f)
 
 -- | Adapt a shard on the emit side (covariant).
 --
@@ -1272,17 +1272,17 @@ prefixShard f = lmapEnds (Kleisli $ pure . f)
 -- transport envelope: @suffixShard (map addHeader)@ decorates every
 -- emitted post.
 suffixShard :: (Monad m) => (b -> b') -> Shard m a b -> Shard m a b'
-suffixShard g = rmapEnds (Kleisli $ pure . g)
+suffixShard g = rmapEnds (K $ pure . g)
 
 -- | Adapt both sides of a shard at once.
 --
 -- @codecShard f g = prefixShard f . suffixShard g@.
 codecShard :: (Monad m) => (a' -> a) -> (b -> b') -> Shard m a b -> Shard m a' b'
-codecShard f g = dimapEnds (Kleisli $ pure . f) (Kleisli $ pure . g)
+codecShard f g = dimapEnds (K $ pure . f) (K $ pure . g)
 
 -- | Sequential composition of shards.
 --
 -- The output of the first shard feeds the input of the second.  This is
 -- the same shape as connecting two effectful agents in series.
 composeShard :: forall m a b c. (Monad m) => Shard m a b -> Shard m b c -> Shard m a c
-composeShard = composeEnds @(Kleisli m) @a @b @c @()
+composeShard = composeEnds @(K m) @a @b @c @()
