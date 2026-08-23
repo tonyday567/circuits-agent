@@ -10,3 +10,7 @@ dist-mcabal/
 .ghcid-output
 .ghcid-trigger
 cabal.project.local
+dist-newstyle/
+*.ghc.environment.*
+.stack-work/
+.DS_Store
