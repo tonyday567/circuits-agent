@@ -51,7 +51,7 @@ import Circuit.Agent
     runAgentShard,
     watch,
   )
-import Circuit.Poly (System, system)
+import Circuit.System (System, system)
 import Data.List (foldl')
 import Data.Map (Map)
 import Data.Map qualified as Map
