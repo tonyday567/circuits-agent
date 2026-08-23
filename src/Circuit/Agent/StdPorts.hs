@@ -102,7 +102,7 @@ import Prelude
 
 -- $setup
 --
--- >>> import Circuit.System (iterateSystem)
+-- >>> import Circuit.Process (iterateSystem)
 -- >>> import Circuit.Poles (Poles (..), HasDual (..), commit, emit, open)
 -- >>> import Circuit.Category (K (..))
 -- >>> import Data.Text.Encoding (decodeUtf8)

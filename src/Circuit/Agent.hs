@@ -210,7 +210,7 @@ import Circuit.Process (after)
 import Circuit.Syntax (eval)
 import Circuit.System (System, fromEvalSystem, monoDir, monoIn, runSystem, runSystemMono, system)
 import Circuit.System qualified as System
-import Circuit.Trace (Trace (..), base, yank)
+import Circuit.Trace (Trace, base, yank)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
 import Control.Concurrent.STM (STM, atomically, orElse)
@@ -228,7 +228,7 @@ import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
--- >>> import Circuit.System (iterateSystem)
+-- >>> import Circuit.Process (iterateSystem)
 
 -- | Agent name on the shared log.
 type Name = Text
