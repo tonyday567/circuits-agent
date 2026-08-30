@@ -73,12 +73,12 @@ import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
+import Circuit.Moore (Moore (..), finalState, fromEvalMoore, iterateMoore, monoDir, monoIn, moore, runMooreMono)
+import Circuit.Moore qualified as Moore
 import Circuit.Poles (HasDual (..), Poles (..), commit, emit, open, splay0)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Circuit.Syntax (eval)
-import Circuit.Moore (Moore (..), finalState, fromEvalMoore, iterateMoore, monoDir, monoIn, runMooreMono, moore)
-import Circuit.Moore qualified as Moore
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (async, cancel, race)
 import Control.Concurrent.STM
