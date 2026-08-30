@@ -845,13 +845,13 @@ main = do
             )
         -- seed: human addresses worker
         t0 = [mkPost "human" ["worker"] "start"]
-        step (sw, sn, lg) =
+        roundStep (sw, sn, lg) =
           let (sw', lg1, _) = turn worker sw lg
               sn' = feedState (diffLog lg lg1) sn
               (sn'', lg2, _) = turn nudge sn' lg1
               sw'' = feedState (diffLog lg1 lg2) sw'
            in (sw'', sn'', lg2)
-        (_, _, tF) = iterate step (seedState ["worker"] t0, seedState ["nudge"] t0, t0) !! rounds
+        (_, _, tF) = iterate roundStep (seedState ["worker"] t0, seedState ["nudge"] t0, t0) !! rounds
         -- newest first: take dialogue posts (exclude seed)
         dialogue = take (2 * rounds) tF
     assert "multi-round: log grew by 2 posts per round" $
@@ -1866,7 +1866,7 @@ main = do
   putStrLn "mark-driven halt"
   do
     let isHaltMark p = maybe False isHalt (markOf p)
-        step acc p = p : acc
+        collectStep acc p = p : acc
         seed = mkPost "human" ["self"] "seed"
         one = mkPost "human" ["self"] "one"
         two = mkPost "human" ["self"] "two"
@@ -1878,10 +1878,10 @@ main = do
           writeEndSTM ends halt
     endsSpin <- atomically $ openChannelSTM (Linear :: ChannelPolicy (Post Text))
     atomically $ writeAll endsSpin
-    accSpin <- atomically $ runK (spinMark isHaltMark step endsSpin) []
+    accSpin <- atomically $ runK (spinMark isHaltMark collectStep endsSpin) []
     endsLoop <- atomically $ openChannelSTM (Linear :: ChannelPolicy (Post Text))
     atomically $ writeAll endsLoop
-    accLoop <- atomically $ runK (eval (markLoop isHaltMark step endsLoop)) []
+    accLoop <- atomically $ runK (eval (markLoop isHaltMark collectStep endsLoop)) []
     assert "spinMark accumulated the three normal posts" $
       length accSpin == 3
     assert "spinMark consumed the halt mark as the halt token" $

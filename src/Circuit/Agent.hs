@@ -321,9 +321,9 @@ branches priorMap = go (nextId priorMap)
     go selfId p =
       case thread p of
         [] -> [[from p]]
-        is -> concatMap (step selfId p) is
+        is -> concatMap (branchStep selfId p) is
 
-    step selfId p i =
+    branchStep selfId p i =
       if i >= selfId
         then []
         else case Map.lookup i priorMap of
@@ -727,11 +727,11 @@ meetingPass ::
   [RosterEntry s a] ->
   ([(Name, AgentState s f)], Log f, [Derivation a]) ->
   ([(Name, AgentState s f)], Log f, [Derivation a])
-meetingPass roster (states, lg, derivs) = foldl' step (states, lg, derivs) roster
+meetingPass roster (states, lg, derivs) = foldl' meetingStep (states, lg, derivs) roster
   where
     subMap = Map.fromList [(n, subs) | (n, subs, _) <- roster]
 
-    step (st, l, ds) (name, _subs, agent) =
+    meetingStep (st, l, ds) (name, _subs, agent) =
       case lookup name st of
         Nothing -> (st, l, ds)
         Just sti
@@ -788,11 +788,11 @@ loopsSubs roster states0 log0 = (states0, log0, []) : go states0 log0 []
     go states lg derivs
       | not (any (hasPending @a . snd) states) = []
       | otherwise =
-          let (states', lg', derivs') = foldl' step (states, lg, derivs) roster
+          let (states', lg', derivs') = foldl' runStep (states, lg, derivs) roster
            in (states', lg', derivs') : go states' lg' derivs'
 
-    step :: ([(Name, AgentState s f)], Log f, [Derivation a]) -> RosterEntry s a -> ([(Name, AgentState s f)], Log f, [Derivation a])
-    step (states, lg, derivs) (name, _subs, agent) =
+    runStep :: ([(Name, AgentState s f)], Log f, [Derivation a]) -> RosterEntry s a -> ([(Name, AgentState s f)], Log f, [Derivation a])
+    runStep (states, lg, derivs) (name, _subs, agent) =
       case lookup name states of
         Nothing -> (states, lg, derivs)
         Just st
@@ -987,10 +987,10 @@ selfLoopFrame ::
   Poles (K STM) [a] [a] ->
   K STM (Either s s) (Either s s)
 selfLoopFrame agent inbox outbox = K $ \case
-  Right s -> step s
-  Left s -> step s
+  Right s -> loopStep s
+  Left s -> loopStep s
   where
-    step s = do
+    loopStep s = do
       mIns <- (Just <$> readEndSTM inbox) `orElse` pure Nothing
       case mIns of
         Nothing -> pure (Right s)
