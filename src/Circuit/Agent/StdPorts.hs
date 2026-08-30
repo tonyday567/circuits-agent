@@ -75,10 +75,11 @@ import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
 import Circuit.Poles (HasDual (..), In (..), Out (..), Poles (..), commit, emit, open)
 import Circuit.Poly (Eval (..))
-import Circuit.Process (Process, iterateSystem, systemAsProcess)
-import Circuit.System (fromEvalSystem)
+import Circuit.Process (Process, mooreAsProcess)
+import Circuit.Moore (fromEvalMoore, iterateMoore)
 import Circuit.Tensor (Tensor (..))
-import Circuit.Trace (Trace, base, yank)
+import Circuit.Trace (Trace, base)
+import Circuit.Traced (yank)
 import Control.Concurrent (forkIO, killThread)
 import Control.Exception (IOException, try)
 import Control.Monad (void)
@@ -102,7 +103,7 @@ import Prelude
 
 -- $setup
 --
--- >>> import Circuit.Process (iterateSystem)
+-- >>> import Circuit.Moore (iterateMoore)
 -- >>> import Circuit.Poles (Poles (..), HasDual (..), commit, emit, open)
 -- >>> import Circuit.Category (K (..))
 -- >>> import Data.Text.Encoding (decodeUtf8)
@@ -271,10 +272,10 @@ sink q = runK (commit (conjoint q) outU)
 -- the same stateless grammar.  This is the level-0 mark machine made
 -- literal; 'pumpFrames' is merely its IO interpretation at a 'Handle'.
 --
--- >>> iterateSystem (frameAgent lineMarks decodeUtf8) ("", []) [Just "a\n", Just "b", Nothing]
+-- >>> iterateMoore (frameAgent lineMarks decodeUtf8) ("", []) [Just "a\n", Just "b", Nothing]
 -- [["a"],[],["b"]]
 frameAgent :: ProcMarks -> (BS.ByteString -> a) -> Agent (->) (BS.ByteString, [a]) (Maybe BS.ByteString) [a]
-frameAgent marks decode = fromEvalSystem $ \(buf, pending) ->
+frameAgent marks decode = fromEvalMoore $ \(buf, pending) ->
   EP
     ( EK pending,
       EE $ \case
@@ -294,7 +295,7 @@ frameAgent marks decode = fromEvalSystem $ \(buf, pending) ->
 -- | The same machine as a 'Process': chunk stream in, frame lists out,
 -- state carried implicitly.
 frameProcess :: ProcMarks -> (BS.ByteString -> a) -> Process (Maybe BS.ByteString) [a]
-frameProcess marks decode = systemAsProcess (frameAgent marks decode) (BS.empty, [])
+frameProcess marks decode = mooreAsProcess (frameAgent marks decode) (BS.empty, [])
 
 -- | The pumper: the IO interpretation of 'frameAgent' at a 'Handle'.
 -- Blocking reads deliver percepts; payloads are sunk into the queue.

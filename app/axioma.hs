@@ -11,7 +11,7 @@
 module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
-import Circuit hiding (Stamped, eval)
+import Circuit hiding (Stamped, eval, id, (.))
 import Circuit.Agent
 import Circuit.Agent.Delivery
   ( DelRel,
@@ -75,11 +75,10 @@ import Circuit.Category qualified as C
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Poles (HasDual (..), Poles (..), commit, emit, open, splay0)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos)
-import Circuit.Process (after, iterateSystem)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Circuit.Syntax (eval)
-import Circuit.System (System, fromEvalSystem, monoDir, monoIn, runSystemMono, system)
-import Circuit.System qualified as System
+import Circuit.Moore (Moore (..), finalState, fromEvalMoore, iterateMoore, monoDir, monoIn, runMooreMono, moore)
+import Circuit.Moore qualified as Moore
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (async, cancel, race)
 import Control.Concurrent.STM
@@ -213,7 +212,7 @@ main = do
     let idAgent :: Agent (->) [Int] Int Int
         idAgent = tape head
     assert "A0: tape head streams inputs through unchanged" $
-      iterateSystem idAgent [] [1, 2, 3 :: Int] == [1, 2, 3]
+      iterateMoore idAgent [] [1, 2, 3 :: Int] == [1, 2, 3]
 
   -------------------------------------------------------------------------
   -- A1: sequential stream composition
@@ -229,8 +228,8 @@ main = do
         gAgent :: Agent (->) [Int] Int Int
         gAgent = tape (g . head)
         inputs = [1, 2, 3 :: Int]
-        chained = iterateSystem gAgent [] (iterateSystem fAgent [] inputs)
-        direct = iterateSystem (tape (g . f . head)) [] inputs
+        chained = iterateMoore gAgent [] (iterateMoore fAgent [] inputs)
+        direct = iterateMoore (tape (g . f . head)) [] inputs
     assert "A1: chaining outputs equals feeding the composed function" $
       chained == direct
 
@@ -239,20 +238,20 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "the pretense"
   do
-    let sumAgent :: System (->) Int (Mono Int Int)
-        sumAgent = fromEvalSystem $ \s -> EP (EK s, EE (+ s))
+    let sumAgent :: Moore (,) (->) Int (Mono Int Int)
+        sumAgent = fromEvalMoore $ \s -> EP (EK s, EE (+ s))
     assert "tape sum == [1,3,6]" $
-      iterateSystem (tape sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
+      iterateMoore (tape sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
     assert "sumAgent == [1,3,6]" $
-      iterateSystem sumAgent 0 [1, 2, 3 :: Int] == [1, 3, 6]
+      iterateMoore sumAgent 0 [1, 2, 3 :: Int] == [1, 3, 6]
 
     -- O1: tape is the anamorphism that applies f to each input prefix.
-    -- iterateSystem emits f applied to the state after each input, i.e. the
+    -- iterateMoore emits f applied to the state after each input, i.e. the
     -- non-empty prefixes of the input stream (newest-first), so we drop the
     -- initial empty prefix from scanl.
     let xs = [1, 2, 3 :: Int]
     assert "O1: tape f xs == map f (drop 1 (scanl (flip (:)) [] xs))" $
-      iterateSystem (tape sum) [] xs == map sum (drop 1 (scanl (flip (:)) [] xs))
+      iterateMoore (tape sum) [] xs == map sum (drop 1 (scanl (flip (:)) [] xs))
 
   -------------------------------------------------------------------------
   -- O2: coalgebra homomorphism (compaction invariance as behaviour preservation)
@@ -267,7 +266,7 @@ main = do
         sys2 :: Agent (->) [Int] Int [Int]
         sys2 = tape (f . h)
     assert "O2: summarizer h preserves behaviour" $
-      iterateSystem sys2 (h []) xs == iterateSystem sys1 [] xs
+      iterateMoore sys2 (h []) xs == iterateMoore sys1 [] xs
 
   -------------------------------------------------------------------------
   -- S3: behaviour is functorial over stream concatenation.
@@ -279,22 +278,22 @@ main = do
         agent :: Agent (->) [Int] Int [Int]
         agent = tape (\hist -> [head hist])
         s0 = [] :: [Int]
-    assert "S3: beh s0 (xs ++ ys) == beh s0 xs ++ beh (after agent s0 xs) ys" $
+    assert "S3: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalState agent s0 xs) ys" $
       behA agent s0 (xs ++ ys)
-        == behA agent s0 xs ++ behA agent (after agent s0 xs) ys
+        == behA agent s0 xs ++ behA agent (finalState agent s0 xs) ys
 
   -------------------------------------------------------------------------
   -- Compaction invariance: summary-insensitive folds survive it.
   -------------------------------------------------------------------------
   putStrLn "compaction invariance"
   do
-    let a = tape sum :: System (->) [Int] (Mono Int Int)
+    let a = tape sum :: Moore (,) (->) [Int] (Mono Int Int)
     let (_, s1) = run1 a [] 1
     let (_, s2) = run1 a s1 2
     let (o3, _) = run1 a [sum s2] 3
     assert "sum survives wholesale compaction" $ o3 == 6
 
-    let b = tape length :: System (->) [Int] (Mono Int Int)
+    let b = tape length :: Moore (,) (->) [Int] (Mono Int Int)
     let (_, t1) = run1 b [] 1
     let (_, t2) = run1 b t1 2
     let (p3, _) = run1 b [sum t2] 3
@@ -334,9 +333,9 @@ main = do
         agent :: Agent (->) [Post Text] (Post Text) [Post Text]
         agent = tape (reply "j")
         s0 = [] :: [Post Text]
-    assert "reply functoriality: beh s0 (xs ++ ys) == beh s0 xs ++ beh (after agent s0 xs) ys" $
+    assert "reply functoriality: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalState agent s0 xs) ys" $
       beh agent s0 (xs ++ ys)
-        == beh agent s0 xs ++ beh agent (after agent s0 xs) ys
+        == beh agent s0 xs ++ beh agent (finalState agent s0 xs) ys
 
   -------------------------------------------------------------------------
   -- Delivery: addressed posts, no redelivery.
@@ -970,9 +969,9 @@ main = do
   do
     let liftAgent :: Agent (->) [Post Text] (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         liftAgent sys =
-          system $ \((tag, hist), d) ->
+          moore $ \((tag, hist), d) ->
             let inp = monoDir d
-                (outs, next) = System.runSystemMono sys hist
+                (outs, next) = Moore.runMooreMono sys hist
              in ((tag, next inp), (outs, ()))
         calcOnly :: Agent (->) [Post Text] (Post Text) [Post Text]
         calcOnly = tape calc
@@ -1636,8 +1635,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = system $ K $ \(_, _) -> pure ((), ([p], ()))
-        slowRight = system $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
+        fastLeft = moore $ K $ \(_, _) -> pure ((), ([p], ()))
+        slowRight = moore $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft slowRight) ((), ()) seed
     assert "raceIO: fast left wins" $ outs == [p]
 
@@ -1645,8 +1644,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        slowLeft = system $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
-        fastRight = system $ K $ \(_, _) -> pure ((), ([q], ()))
+        slowLeft = moore $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
+        fastRight = moore $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO slowLeft fastRight) ((), ()) seed
     assert "raceIO: fast right wins" $ outs == [q]
 
@@ -1654,8 +1653,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = system $ K $ \(_, _) -> pure ((), ([p], ()))
-        fastRight = system $ K $ \(_, _) -> pure ((), ([q], ()))
+        fastLeft = moore $ K $ \(_, _) -> pure ((), ([p], ()))
+        fastRight = moore $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft fastRight) ((), ()) seed
     assert "raceIO: both emit -> one of them" $ outs == [p] || outs == [q]
 

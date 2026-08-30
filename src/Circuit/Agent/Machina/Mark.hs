@@ -22,10 +22,10 @@ module Circuit.Agent.Machina.Mark
   )
 where
 
-import Circuit (trace)
 import Circuit.Category (K (..))
 import Circuit.Poles (HasDual (..), Poles (..), emit, polesK)
-import Circuit.Trace (Trace (..), base, yank)
+import Circuit.Trace (Trace, base)
+import Circuit.Traced (yank)
 import Control.Concurrent.STM (STM)
 import Data.Function (fix)
 
