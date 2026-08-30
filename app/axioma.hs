@@ -238,7 +238,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "the pretense"
   do
-    let sumAgent :: Moore (,) (->) Int (Mono Int Int)
+    let sumAgent :: Moore (,) Int (->) (Mono Int Int)
         sumAgent = fromEvalMoore $ \s -> EP (EK s, EE (+ s))
     assert "tape sum == [1,3,6]" $
       iterateMoore (tape sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
@@ -287,13 +287,13 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "compaction invariance"
   do
-    let a = tape sum :: Moore (,) (->) [Int] (Mono Int Int)
+    let a = tape sum :: Moore (,) [Int] (->) (Mono Int Int)
     let (_, s1) = run1 a [] 1
     let (_, s2) = run1 a s1 2
     let (o3, _) = run1 a [sum s2] 3
     assert "sum survives wholesale compaction" $ o3 == 6
 
-    let b = tape length :: Moore (,) (->) [Int] (Mono Int Int)
+    let b = tape length :: Moore (,) [Int] (->) (Mono Int Int)
     let (_, t1) = run1 b [] 1
     let (_, t2) = run1 b t1 2
     let (p3, _) = run1 b [sum t2] 3

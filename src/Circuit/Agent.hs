@@ -397,7 +397,7 @@ type TurnLog a = Seq (Bag a)
 -- positions.  Common log case: @Agent (->) s (Post a) [Post a]@ (input = one post,
 -- output = list of posts).  @Agent (K m) s a b@ is the monadic Moore
 -- machine.
-type Agent arr s a b = Moore (,) arr s (Mono a b)
+type Agent arr s a b = Moore (,) s arr (Mono a b)
 
 -- | Opaque effectful ends: commit an @a@, emit a @b@.
 --
