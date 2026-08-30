@@ -229,7 +229,7 @@ import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
--- >>> import Circuit.Process (iterateMoore)
+-- >>> import Circuit.Moore (iterateMoore)
 
 -- | Agent name on the shared log.
 type Name = Text
