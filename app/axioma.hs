@@ -73,9 +73,8 @@ import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
-import Circuit.Moore (Moore (..), asPProcess, fromEvalMoore, monoDir, monoIn, moore, runMooreMono)
-import Circuit.Process (finalPProcess, scanPProcess)
-import Circuit.Moore qualified as Moore
+import Circuit.Moore (Moore (..), fromEvalMoore, monoDir, monoIn, moore, toEvalMoore)
+import Circuit.Process (asPProcess, asProcess, finalPProcess, scanPProcess)
 import Circuit.Poles (HasDual (..), Poles (..), commit, emit, open, splay0)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos)
 import Circuit.Stream (These (..), Uncons, uncons)
@@ -976,11 +975,13 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "branch agent"
   do
-    let liftAgent :: Agent (->) [Post Text] (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
+    let runMono :: Agent (->) s i o -> s -> (o, i -> s)
+        runMono sys s = case toEvalMoore sys s of EP (EK o, EE f) -> (o, f)
+        liftAgent :: Agent (->) [Post Text] (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         liftAgent sys =
           moore $ \((tag, hist), d) ->
             let inp = monoDir d
-                (outs, next) = Moore.runMooreMono sys hist
+                (outs, next) = runMono sys hist
              in ((tag, next inp), (outs, ()))
         calcOnly :: Agent (->) [Post Text] (Post Text) [Post Text]
         calcOnly = tape calc

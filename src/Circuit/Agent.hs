@@ -204,7 +204,7 @@ where
 import Circuit hiding (eval, race, (.))
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
-import Circuit.Moore (Moore (..), fromEvalMoore, monoDir, monoIn, moore, mooreMorphism, runMooreMono)
+import Circuit.Moore (Moore (..), fromEvalMoore, monoDir, monoIn, moore, mooreMorphism, toEvalMoore)
 import Circuit.Moore qualified as Moore
 import Circuit.Poles (compose, imap, iomap, omap)
 import Circuit.Poly (Eval (..), Mono)
@@ -229,8 +229,7 @@ import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
--- >>> import Circuit.Moore (mooreAsProcess)
--- >>> import Circuit.Process (scan)
+-- >>> import Circuit.Process (asPProcess, asProcess, scan)
 
 -- | Agent name on the shared log.
 type Name = Text
@@ -425,7 +424,7 @@ logEnds = polesK
 
 -- | Born empty, conses each received input onto its history.
 --
--- >>> scan (mooreAsProcess (tape length) []) [1,2,3 :: Int]
+-- >>> scan (asProcess (asPProcess (tape length) [])) [1,2,3 :: Int]
 -- [1,2,3]
 tape :: ([i] -> o) -> Agent (->) [i] i o
 tape f = moore $ \(hist, d) -> (monoDir d : hist, (f hist, ()))
@@ -850,8 +849,9 @@ loopHeteroSubs roster log0 =
 -- post-input timing).
 run1 :: Agent (->) s i o -> s -> i -> (o, s)
 run1 sys s i =
-  let s' = snd (Moore.runMooreMono sys s) i
-      (o, _) = Moore.runMooreMono sys s'
+  let runMono st = case toEvalMoore sys st of EP (EK o', EE f) -> (o', f)
+      s' = snd (runMono s) i
+      (o, _) = runMono s'
    in (o, s')
 
 -- | Lift a pure agent into the 'K' arrow of any functor.
