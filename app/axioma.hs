@@ -73,7 +73,8 @@ import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
-import Circuit.Moore (Moore (..), finalState, fromEvalMoore, iterateMoore, monoDir, monoIn, moore, runMooreMono)
+import Circuit.Moore (Moore (..), asPProcess, fromEvalMoore, monoDir, monoIn, moore, runMooreMono)
+import Circuit.Process (finalPProcess, scanPProcess)
 import Circuit.Moore qualified as Moore
 import Circuit.Poles (HasDual (..), Poles (..), commit, emit, open, splay0)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos)
@@ -112,6 +113,14 @@ assert msg ok =
     else do
       putStrLn ("  FAIL " ++ msg)
       exitFailure
+
+-- | Replacement for the removed 'iterateAgent' runner.
+iterateAgent :: Moore (,) s (->) (Mono i o) -> s -> [i] -> [o]
+iterateAgent sys s0 = scanPProcess (asPProcess sys s0)
+
+-- | Replacement for the removed 'finalAgent' runner.
+finalAgent :: Moore (,) s (->) (Mono i o) -> s -> [i] -> s
+finalAgent sys s0 = finalPProcess (asPProcess sys s0)
 
 -- | Remove a file if present.
 wipe :: FilePath -> IO ()
@@ -212,7 +221,7 @@ main = do
     let idAgent :: Agent (->) [Int] Int Int
         idAgent = tape head
     assert "A0: tape head streams inputs through unchanged" $
-      iterateMoore idAgent [] [1, 2, 3 :: Int] == [1, 2, 3]
+      iterateAgent idAgent [] [1, 2, 3 :: Int] == [1, 2, 3]
 
   -------------------------------------------------------------------------
   -- A1: sequential stream composition
@@ -228,8 +237,8 @@ main = do
         gAgent :: Agent (->) [Int] Int Int
         gAgent = tape (g . head)
         inputs = [1, 2, 3 :: Int]
-        chained = iterateMoore gAgent [] (iterateMoore fAgent [] inputs)
-        direct = iterateMoore (tape (g . f . head)) [] inputs
+        chained = iterateAgent gAgent [] (iterateAgent fAgent [] inputs)
+        direct = iterateAgent (tape (g . f . head)) [] inputs
     assert "A1: chaining outputs equals feeding the composed function" $
       chained == direct
 
@@ -241,17 +250,17 @@ main = do
     let sumAgent :: Moore (,) Int (->) (Mono Int Int)
         sumAgent = fromEvalMoore $ \s -> EP (EK s, EE (+ s))
     assert "tape sum == [1,3,6]" $
-      iterateMoore (tape sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
+      iterateAgent (tape sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
     assert "sumAgent == [1,3,6]" $
-      iterateMoore sumAgent 0 [1, 2, 3 :: Int] == [1, 3, 6]
+      iterateAgent sumAgent 0 [1, 2, 3 :: Int] == [1, 3, 6]
 
     -- O1: tape is the anamorphism that applies f to each input prefix.
-    -- iterateMoore emits f applied to the state after each input, i.e. the
+    -- iterateAgent emits f applied to the state after each input, i.e. the
     -- non-empty prefixes of the input stream (newest-first), so we drop the
     -- initial empty prefix from scanl.
     let xs = [1, 2, 3 :: Int]
     assert "O1: tape f xs == map f (drop 1 (scanl (flip (:)) [] xs))" $
-      iterateMoore (tape sum) [] xs == map sum (drop 1 (scanl (flip (:)) [] xs))
+      iterateAgent (tape sum) [] xs == map sum (drop 1 (scanl (flip (:)) [] xs))
 
   -------------------------------------------------------------------------
   -- O2: coalgebra homomorphism (compaction invariance as behaviour preservation)
@@ -266,7 +275,7 @@ main = do
         sys2 :: Agent (->) [Int] Int [Int]
         sys2 = tape (f . h)
     assert "O2: summarizer h preserves behaviour" $
-      iterateMoore sys2 (h []) xs == iterateMoore sys1 [] xs
+      iterateAgent sys2 (h []) xs == iterateAgent sys1 [] xs
 
   -------------------------------------------------------------------------
   -- S3: behaviour is functorial over stream concatenation.
@@ -278,9 +287,9 @@ main = do
         agent :: Agent (->) [Int] Int [Int]
         agent = tape (\hist -> [head hist])
         s0 = [] :: [Int]
-    assert "S3: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalState agent s0 xs) ys" $
+    assert "S3: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalAgent agent s0 xs) ys" $
       behA agent s0 (xs ++ ys)
-        == behA agent s0 xs ++ behA agent (finalState agent s0 xs) ys
+        == behA agent s0 xs ++ behA agent (finalAgent agent s0 xs) ys
 
   -------------------------------------------------------------------------
   -- Compaction invariance: summary-insensitive folds survive it.
@@ -333,9 +342,9 @@ main = do
         agent :: Agent (->) [Post Text] (Post Text) [Post Text]
         agent = tape (reply "j")
         s0 = [] :: [Post Text]
-    assert "reply functoriality: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalState agent s0 xs) ys" $
+    assert "reply functoriality: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalAgent agent s0 xs) ys" $
       beh agent s0 (xs ++ ys)
-        == beh agent s0 xs ++ beh agent (finalState agent s0 xs) ys
+        == beh agent s0 xs ++ beh agent (finalAgent agent s0 xs) ys
 
   -------------------------------------------------------------------------
   -- Delivery: addressed posts, no redelivery.

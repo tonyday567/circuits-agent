@@ -73,10 +73,10 @@ where
 import Circuit.Agent (Agent, run1)
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
-import Circuit.Moore (fromEvalMoore, iterateMoore)
+import Circuit.Moore (fromEvalMoore, mooreAsProcess)
 import Circuit.Poles (HasDual (..), In (..), Out (..), Poles (..), commit, emit, open)
 import Circuit.Poly (Eval (..))
-import Circuit.Process (Process, mooreAsProcess)
+import Circuit.Process (Process, scan)
 import Circuit.Tensor (Tensor (..))
 import Circuit.Trace (Trace, base)
 import Circuit.Traced (yank)
@@ -103,7 +103,7 @@ import Prelude
 
 -- $setup
 --
--- >>> import Circuit.Moore (iterateMoore)
+-- >>> import Circuit.Process (scan)
 -- >>> import Circuit.Poles (Poles (..), HasDual (..), commit, emit, open)
 -- >>> import Circuit.Category (K (..))
 -- >>> import Data.Text.Encoding (decodeUtf8)
@@ -272,7 +272,7 @@ sink q = runK (commit (conjoint q) outU)
 -- the same stateless grammar.  This is the level-0 mark machine made
 -- literal; 'pumpFrames' is merely its IO interpretation at a 'Handle'.
 --
--- >>> iterateMoore (frameAgent lineMarks decodeUtf8) ("", []) [Just "a\n", Just "b", Nothing]
+-- >>> scan (mooreAsProcess (frameAgent lineMarks decodeUtf8) ("", [])) [Just "a\n", Just "b", Nothing]
 -- [["a"],[],["b"]]
 frameAgent :: ProcMarks -> (BS.ByteString -> a) -> Agent (->) (BS.ByteString, [a]) (Maybe BS.ByteString) [a]
 frameAgent marks decode = fromEvalMoore $ \(buf, pending) ->

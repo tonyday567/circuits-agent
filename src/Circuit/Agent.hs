@@ -229,7 +229,8 @@ import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
--- >>> import Circuit.Moore (iterateMoore)
+-- >>> import Circuit.Moore (mooreAsProcess)
+-- >>> import Circuit.Process (scan)
 
 -- | Agent name on the shared log.
 type Name = Text
@@ -424,7 +425,7 @@ logEnds = polesK
 
 -- | Born empty, conses each received input onto its history.
 --
--- >>> iterateMoore (tape length) [] [1,2,3 :: Int]
+-- >>> scan (mooreAsProcess (tape length) []) [1,2,3 :: Int]
 -- [1,2,3]
 tape :: ([i] -> o) -> Agent (->) [i] i o
 tape f = moore $ \(hist, d) -> (monoDir d : hist, (f hist, ()))
@@ -846,7 +847,7 @@ loopHeteroSubs roster log0 =
 -- | Run a monomial system for one step.
 --
 -- Consume @i@, then extract the output from the successor state (Process /
--- 'iterateMoore' timing).
+-- post-input timing).
 run1 :: Agent (->) s i o -> s -> i -> (o, s)
 run1 sys s i =
   let s' = snd (Moore.runMooreMono sys s) i
