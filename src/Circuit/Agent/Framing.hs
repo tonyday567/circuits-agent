@@ -76,8 +76,8 @@ import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime, parseTimeM)
 import Data.Vector qualified as V
 import Numeric.Natural (Natural)
-import "circuits" Circuit.Stamped (stamp, stamped)
-import "circuits" Circuit.Stamped qualified as Stamped
+import "circuits" Circuit.Boundary (stamp, stamped)
+import "circuits" Circuit.Boundary qualified as Stamped
 import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import "circuits-parser" Circuit.Parser.Json (Json (..), decodeJson, encodeJson)
 import Prelude
@@ -95,14 +95,14 @@ instance PostBody Text where
 
 -- | Storage boundary: a post with its assigned id and timestamp.
 --
--- This is the agent-side specialisation of 'Circuit.Stamped.Stamped' from
+-- This is the agent-side specialisation of 'Circuit.Boundary.Stamped' from
 -- @circuits@ core: the occurrence token is the @(UTCTime, PostId)@ pair and
 -- the payload is a @Post a@.  The core type carries the free theorem that
 -- 'fmap' cannot touch the stamp, so the agent shares it rather than
 -- duplicating it.
 type Stamped a = Stamped.Stamped (UTCTime, PostId) (Post a)
 
--- | The core 'Circuit.Stamped.Stamped' constructor specialised to the agent's
+-- | The core 'Circuit.Boundary.Stamped' constructor specialised to the agent's
 -- occurrence token @(UTCTime, PostId)@.
 pattern Stamped :: (UTCTime, PostId) -> Post a -> Stamped a
 pattern Stamped tok post = Stamped.Stamped tok post
