@@ -73,7 +73,7 @@ where
 import Circuit.Agent (Agent, run1)
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
-import Circuit.Equip (Poles (..), companion, conjoint)
+import Circuit.Equip (Cell (..), Poles (..), companion, conjoint)
 import Circuit.Moore (fromEvalMoore)
 import Circuit.Poly (Eval (..))
 import Circuit.Process (Process, asPProcess, asProcess, scan)
@@ -273,7 +273,7 @@ sink q = runK (conjoint q)
 -- the same stateless grammar.  This is the level-0 mark machine made
 -- literal; 'pumpFrames' is merely its IO interpretation at a 'Handle'.
 --
--- >>> scan (asProcess (asPProcess (frameAgent lineMarks decodeUtf8) ("", []))) [Just "a\n", Just "b", Nothing]
+-- >>> scan (asProcess (asPProcess (frameAgent lineMarks decodeUtf8) (Cell ("", [])))) [Just "a\n", Just "b", Nothing]
 -- [["a"],[],["b"]]
 frameAgent :: ProcMarks -> (BS.ByteString -> a) -> Agent (->) (BS.ByteString, [a]) (Maybe BS.ByteString) [a]
 frameAgent marks decode = fromEvalMoore $ \(buf, pending) ->
@@ -296,7 +296,7 @@ frameAgent marks decode = fromEvalMoore $ \(buf, pending) ->
 -- | The same machine as a 'Process': chunk stream in, frame lists out,
 -- state carried implicitly.
 frameProcess :: ProcMarks -> (BS.ByteString -> a) -> Process (Maybe BS.ByteString) [a]
-frameProcess marks decode = asProcess (asPProcess (frameAgent marks decode) (BS.empty, []))
+frameProcess marks decode = asProcess (asPProcess (frameAgent marks decode) (Cell (BS.empty, [])))
 
 -- | The pumper: the IO interpretation of 'frameAgent' at a 'Handle'.
 -- Blocking reads deliver percepts; payloads are sunk into the queue.

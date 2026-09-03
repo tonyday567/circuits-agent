@@ -204,7 +204,7 @@ import Circuit hiding (eval, race, (.))
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.Equip (compose, imap, iomap, omap)
+import Circuit.Equip (Cell (..), compose, imap, iomap, omap)
 import Circuit.Moore (Moore (..), fromEvalMoore, monoDir, monoIn, moore, mooreMorphism, toEvalMoore)
 import Circuit.Moore qualified as Moore
 import Circuit.Poly (Eval (..), Mono)
@@ -424,7 +424,7 @@ logEnds = polesK
 
 -- | Born empty, conses each received input onto its history.
 --
--- >>> scan (asProcess (asPProcess (tape length) [])) [1,2,3 :: Int]
+-- >>> scan (asProcess (asPProcess (tape length) (Cell []))) [1,2,3 :: Int]
 -- [1,2,3]
 tape :: ([i] -> o) -> Agent (->) [i] i o
 tape f = moore $ \(hist, d) -> (monoDir d : hist, (f hist, ()))

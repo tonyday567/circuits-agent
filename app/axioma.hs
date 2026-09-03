@@ -72,6 +72,7 @@ import Circuit.Agent.Tensor
 import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
+import Circuit.Equip (Cell (..))
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Moore (Moore (..), fromEvalMoore, monoDir, monoIn, moore, toEvalMoore)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos)
@@ -114,11 +115,11 @@ assert msg ok =
 
 -- | Replacement for the removed 'iterateAgent' runner.
 iterateAgent :: Moore (,) s (->) (Mono i o) -> s -> [i] -> [o]
-iterateAgent sys s0 = scanPProcess (asPProcess sys s0)
+iterateAgent sys s0 = scanPProcess (asPProcess sys (Cell s0))
 
 -- | Replacement for the removed 'finalAgent' runner.
 finalAgent :: Moore (,) s (->) (Mono i o) -> s -> [i] -> s
-finalAgent sys s0 = finalPProcess (asPProcess sys s0)
+finalAgent sys s0 = finalPProcess (asPProcess sys (Cell s0))
 
 -- | Remove a file if present.
 wipe :: FilePath -> IO ()

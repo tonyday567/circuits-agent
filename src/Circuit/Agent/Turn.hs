@@ -35,7 +35,7 @@ where
 import Circuit (Trace, base)
 import Circuit.Agent (PostId)
 import Circuit.Category (K (..))
-import Circuit.Equip (Poles (..), companion, conjoint)
+import Circuit.Equip (Cell (..), Poles (..), companion, conjoint)
 import Circuit.Process (Process, mealy)
 import Data.IORef
 import Data.Text (Text)
@@ -85,7 +85,7 @@ matchResponse st@TurnState {pending = Just (cmdId, cmd)} resp
 --   its thread equals the pending command's id, emitting the pair.
 turnProcess :: Process (TurnToken a) (Maybe (TurnToken a, TurnToken a))
 turnProcess =
-  mealy emptyTurnState $ \st tok ->
+  mealy (Cell emptyTurnState) $ \st tok ->
     if null (turnThread tok)
       then (fst (injectCommand st (turnBody tok)), Nothing)
       else matchResponse st tok
