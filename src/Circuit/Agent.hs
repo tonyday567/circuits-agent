@@ -204,8 +204,8 @@ import Circuit hiding (eval, race, (.))
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.Equip (Cell (..), compose, imap, iomap, omap)
-import Circuit.Moore (Moore (..), fromEvalMoore, monoDir, monoIn, moore, mooreMorphism, toEvalMoore)
+import Circuit.Equip (compose, imap, iomap, omap)
+import Circuit.Moore (MachineP (..), fromEvalMachineP, machineMorphismP, machineP, monoDir, monoIn, toEvalMachineP)
 import Circuit.Moore qualified as Moore
 import Circuit.Poly (Eval (..), Mono)
 import Circuit.Process (after)
@@ -229,7 +229,7 @@ import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
--- >>> import Circuit.Process (asPProcess, asProcess, scan)
+-- >>> import Circuit.Process (asProcessP, asProcess, scan)
 
 -- | Agent name on the shared log.
 type Name = Text
@@ -393,11 +393,11 @@ type TurnLog a = Seq (Bag a)
 
 -- | Agent: a Moore machine with free carrier, polymorphic in the base arrow.
 --
--- @Moore (,) arr s (Mono a b) ≅ arr (s, a) (s, b)@ after collapsing unit
+-- @MachineP (,) arr s (Mono a b) ≅ arr (s, a) (s, b)@ after collapsing unit
 -- positions.  Common log case: @Agent (->) s (Post a) [Post a]@ (input = one post,
 -- output = list of posts).  @Agent (K m) s a b@ is the monadic Moore
 -- machine.
-type Agent arr s a b = Moore (,) s arr (Mono a b)
+type Agent arr s a b = MachineP (,) s arr (Mono a b)
 
 -- | Opaque effectful ends: commit an @a@, emit a @b@.
 --
@@ -424,17 +424,17 @@ logEnds = polesK
 
 -- | Born empty, conses each received input onto its history.
 --
--- >>> scan (asProcess (asPProcess (tape length) (Cell []))) [1,2,3 :: Int]
+-- >>> scan (asProcess (asProcessP (tape length) [])) [1,2,3 :: Int]
 -- [1,2,3]
 tape :: ([i] -> o) -> Agent (->) [i] i o
-tape f = moore $ \(hist, d) -> (monoDir d : hist, (f hist, ()))
+tape f = machineP $ \(hist, d) -> (monoDir d : hist, (f hist, ()))
 
 -- | Like 'tape', but also conses the agent's own output onto its history.
 --
 -- This is the internal-monologue construction: an agent's outputs are on the
 -- same log as its percepts, visible to its own future turns.
 selfrec :: ([i] -> i) -> Agent (->) [i] i i
-selfrec f = moore $ \(hist, d) ->
+selfrec f = machineP $ \(hist, d) ->
   let i = monoDir d
       h' = i : hist
    in (f h' : h', (f hist, ()))
@@ -849,7 +849,7 @@ loopHeteroSubs roster log0 =
 -- post-input timing).
 run1 :: Agent (->) s i o -> s -> i -> (o, s)
 run1 sys s i =
-  let runMono st = case toEvalMoore sys st of EP (EK o', EE f) -> (o', f)
+  let runMono st = case toEvalMachineP sys st of EP (EK o', EE f) -> (o', f)
       s' = snd (runMono s) i
       (o, _) = runMono s'
    in (o, s')
@@ -859,12 +859,12 @@ run1 sys s i =
 -- This is the change of base from @(->)@ to @K m@ on the agent itself:
 -- the same Moore coalgebra, but each step now lives in @m@.
 agentM :: (Applicative m) => Agent (->) s a b -> Agent (K m) s a b
-agentM sys = moore (K (pure . mooreMorphism sys))
+agentM sys = machineP (K (pure . machineMorphismP sys))
 
 -- | Run one step of a monadic agent.
 runAgentM :: (Monad m) => Agent (K m) s a b -> s -> a -> m (b, s)
 runAgentM sys s a =
-  runK (mooreMorphism sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
+  runK (machineMorphismP sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
 
 -- | STM agent: state is handled transparently inside an STM transaction.
 type AgentS s a = Agent (K STM) s a [a]
@@ -875,22 +875,22 @@ type AgentX s a = Agent (K IO) s a [a]
 
 -- | Cross from the transparent STM world into the IO boundary.
 agentX :: AgentS s a -> AgentX s a
-agentX sys = moore (K (\(s, d) -> atomically (runK (mooreMorphism sys) (s, d))))
+agentX sys = machineP (K (\(s, d) -> atomically (runK (machineMorphismP sys) (s, d))))
 
 -- | Seat-level product / await in STM.
 awaitS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 awaitS sys1 sys2 =
-  moore $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (mooreMorphism sys1) (s1, d)
-    (s2', (o2, ())) <- runK (mooreMorphism sys2) (s2, d)
+  machineP $ K $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runK (machineMorphismP sys1) (s1, d)
+    (s2', (o2, ())) <- runK (machineMorphismP sys2) (s2, d)
     pure ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race in STM.
 raceS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 raceS sys1 sys2 =
-  moore $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (mooreMorphism sys1) (s1, d)
-    (s2', (o2, ())) <- runK (mooreMorphism sys2) (s2, d)
+  machineP $ K $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runK (machineMorphismP sys1) (s1, d)
+    (s2', (o2, ())) <- runK (machineMorphismP sys2) (s2, d)
     let o = if null o1 then o2 else o1
     pure ((s1', s2'), (o, ()))
 
@@ -903,8 +903,8 @@ raceS sys1 sys2 =
 -- step produces a mark first, not the left-biased deterministic rule.
 raceIO :: AgentX s1 a -> AgentX s2 a -> AgentX (s1, s2) a
 raceIO sys1 sys2 =
-  moore $ K $ \((s1, s2), d) ->
-    raceFirst (runK (mooreMorphism sys1) (s1, d)) (runK (mooreMorphism sys2) (s2, d)) >>= \case
+  machineP $ K $ \((s1, s2), d) ->
+    raceFirst (runK (machineMorphismP sys1) (s1, d)) (runK (machineMorphismP sys2) (s2, d)) >>= \case
       Left (s1', outs) -> pure ((s1', s2), (outs, ()))
       Right (s2', outs) -> pure ((s1, s2'), (outs, ()))
   where
@@ -928,7 +928,7 @@ raceIO sys1 sys2 =
 -- | Run one step of an STM agent.
 stepS :: AgentS s a -> s -> a -> STM (s, [a])
 stepS sys s i = do
-  (s', (outs, ())) <- runK (mooreMorphism sys) (s, monoIn i)
+  (s', (outs, ())) <- runK (machineMorphismP sys) (s, monoIn i)
   pure (s', outs)
 
 -- | Fold an STM agent over a bundle of inputs within one transaction.
@@ -1043,8 +1043,8 @@ beh sys s0 (i : ins) =
 -- branch's update function determines the next state.
 branchAgent :: (s -> Bool) -> Agent (->) s a b -> Agent (->) s a b -> Agent (->) s a b
 branchAgent cond sys1 sys2 =
-  moore $ \(state, d) ->
-    if cond state then mooreMorphism sys1 (state, d) else mooreMorphism sys2 (state, d)
+  machineP $ \(state, d) ->
+    if cond state then machineMorphismP sys1 (state, d) else machineMorphismP sys2 (state, d)
 
 -- | Seat-level product / await: both agents run on the same input; states are
 -- paired; emits are concatenated left-to-right.
@@ -1052,9 +1052,9 @@ awaitA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-awaitA sys1 sys2 = moore $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = mooreMorphism sys1 (s1, d)
-      (s2', (o2, ())) = mooreMorphism sys2 (s2, d)
+awaitA sys1 sys2 = machineP $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = machineMorphismP sys1 (s1, d)
+      (s2', (o2, ())) = machineMorphismP sys2 (s2, d)
    in ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race: both agents run on the same input; states are
@@ -1063,9 +1063,9 @@ raceA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-raceA sys1 sys2 = moore $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = mooreMorphism sys1 (s1, d)
-      (s2', (o2, ())) = mooreMorphism sys2 (s2, d)
+raceA sys1 sys2 = machineP $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = machineMorphismP sys1 (s1, d)
+      (s2', (o2, ())) = machineMorphismP sys2 (s2, d)
       o = if null o1 then o2 else o1
    in ((s1', s2'), (o, ()))
 

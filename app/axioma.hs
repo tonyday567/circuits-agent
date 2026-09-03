@@ -72,11 +72,10 @@ import Circuit.Agent.Tensor
 import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
-import Circuit.Equip (Cell (..))
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
-import Circuit.Moore (Moore (..), fromEvalMoore, monoDir, monoIn, moore, toEvalMoore)
+import Circuit.Moore (MachineP (..), fromEvalMachineP, machineP, monoDir, monoIn, toEvalMachineP)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos)
-import Circuit.Process (asPProcess, asProcess, finalPProcess, scanPProcess)
+import Circuit.Process (asProcess, asProcessP, finalProcessP, scanProcessP)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Circuit.Syntax (eval)
 import Control.Concurrent (forkIO, threadDelay)
@@ -114,12 +113,12 @@ assert msg ok =
       exitFailure
 
 -- | Replacement for the removed 'iterateAgent' runner.
-iterateAgent :: Moore (,) s (->) (Mono i o) -> s -> [i] -> [o]
-iterateAgent sys s0 = scanPProcess (asPProcess sys (Cell s0))
+iterateAgent :: MachineP (,) s (->) (Mono i o) -> s -> [i] -> [o]
+iterateAgent sys s0 = scanProcessP (asProcessP sys s0)
 
 -- | Replacement for the removed 'finalAgent' runner.
-finalAgent :: Moore (,) s (->) (Mono i o) -> s -> [i] -> s
-finalAgent sys s0 = finalPProcess (asPProcess sys (Cell s0))
+finalAgent :: MachineP (,) s (->) (Mono i o) -> s -> [i] -> s
+finalAgent sys s0 = finalProcessP (asProcessP sys s0)
 
 -- | Remove a file if present.
 wipe :: FilePath -> IO ()
@@ -246,8 +245,8 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "the pretense"
   do
-    let sumAgent :: Moore (,) Int (->) (Mono Int Int)
-        sumAgent = fromEvalMoore $ \s -> EP (EK s, EE (+ s))
+    let sumAgent :: MachineP (,) Int (->) (Mono Int Int)
+        sumAgent = fromEvalMachineP $ \s -> EP (EK s, EE (+ s))
     assert "tape sum == [1,3,6]" $
       iterateAgent (tape sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
     assert "sumAgent == [1,3,6]" $
@@ -295,13 +294,13 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "compaction invariance"
   do
-    let a = tape sum :: Moore (,) [Int] (->) (Mono Int Int)
+    let a = tape sum :: MachineP (,) [Int] (->) (Mono Int Int)
     let (_, s1) = run1 a [] 1
     let (_, s2) = run1 a s1 2
     let (o3, _) = run1 a [sum s2] 3
     assert "sum survives wholesale compaction" $ o3 == 6
 
-    let b = tape length :: Moore (,) [Int] (->) (Mono Int Int)
+    let b = tape length :: MachineP (,) [Int] (->) (Mono Int Int)
     let (_, t1) = run1 b [] 1
     let (_, t2) = run1 b t1 2
     let (p3, _) = run1 b [sum t2] 3
@@ -976,10 +975,10 @@ main = do
   putStrLn "branch agent"
   do
     let runMono :: Agent (->) s i o -> s -> (o, i -> s)
-        runMono sys s = case toEvalMoore sys s of EP (EK o, EE f) -> (o, f)
+        runMono sys s = case toEvalMachineP sys s of EP (EK o, EE f) -> (o, f)
         liftAgent :: Agent (->) [Post Text] (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         liftAgent sys =
-          moore $ \((tag, hist), d) ->
+          machineP $ \((tag, hist), d) ->
             let inp = monoDir d
                 (outs, next) = runMono sys hist
              in ((tag, next inp), (outs, ()))
@@ -1645,8 +1644,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = moore $ K $ \(_, _) -> pure ((), ([p], ()))
-        slowRight = moore $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
+        fastLeft = machineP $ K $ \(_, _) -> pure ((), ([p], ()))
+        slowRight = machineP $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft slowRight) ((), ()) seed
     assert "raceIO: fast left wins" $ outs == [p]
 
@@ -1654,8 +1653,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        slowLeft = moore $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
-        fastRight = moore $ K $ \(_, _) -> pure ((), ([q], ()))
+        slowLeft = machineP $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
+        fastRight = machineP $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO slowLeft fastRight) ((), ()) seed
     assert "raceIO: fast right wins" $ outs == [q]
 
@@ -1663,8 +1662,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = moore $ K $ \(_, _) -> pure ((), ([p], ()))
-        fastRight = moore $ K $ \(_, _) -> pure ((), ([q], ()))
+        fastLeft = machineP $ K $ \(_, _) -> pure ((), ([p], ()))
+        fastRight = machineP $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft fastRight) ((), ()) seed
     assert "raceIO: both emit -> one of them" $ outs == [p] || outs == [q]
 
