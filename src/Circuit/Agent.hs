@@ -409,7 +409,7 @@ type Agent arr s a b = MachineP (,) s arr (Mono a b)
 -- @
 --
 -- Emit is an onslaught of posts (empty = quiet \/ done for that poll).
-type Shard m a b = Poles () () (K m) a b
+type Shard m a b = Poles () () (K m) (K m) a b
 
 -- | Same ends shape as 'Shard' — dual seat on the log (journal 013).
 type LogEnds m a b = Shard m a b
@@ -950,21 +950,21 @@ runAgentS :: AgentS s a -> s -> [a] -> IO ([a], s)
 runAgentS sys s0 ins = (\(s, os) -> (os, s)) <$> atomically (stepsS sys s0 ins)
 
 -- | Unit poles for lifting single-token reads/writes out of a 'Poles' value.
-unitEndsSTM :: Poles () () (K STM) () ()
+unitEndsSTM :: Poles () () (K STM) (K STM) () ()
 unitEndsSTM = polesK (const (pure ())) (pure ())
 
 -- | Read one token from an STM pole.
-readEndSTM :: Poles () () (K STM) a a -> STM a
+readEndSTM :: Poles () () (K STM) (K STM) a a -> STM a
 readEndSTM ends = runK (plug (Cat.id :: K STM () ()) (Poles (conjoint unitEndsSTM) (companion ends))) ()
 
 -- | Write one token to an STM pole.
-writeEndSTM :: Poles () () (K STM) a a -> a -> STM ()
+writeEndSTM :: Poles () () (K STM) (K STM) a a -> a -> STM ()
 writeEndSTM ends = runK (plug (Cat.id :: K STM () ()) (Poles (conjoint ends) (companion unitEndsSTM)))
 
 -- | Wire an STM agent between an inbox and an outbox, running until
 -- quiescence.  Quiescence is detected via 'orElse': if the inbox is empty
 -- (retry), the loop returns the current state.
-agentLoopS :: AgentS s a -> s -> Poles () () (K STM) a a -> Poles () () (K STM) a a -> STM s
+agentLoopS :: AgentS s a -> s -> Poles () () (K STM) (K STM) a a -> Poles () () (K STM) (K STM) a a -> STM s
 agentLoopS agent s0 inbox outbox = go s0
   where
     go s =
@@ -977,15 +977,15 @@ agentLoopS agent s0 inbox outbox = go s0
         `orElse` pure s
 
 -- | Self-loop: the agent reads from and writes to the same STM end.
-selfLoopS :: AgentS s a -> s -> Poles () () (K STM) a a -> STM s
+selfLoopS :: AgentS s a -> s -> Poles () () (K STM) (K STM) a a -> STM s
 selfLoopS agent s0 ends = agentLoopS agent s0 ends ends
 
 -- | One frame of the bundle self-loop, expressed in the Either-trace halt
 -- alphabet: 'Left' = continue, 'Right' = quiesce and return this state.
 selfLoopFrame ::
   AgentS s a ->
-  Poles () () (K STM) [a] [a] ->
-  Poles () () (K STM) [a] [a] ->
+  Poles () () (K STM) (K STM) [a] [a] ->
+  Poles () () (K STM) (K STM) [a] [a] ->
   K STM (Either s s) (Either s s)
 selfLoopFrame agent inbox outbox = K $ \case
   Right s -> loopStep s
@@ -1007,8 +1007,8 @@ selfLoopFrame agent inbox outbox = K $ \case
 -- quiescence, expressed as a 'Trace Either' value.
 agentLoopL ::
   AgentS s a ->
-  Poles () () (K STM) [a] [a] ->
-  Poles () () (K STM) [a] [a] ->
+  Poles () () (K STM) (K STM) [a] [a] ->
+  Poles () () (K STM) (K STM) [a] [a] ->
   Trace Either (K STM) s s
 agentLoopL agent inbox outbox = yank (base (selfLoopFrame agent inbox outbox))
 
@@ -1016,7 +1016,7 @@ agentLoopL agent inbox outbox = yank (base (selfLoopFrame agent inbox outbox))
 selfLoopL ::
   AgentS s a ->
   s ->
-  Poles () () (K STM) [a] [a] ->
+  Poles () () (K STM) (K STM) [a] [a] ->
   STM s
 selfLoopL agent s0 ends = runK (eval (agentLoopL agent ends ends)) s0
 
@@ -1161,7 +1161,7 @@ runAgentShard sys seat ins =
 -- A /tool call/ from an agent is just a 'Post': the 'to' list names the
 -- tool, 'body' carries the arguments. No extra type — emit that 'Post' on a
 -- 'Port' (or post it on the log for the tool agent to 'watch').
-type Port m a = Poles () () (K m) (Post a) (Post a)
+type Port m a = Poles () () (K m) (K m) (Post a) (Post a)
 
 -- 'Snoc' is re-exported from 'Circuit.Stream' (construction dual of 'Uncons').
 

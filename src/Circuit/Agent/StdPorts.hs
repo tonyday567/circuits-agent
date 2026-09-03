@@ -199,9 +199,9 @@ splitFrame (ProcMarks marks) buf =
 -- the queue when the stream has not produced one yet.  There is no
 -- empty-read result — quiet is not an opinion here.
 data StdPorts a b c = StdPorts
-  { stdIn :: Poles () () (K IO) a (),
-    stdOut :: Poles () () (K IO) () b,
-    stdErr :: Poles () () (K IO) () c,
+  { stdIn :: Poles () () (K IO) (K IO) a (),
+    stdOut :: Poles () () (K IO) (K IO) () b,
+    stdErr :: Poles () () (K IO) (K IO) () c,
     stdClose :: IO ()
   }
 
@@ -263,7 +263,7 @@ openStdPorts encode decode cfg = yank (base (K step))
       pure (Right ports)
 
 -- | Commit one token to a queue end.
-sink :: Poles () () (K IO) a a -> a -> IO ()
+sink :: Poles () () (K IO) (K IO) a a -> a -> IO ()
 sink q = runK (conjoint q)
 
 -- | The pumper as an agent: a Moore machine from maybe-chunks to frame
@@ -325,17 +325,17 @@ pumpFrames marks decode h snk = go (BS.empty, [])
 
 -- | Client view of a process: two 'Poles' sharing stdin, plus resource close.
 data ProcEnds a b c = ProcEnds
-  { procStdio :: Poles () () (K IO) a b,
-    procStderr :: Poles () () (K IO) a c,
+  { procStdio :: Poles () () (K IO) (K IO) a b,
+    procStderr :: Poles () () (K IO) (K IO) a c,
     procClose :: IO ()
   }
 
 -- | Stdin write + stdout read as matched 'Poles'.
-stdioEnds :: StdPorts a b c -> Poles () () (K IO) a b
+stdioEnds :: StdPorts a b c -> Poles () () (K IO) (K IO) a b
 stdioEnds pp = Poles (conjoint (stdIn pp)) (companion (stdOut pp))
 
 -- | Stdin write + stderr read as matched 'Poles'.
-stderrEnds :: StdPorts a b c -> Poles () () (K IO) a c
+stderrEnds :: StdPorts a b c -> Poles () () (K IO) (K IO) a c
 stderrEnds pp = Poles (conjoint (stdIn pp)) (companion (stdErr pp))
 
 -- | Open a process and return the dual-seat client view as a 'Trace' 'Either'.

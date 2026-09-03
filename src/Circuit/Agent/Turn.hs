@@ -93,7 +93,7 @@ turnProcess =
 -- | Run one turn: commit a body, then block until a matching response
 -- arrives.  The correlation is by 'thread', not by position.
 turn ::
-  Poles () () (K IO) (TurnToken Text) (TurnToken Text) ->
+  Poles () () (K IO) (K IO) (TurnToken Text) (TurnToken Text) ->
   IO (Trace (,) (K IO) Text Text)
 turn e = do
   ref <- newIORef emptyTurnState
@@ -112,7 +112,7 @@ turn e = do
 -- unarrived response is not lost — the next emit still receives it.
 turnTimeout ::
   Int ->
-  Poles () () (K IO) (TurnToken Text) (TurnToken Text) ->
+  Poles () () (K IO) (K IO) (TurnToken Text) (TurnToken Text) ->
   IO (Trace (,) (K IO) Text (Maybe Text))
 turnTimeout us e = do
   ref <- newIORef emptyTurnState

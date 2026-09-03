@@ -1733,7 +1733,7 @@ main = do
         selfEcho = agentM $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
-        drainEnd :: Poles () () (K STM) a a -> STM [a]
+        drainEnd :: Poles () () (K STM) (K STM) a a -> STM [a]
         drainEnd ends = go []
           where
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
@@ -1747,14 +1747,14 @@ main = do
         quiesce frame = fix $ \go -> (frame C..> go) `orElseA` C.id
 
         -- \| Spike A: one token per frame, no do/bind in the frame.
-        frameToken :: AgentS s a -> Poles () () (K STM) a a -> Poles () () (K STM) a a -> K STM s s
+        frameToken :: AgentS s a -> Poles () () (K STM) (K STM) a a -> Poles () () (K STM) (K STM) a a -> K STM s s
         frameToken agent inbox outbox =
           K (\s -> (s,) <$> readEndSTM inbox)
             C..> K (Prelude.uncurry (stepS agent))
             C..> K (\(s', outs) -> s' <$ traverse_ (writeEndSTM outbox) outs)
 
         -- \| Spike B: one bundle per frame over a bundle wire.
-        frameBundle :: AgentS s a -> Poles () () (K STM) [a] [a] -> Poles () () (K STM) [a] [a] -> K STM s s
+        frameBundle :: AgentS s a -> Poles () () (K STM) (K STM) [a] [a] -> Poles () () (K STM) (K STM) [a] [a] -> K STM s s
         frameBundle agent inbox outbox =
           K (\s -> (s,) <$> readEndSTM inbox)
             C..> K (Prelude.uncurry (stepsS agent))
@@ -1810,7 +1810,7 @@ main = do
         selfEcho = agentM $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
-        drainEnd :: Poles () () (K STM) a a -> STM [a]
+        drainEnd :: Poles () () (K STM) (K STM) a a -> STM [a]
         drainEnd ends = go []
           where
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
@@ -1985,9 +1985,9 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let runnerPoles :: Poles () () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let runnerPoles :: Poles () () (K IO) (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-        processPoles :: Poles () () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processPoles :: Poles () () (K IO) (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         -- Responder: read one command and reply with the command id in thread.
         responder = do
@@ -2007,9 +2007,9 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let runnerPoles :: Poles () () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let runnerPoles :: Poles () () (K IO) (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-        processPoles :: Poles () () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processPoles :: Poles () () (K IO) (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         responder = do
           cmd <- runK (companion processPoles) ()
@@ -2025,7 +2025,7 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let runnerPoles :: Poles () () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let runnerPoles :: Poles () () (K IO) (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
     turnLoop <- TurnPort.turnTimeout 10000 runnerPoles
     result <- runK (eval turnLoop) "hello"
