@@ -35,7 +35,7 @@ where
 import Circuit (Trace, base)
 import Circuit.Agent (PostId)
 import Circuit.Category (K (..))
-import Circuit.Equip (HasDual (..), Poles (..), commit, emit, open)
+import Circuit.Equip (Poles (..), companion, conjoint)
 import Circuit.Process (Process, mealy)
 import Data.IORef
 import Data.Text (Text)
@@ -90,50 +90,40 @@ turnProcess =
       then (fst (injectCommand st (turnBody tok)), Nothing)
       else matchResponse st tok
 
--- | Read the unit poles used to plug the unused side of a commit or emit.
-unitEnds :: Poles (K IO) () ()
-unitEnds = open
-
 -- | Run one turn: commit a body, then block until a matching response
 -- arrives.  The correlation is by 'thread', not by position.
 turn ::
-  Poles (K IO) (TurnToken Text) (TurnToken Text) ->
+  Poles () () (K IO) (TurnToken Text) (TurnToken Text) ->
   IO (Trace (,) (K IO) Text Text)
 turn e = do
   ref <- newIORef emptyTurnState
   pure . base . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
-    runK (commit (conjoint e) outU) cmd
+    runK (conjoint e) cmd
     let loop = do
-          resp <- runK (emit (companion e) inU) ()
+          resp <- runK (companion e) ()
           mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
           case mResult of
             Just (_, resp') -> pure (turnBody resp')
             Nothing -> loop
     loop
-  where
-    Poles _ outU = unitEnds
-    Poles inU _ = unitEnds
 
 -- | 'turn' under a deadline (microseconds).  'Nothing' on expiry; the
 -- unarrived response is not lost — the next emit still receives it.
 turnTimeout ::
   Int ->
-  Poles (K IO) (TurnToken Text) (TurnToken Text) ->
+  Poles () () (K IO) (TurnToken Text) (TurnToken Text) ->
   IO (Trace (,) (K IO) Text (Maybe Text))
 turnTimeout us e = do
   ref <- newIORef emptyTurnState
   pure . base . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
-    runK (commit (conjoint e) outU) cmd
+    runK (conjoint e) cmd
     timeout us $ do
       let loop = do
-            resp <- runK (emit (companion e) inU) ()
+            resp <- runK (companion e) ()
             mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
             case mResult of
               Just (_, resp') -> pure (turnBody resp')
               Nothing -> loop
       loop
-  where
-    Poles _ outU = unitEnds
-    Poles inU _ = unitEnds

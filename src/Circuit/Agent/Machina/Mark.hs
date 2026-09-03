@@ -23,14 +23,15 @@ module Circuit.Agent.Machina.Mark
 where
 
 import Circuit.Category (K (..))
-import Circuit.Equip (HasDual (..), Poles (..), emit, polesK)
+import Circuit.Category qualified as Cat
+import Circuit.Equip (Poles (..), plug, polesK)
 import Circuit.Trace (Trace, base)
 import Circuit.Traced (yank)
 import Control.Concurrent.STM (STM)
 import Data.Function (fix)
 
 -- | Unit poles for plugging the unused slot when reading or writing one end.
-endsU :: Poles (K STM) () ()
+endsU :: Poles () () (K STM) () ()
 endsU = polesK (const (pure ())) (pure ())
 
 -- | Spin until the mark is /read/: the builder posts its silence as a token,
@@ -41,9 +42,9 @@ endsU = polesK (const (pure ())) (pure ())
 -- Contrast a plain 'retry'-driven spin: that frame drains the queue and falls
 -- through on absence; mark-driven halt is decisive mid-stream — tokens after
 -- the mark are never consumed.
-spinMark :: (a -> Bool) -> (s -> a -> s) -> Poles (K STM) a a -> K STM s s
+spinMark :: (a -> Bool) -> (s -> a -> s) -> Poles () () (K STM) a a -> K STM s s
 spinMark isMark step e = fix $ \go -> K $ \s -> do
-  a <- runK (emit (companion e) (conjoint endsU)) ()
+  a <- runK (plug (Cat.id :: K STM () ()) (Poles (conjoint endsU) (companion e))) ()
   if isMark a
     then pure s
     else runK go (step s a)
@@ -51,10 +52,10 @@ spinMark isMark step e = fix $ \go -> K $ \s -> do
 -- | One mark frame in the 'Either'-trace halt alphabet: 'Left' = continue,
 -- 'Right' = halt.  The read is committed before the decision, so the mark is
 -- consumed either way.
-markFrame :: (a -> Bool) -> (s -> a -> s) -> Poles (K STM) a a -> K STM (Either s s) (Either s s)
+markFrame :: (a -> Bool) -> (s -> a -> s) -> Poles () () (K STM) a a -> K STM (Either s s) (Either s s)
 markFrame isMark step e = K $ \es -> do
   let s = either id id es
-  a <- runK (emit (companion e) (conjoint endsU)) ()
+  a <- runK (plug (Cat.id :: K STM () ()) (Poles (conjoint endsU) (companion e))) ()
   pure
     ( if isMark a
         then Right s
@@ -65,5 +66,5 @@ markFrame isMark step e = K $ \es -> do
 -- citizen.  The halt decision travels as data through the channel and the
 -- 'trace' folds the continuation away — the runner is a value, not a loop
 -- spelled in 'fix'.
-markLoop :: (a -> Bool) -> (s -> a -> s) -> Poles (K STM) a a -> Trace Either (K STM) s s
+markLoop :: (a -> Bool) -> (s -> a -> s) -> Poles () () (K STM) a a -> Trace Either (K STM) s s
 markLoop isMark step e = yank (base (markFrame isMark step e))

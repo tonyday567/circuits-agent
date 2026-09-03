@@ -73,7 +73,7 @@ where
 import Circuit.Agent (Agent, run1)
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
-import Circuit.Equip (HasDual (..), In (..), Out (..), Poles (..), commit, emit, open)
+import Circuit.Equip (Poles (..), companion, conjoint)
 import Circuit.Moore (fromEvalMoore)
 import Circuit.Poly (Eval (..))
 import Circuit.Process (Process, asPProcess, asProcess, scan)
@@ -104,7 +104,7 @@ import Prelude
 -- $setup
 --
 -- >>> import Circuit.Process (scan)
--- >>> import Circuit.Equip (Poles (..), HasDual (..), commit, emit, open)
+-- >>> import Circuit.Equip (Poles (..), companion, conjoint, open)
 -- >>> import Circuit.Category (K (..))
 -- >>> import Data.Text.Encoding (decodeUtf8)
 
@@ -192,16 +192,16 @@ splitFrame (ProcMarks marks) buf =
 -- Process ports
 -- ---------------------------------------------------------------------------
 
--- | A process token with three free dual seats: stdin commit, stdout emit,
--- and stderr emit.
+-- | A process token with three matched poles: stdin write, stdout read,
+-- and stderr read.
 --
--- The emit seats block: an emit returns the next complete frame, waiting on
+-- The read poles block: a read returns the next complete frame, waiting on
 -- the queue when the stream has not produced one yet.  There is no
 -- empty-read result — quiet is not an opinion here.
 data StdPorts a b c = StdPorts
-  { stdIn :: In (K IO) a,
-    stdOut :: Out (K IO) b,
-    stdErr :: Out (K IO) c,
+  { stdIn :: Poles () () (K IO) a (),
+    stdOut :: Poles () () (K IO) () b,
+    stdErr :: Poles () () (K IO) () c,
     stdClose :: IO ()
   }
 
@@ -243,12 +243,15 @@ openStdPorts encode decode cfg = yank (base (K step))
 
       let ports =
             StdPorts
-              { stdIn = In $ \o -> K $ \a -> do
-                  BS.hPutStr stdinH (encode a <> "\n")
-                  hFlush stdinH
-                  runK (emit o (stdIn ports)) a,
-                stdOut = companion qOut,
-                stdErr = companion qErr,
+              { stdIn =
+                  Poles
+                    ( K $ \a -> do
+                        BS.hPutStr stdinH (encode a <> "\n")
+                        hFlush stdinH
+                    )
+                    (K $ \_ -> pure ()),
+                stdOut = Poles (K $ \_ -> pure ()) (companion qOut),
+                stdErr = Poles (K $ \_ -> pure ()) (companion qErr),
                 stdClose = do
                   void $ try @IOException (hClose stdinH)
                   terminateProcess ph
@@ -259,11 +262,9 @@ openStdPorts encode decode cfg = yank (base (K step))
     step (Left ports) =
       pure (Right ports)
 
--- | Commit one token to a queue end, plugged with unit poles.
-sink :: Poles (K IO) a a -> a -> IO ()
-sink q = runK (commit (conjoint q) outU)
-  where
-    Poles _ outU = open :: Poles (K IO) () ()
+-- | Commit one token to a queue end.
+sink :: Poles () () (K IO) a a -> a -> IO ()
+sink q = runK (conjoint q)
 
 -- | The pumper as an agent: a Moore machine from maybe-chunks to frame
 -- lists.  The carrier is @(buffer, pending)@ — the unexplained suffix and
@@ -324,18 +325,18 @@ pumpFrames marks decode h snk = go (BS.empty, [])
 
 -- | Client view of a process: two 'Poles' sharing stdin, plus resource close.
 data ProcEnds a b c = ProcEnds
-  { procStdio :: Poles (K IO) a b,
-    procStderr :: Poles (K IO) a c,
+  { procStdio :: Poles () () (K IO) a b,
+    procStderr :: Poles () () (K IO) a c,
     procClose :: IO ()
   }
 
--- | Stdin commit + stdout emit as matched 'Poles'.
-stdioEnds :: StdPorts a b c -> Poles (K IO) a b
-stdioEnds pp = Poles (stdIn pp) (stdOut pp)
+-- | Stdin write + stdout read as matched 'Poles'.
+stdioEnds :: StdPorts a b c -> Poles () () (K IO) a b
+stdioEnds pp = Poles (conjoint (stdIn pp)) (companion (stdOut pp))
 
--- | Stdin commit + stderr emit as matched 'Poles'.
-stderrEnds :: StdPorts a b c -> Poles (K IO) a c
-stderrEnds pp = Poles (stdIn pp) (stdErr pp)
+-- | Stdin write + stderr read as matched 'Poles'.
+stderrEnds :: StdPorts a b c -> Poles () () (K IO) a c
+stderrEnds pp = Poles (conjoint (stdIn pp)) (companion (stdErr pp))
 
 -- | Open a process and return the dual-seat client view as a 'Trace' 'Either'.
 openProc ::
@@ -358,38 +359,42 @@ openProc encode decode cfg =
 portsEnds :: StdPorts a b c -> Trace (,) (K IO) (a, ((), ())) ((), (b, c))
 portsEnds pp = tensor commitM (tensor outM errM)
   where
-    commitM = base (commit (stdIn pp) outUIn)
-    outM = base (emit (stdOut pp) inUOut)
-    errM = base (emit (stdErr pp) inUErr)
-    Poles _inUIn outUIn = open
-    Poles inUOut _ = open
-    Poles inUErr _ = open
+    commitM = base (conjoint (stdIn pp))
+    outM = base (companion (stdOut pp))
+    errM = base (companion (stdErr pp))
 
 -- ---------------------------------------------------------------------------
 -- In-memory test harness
 -- ---------------------------------------------------------------------------
 
--- | An in-memory echo repl: commit a token, emit the transformed result.
+-- | An in-memory echo repl: write a token, read the transformed result.
 -- No process, no files.  For fast bus-connector testing.
 --
 -- >>> pp <- echo pure :: IO (StdPorts String String ())
--- >>> runK (commit (stdIn pp) (companion (open :: Poles (K IO) () ()))) "hi"
--- >>> runK (emit (stdOut pp) (conjoint (open :: Poles (K IO) () ()))) ()
+-- >>> runK (conjoint (stdIn pp)) "hi"
+-- >>> runK (companion (stdOut pp)) ()
 -- "hi"
 echo :: (a -> IO a) -> IO (StdPorts a a ())
 echo f = do
   ref <- newIORef Nothing
   let ports =
         StdPorts
-          { stdIn = In $ \o -> K $ \a -> do
-              result <- f a
-              writeIORef ref (Just result)
-              runK (emit o (stdIn ports)) a,
-            stdOut = Out $ \_ -> K $ \_ -> do
-              m <- readIORef ref
-              writeIORef ref Nothing
-              pure (fromMaybe (error "echo: no input yet") m),
-            stdErr = Out $ \_ -> K $ \_ -> pure (),
+          { stdIn =
+              Poles
+                ( K $ \a -> do
+                    result <- f a
+                    writeIORef ref (Just result)
+                )
+                (K $ \_ -> pure ()),
+            stdOut =
+              Poles
+                (K $ \_ -> pure ())
+                ( K $ \_ -> do
+                    m <- readIORef ref
+                    writeIORef ref Nothing
+                    pure (fromMaybe (error "echo: no input yet") m)
+                ),
+            stdErr = Poles (K $ \_ -> pure ()) (K $ \_ -> pure ()),
             stdClose = pure ()
           }
   pure ports

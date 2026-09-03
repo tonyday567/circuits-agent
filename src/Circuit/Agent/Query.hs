@@ -125,4 +125,4 @@ echoShard who = queryShard who pure
 
 -- | One closed shard turn: commit @ins@, emit replies.
 runShardIO :: Shard IO [Post Text] [Post Text] -> [Post Text] -> IO [Post Text]
-runShardIO sh = runK (close (conjoint sh) (companion sh))
+runShardIO sh = runK (close sh)

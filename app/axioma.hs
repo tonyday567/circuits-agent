@@ -72,7 +72,6 @@ import Circuit.Agent.Tensor
 import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
-import Circuit.Equip (HasDual (..), Poles (..), commit, emit, open, splay0)
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Moore (Moore (..), fromEvalMoore, monoDir, monoIn, moore, toEvalMoore)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos)
@@ -130,7 +129,7 @@ wipe f = do
 -- | Close a same-type agent shard once.
 closeShardIO :: AgentShard [Post Text] [Post Text] -> [Post Text] -> [Post Text] -> IO ([Post Text], [Post Text])
 closeShardIO sh x s0 = do
-  (s', outs) <- runK (morphism (close (conjoint sh) (companion sh))) (s0, x)
+  (s', outs) <- runK (morphism (close sh)) (s0, x)
   pure (outs, s')
 
 peek :: [Post Text] -> Post Text
@@ -880,14 +879,14 @@ main = do
         fixedShard :: Shard Identity [Post Text] [Post Text]
         fixedShard = polesK (\_ -> pure ()) (pure [p2])
         coded = codecShard (map (\p -> p {body = "in:" <> body p})) (map (\p -> p {body = body p <> ":out"})) fixedShard
-        out = runIdentity (runK (close (conjoint coded) (companion coded)) [p1])
+        out = runIdentity (runK (close coded) [p1])
     assert "codec transforms commit and emit" $
       map body out == ["ack:out"]
 
     let accumShard :: Shard (State [Post Text]) [Post Text] [Post Text]
         accumShard = polesK (\ps -> modify (ps ++)) get
         composed = composeShard accumShard (suffixShard (map (\p -> p {body = body p <> "!"})) accumShard)
-        (out2, st) = runState (runK (close (conjoint composed) (companion composed)) [p1]) []
+        (out2, st) = runState (runK (close composed) [p1]) []
     assert "compose chains shards through the monad" $
       map body out2 == ["hi!", "hi!"] && length st == 2
 
@@ -936,7 +935,7 @@ main = do
         sh = agentShard get put ack
         (outs2, seat2) =
           runState
-            (runK (close (conjoint sh) (companion sh)) [pIn])
+            (runK (close sh) [pIn])
             (AgentSeat [] [])
     assert "agentShard close matches runAgentShard" $
       outs2 == outs && asState seat2 == asState seat
@@ -1031,7 +1030,7 @@ main = do
             sh
         (pOut, (seat', inB, outB)) =
           runState
-            (runK (close (conjoint port) (companion port)) pIn)
+            (runK (close port) pIn)
             (AgentSeat [] [], [], [])
     assert "port close: one Post in, one Post out" $
       body pOut == "ack: hi"
@@ -1041,7 +1040,7 @@ main = do
     let pIn2 = mkPost "human" ["j"] "again"
         (pOut2, (seat2, _, _)) =
           runState
-            (runK (close (conjoint port) (companion port)) pIn2)
+            (runK (close port) pIn2)
             (seat', [], [])
     assert "port keeps agent carrier across token turns" $
       body pOut2 == "ack: again" && length (asState seat2) == 2
@@ -1092,7 +1091,7 @@ main = do
             sh
         (pOut, (seatPort, _, _)) =
           runState
-            (runK (close (conjoint port) (companion port)) human)
+            (runK (close port) human)
             (AgentSeat [] [], [], [])
     assert "port example: human Post in → tool-call Post out" $
       from pOut == "j" && to pOut == ["calc"] && body pOut == "1 2 3"
@@ -1734,7 +1733,7 @@ main = do
         selfEcho = agentM $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
-        drainEnd :: Poles (K STM) a a -> STM [a]
+        drainEnd :: Poles () () (K STM) a a -> STM [a]
         drainEnd ends = go []
           where
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
@@ -1748,14 +1747,14 @@ main = do
         quiesce frame = fix $ \go -> (frame C..> go) `orElseA` C.id
 
         -- \| Spike A: one token per frame, no do/bind in the frame.
-        frameToken :: AgentS s a -> Poles (K STM) a a -> Poles (K STM) a a -> K STM s s
+        frameToken :: AgentS s a -> Poles () () (K STM) a a -> Poles () () (K STM) a a -> K STM s s
         frameToken agent inbox outbox =
           K (\s -> (s,) <$> readEndSTM inbox)
             C..> K (Prelude.uncurry (stepS agent))
             C..> K (\(s', outs) -> s' <$ traverse_ (writeEndSTM outbox) outs)
 
         -- \| Spike B: one bundle per frame over a bundle wire.
-        frameBundle :: AgentS s a -> Poles (K STM) [a] [a] -> Poles (K STM) [a] [a] -> K STM s s
+        frameBundle :: AgentS s a -> Poles () () (K STM) [a] [a] -> Poles () () (K STM) [a] [a] -> K STM s s
         frameBundle agent inbox outbox =
           K (\s -> (s,) <$> readEndSTM inbox)
             C..> K (Prelude.uncurry (stepsS agent))
@@ -1811,7 +1810,7 @@ main = do
         selfEcho = agentM $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
-        drainEnd :: Poles (K STM) a a -> STM [a]
+        drainEnd :: Poles () () (K STM) a a -> STM [a]
         drainEnd ends = go []
           where
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
@@ -1986,17 +1985,15 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let Poles _ outU = open :: Poles (K IO) () ()
-        Poles inU _ = open :: Poles (K IO) () ()
-        runnerPoles :: Poles (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let runnerPoles :: Poles () () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-        processPoles :: Poles (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processPoles :: Poles () () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         -- Responder: read one command and reply with the command id in thread.
         responder = do
-          cmd <- runK (emit (companion processPoles) inU) ()
+          cmd <- runK (companion processPoles) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runK (commit (conjoint processPoles) outU) resp
+          runK (conjoint processPoles) resp
     turnLoop <- TurnPort.turn runnerPoles
     -- Run the responder in parallel with the turn, but wait for the turn
     -- result before cancelling the responder.  A raw race cancels the loser
@@ -2010,16 +2007,14 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let Poles _ outU = open :: Poles (K IO) () ()
-        Poles inU _ = open :: Poles (K IO) () ()
-        runnerPoles :: Poles (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let runnerPoles :: Poles () () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-        processPoles :: Poles (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processPoles :: Poles () () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         responder = do
-          cmd <- runK (emit (companion processPoles) inU) ()
+          cmd <- runK (companion processPoles) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runK (commit (conjoint processPoles) outU) resp
+          runK (conjoint processPoles) resp
     turnLoop <- TurnPort.turnTimeout 100000 runnerPoles
     responderA <- async responder
     result <- runK (eval turnLoop) "hello"
@@ -2030,7 +2025,7 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let runnerPoles :: Poles (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let runnerPoles :: Poles () () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
     turnLoop <- TurnPort.turnTimeout 10000 runnerPoles
     result <- runK (eval turnLoop) "hello"
