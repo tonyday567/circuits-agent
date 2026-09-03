@@ -23,7 +23,7 @@ module Circuit.Agent.Machina.Mark
 where
 
 import Circuit.Category (K (..))
-import Circuit.Poles (HasDual (..), Poles (..), emit, polesK)
+import Circuit.Equip (HasDual (..), Poles (..), emit, polesK)
 import Circuit.Trace (Trace, base)
 import Circuit.Traced (yank)
 import Control.Concurrent.STM (STM)

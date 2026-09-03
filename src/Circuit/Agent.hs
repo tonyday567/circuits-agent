@@ -204,9 +204,9 @@ where
 import Circuit hiding (eval, race, (.))
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
+import Circuit.Equip (compose, imap, iomap, omap)
 import Circuit.Moore (Moore (..), fromEvalMoore, monoDir, monoIn, moore, mooreMorphism, toEvalMoore)
 import Circuit.Moore qualified as Moore
-import Circuit.Poles (compose, imap, iomap, omap)
 import Circuit.Poly (Eval (..), Mono)
 import Circuit.Process (after)
 import Circuit.Syntax (eval)

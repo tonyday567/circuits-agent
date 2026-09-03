@@ -23,7 +23,7 @@ where
 import Circuit (Body (..), close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), PostId, mkPost, synthesis)
 import Circuit.Category (K (..))
-import Circuit.Poles (Poles, poles0)
+import Circuit.Equip (Poles, poles0)
 import Data.Text (Text)
 import Data.Text qualified as T
 

@@ -35,7 +35,7 @@ where
 import Circuit (Trace, base)
 import Circuit.Agent (PostId)
 import Circuit.Category (K (..))
-import Circuit.Poles (HasDual (..), Poles (..), commit, emit, open)
+import Circuit.Equip (HasDual (..), Poles (..), commit, emit, open)
 import Circuit.Process (Process, mealy)
 import Data.IORef
 import Data.Text (Text)

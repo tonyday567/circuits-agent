@@ -5,10 +5,10 @@
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE TypeFamilies #-}
 
--- | Effectful 'Circuit.Poles.Poles' constructors and queueing strategies.
+-- | Effectful 'Circuit.Equip.Poles' constructors and queueing strategies.
 --
 -- This module lives in @circuits-agent@ because it needs @STM@.  Core
--- 'Circuit.Poles' is pure in the base arrow; the queue implementations here
+-- 'Circuit.Equip' is pure in the base arrow; the queue implementations here
 -- are one possible effectful instantiation, placed beside their consumers
 -- rather than forcing the core library to depend on @stm@.
 module Circuit.Agent.Ends
@@ -43,7 +43,7 @@ module Circuit.Agent.Ends
 where
 
 import Circuit.Category (K (..))
-import Circuit.Poles (HasDual (..), Poles (..), commit, companion, conjoint, emit, open, polesK, splay0)
+import Circuit.Equip (HasDual (..), Poles (..), commit, companion, conjoint, emit, open, polesK, splay0)
 import Control.Applicative
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM

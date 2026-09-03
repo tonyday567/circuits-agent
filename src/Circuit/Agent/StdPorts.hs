@@ -5,7 +5,7 @@
 -- | Process ports: stdin / stdout / stderr as free dual poles.
 --
 -- A 'StdPorts' handle is a persistent child process viewed through three
--- independent 'Circuit.Poles' seats plus a close action.  Pipes all the way
+-- independent 'Circuit.Equip' seats plus a close action.  Pipes all the way
 -- down: no FIFO, no log files, no byte-offset polling.
 --
 -- Internal I/O is 'ByteString'.  Constructors take encode/decode adapters:
@@ -73,8 +73,8 @@ where
 import Circuit.Agent (Agent, run1)
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
+import Circuit.Equip (HasDual (..), In (..), Out (..), Poles (..), commit, emit, open)
 import Circuit.Moore (fromEvalMoore)
-import Circuit.Poles (HasDual (..), In (..), Out (..), Poles (..), commit, emit, open)
 import Circuit.Poly (Eval (..))
 import Circuit.Process (Process, asPProcess, asProcess, scan)
 import Circuit.Tensor (Tensor (..))
@@ -104,7 +104,7 @@ import Prelude
 -- $setup
 --
 -- >>> import Circuit.Process (scan)
--- >>> import Circuit.Poles (Poles (..), HasDual (..), commit, emit, open)
+-- >>> import Circuit.Equip (Poles (..), HasDual (..), commit, emit, open)
 -- >>> import Circuit.Category (K (..))
 -- >>> import Data.Text.Encoding (decodeUtf8)
 
