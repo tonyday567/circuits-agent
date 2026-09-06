@@ -73,9 +73,9 @@ import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
-import Circuit.Moore (MachineP (..), fromEvalMachineP, machineP, monoDir, monoIn, toEvalMachineP)
+import Circuit.Machine (Machine, MachineObs, machine, machineMorphism, machineObs, machineObsWith, moMachine, monoDir, monoIn)
 import Circuit.Poly (Dir, Eval (..), Mono, Pos)
-import Circuit.Process (asProcess, asProcessP, finalProcessP, scanProcessP)
+import Circuit.Process (asProcess, scanProcess)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Circuit.Syntax (eval)
 import Control.Concurrent (forkIO, threadDelay)
@@ -113,12 +113,18 @@ assert msg ok =
       exitFailure
 
 -- | Replacement for the removed 'iterateAgent' runner.
-iterateAgent :: MachineP (,) s (->) (Mono i o) -> s -> [i] -> [o]
-iterateAgent sys s0 = scanProcessP (asProcessP sys s0)
+iterateAgent :: MachineObs s (Mono i o) -> s -> [i] -> [o]
+iterateAgent sys s0 = scanProcess (asProcess sys s0)
 
 -- | Replacement for the removed 'finalAgent' runner.
-finalAgent :: MachineP (,) s (->) (Mono i o) -> s -> [i] -> s
-finalAgent sys s0 = finalProcessP (asProcessP sys s0)
+finalAgent :: MachineObs s (Mono i o) -> s -> [i] -> s
+finalAgent sys s0 is = foldl' step s0 is
+  where
+    step s i = fst (machineMorphism (moMachine sys) (s, monoIn i))
+
+-- | Observation for 'tape'-shaped agents: the position is @f@ of the state.
+tapeObs :: ([i] -> o) -> MachineObs [i] (Mono i o)
+tapeObs f = machineObsWith (\s -> (f s, ())) (tape f)
 
 -- | Remove a file if present.
 wipe :: FilePath -> IO ()
@@ -219,7 +225,7 @@ main = do
     let idAgent :: Agent (->) [Int] Int Int
         idAgent = tape head
     assert "A0: tape head streams inputs through unchanged" $
-      iterateAgent idAgent [] [1, 2, 3 :: Int] == [1, 2, 3]
+      iterateAgent (tapeObs head) [] [1, 2, 3 :: Int] == [1, 2, 3]
 
   -------------------------------------------------------------------------
   -- A1: sequential stream composition
@@ -235,8 +241,8 @@ main = do
         gAgent :: Agent (->) [Int] Int Int
         gAgent = tape (g . head)
         inputs = [1, 2, 3 :: Int]
-        chained = iterateAgent gAgent [] (iterateAgent fAgent [] inputs)
-        direct = iterateAgent (tape (g . f . head)) [] inputs
+        chained = iterateAgent (tapeObs (g . head)) [] (iterateAgent (tapeObs (f . head)) [] inputs)
+        direct = iterateAgent (tapeObs (g . f . head)) [] inputs
     assert "A1: chaining outputs equals feeding the composed function" $
       chained == direct
 
@@ -245,10 +251,10 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "the pretense"
   do
-    let sumAgent :: MachineP (,) Int (->) (Mono Int Int)
-        sumAgent = fromEvalMachineP $ \s -> EP (EK s, EE (+ s))
+    let sumAgent :: MachineObs Int (Mono Int Int)
+        sumAgent = machineObs $ \s -> EP (EK s, EE (+ s))
     assert "tape sum == [1,3,6]" $
-      iterateAgent (tape sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
+      iterateAgent (tapeObs sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
     assert "sumAgent == [1,3,6]" $
       iterateAgent sumAgent 0 [1, 2, 3 :: Int] == [1, 3, 6]
 
@@ -258,7 +264,7 @@ main = do
     -- initial empty prefix from scanl.
     let xs = [1, 2, 3 :: Int]
     assert "O1: tape f xs == map f (drop 1 (scanl (flip (:)) [] xs))" $
-      iterateAgent (tape sum) [] xs == map sum (drop 1 (scanl (flip (:)) [] xs))
+      iterateAgent (tapeObs sum) [] xs == map sum (drop 1 (scanl (flip (:)) [] xs))
 
   -------------------------------------------------------------------------
   -- O2: coalgebra homomorphism (compaction invariance as behaviour preservation)
@@ -273,7 +279,7 @@ main = do
         sys2 :: Agent (->) [Int] Int [Int]
         sys2 = tape (f . h)
     assert "O2: summarizer h preserves behaviour" $
-      iterateAgent sys2 (h []) xs == iterateAgent sys1 [] xs
+      iterateAgent (tapeObs (f . h)) (h []) xs == iterateAgent (tapeObs f) [] xs
 
   -------------------------------------------------------------------------
   -- S3: behaviour is functorial over stream concatenation.
@@ -287,20 +293,20 @@ main = do
         s0 = [] :: [Int]
     assert "S3: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalAgent agent s0 xs) ys" $
       behA agent s0 (xs ++ ys)
-        == behA agent s0 xs ++ behA agent (finalAgent agent s0 xs) ys
+        == behA agent s0 xs ++ behA agent (finalAgent (tapeObs (\hist -> [head hist])) s0 xs) ys
 
   -------------------------------------------------------------------------
   -- Compaction invariance: summary-insensitive folds survive it.
   -------------------------------------------------------------------------
   putStrLn "compaction invariance"
   do
-    let a = tape sum :: MachineP (,) [Int] (->) (Mono Int Int)
+    let a = tape sum :: Machine (,) [Int] (->) (Mono Int Int)
     let (_, s1) = run1 a [] 1
     let (_, s2) = run1 a s1 2
     let (o3, _) = run1 a [sum s2] 3
     assert "sum survives wholesale compaction" $ o3 == 6
 
-    let b = tape length :: MachineP (,) [Int] (->) (Mono Int Int)
+    let b = tape length :: Machine (,) [Int] (->) (Mono Int Int)
     let (_, t1) = run1 b [] 1
     let (_, t2) = run1 b t1 2
     let (p3, _) = run1 b [sum t2] 3
@@ -342,7 +348,7 @@ main = do
         s0 = [] :: [Post Text]
     assert "reply functoriality: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalAgent agent s0 xs) ys" $
       beh agent s0 (xs ++ ys)
-        == beh agent s0 xs ++ beh agent (finalAgent agent s0 xs) ys
+        == beh agent s0 xs ++ beh agent (finalAgent (tapeObs (reply "j")) s0 xs) ys
 
   -------------------------------------------------------------------------
   -- Delivery: addressed posts, no redelivery.
@@ -974,14 +980,12 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "branch agent"
   do
-    let runMono :: Agent (->) s i o -> s -> (o, i -> s)
-        runMono sys s = case toEvalMachineP sys s of EP (EK o, EE f) -> (o, f)
-        liftAgent :: Agent (->) [Post Text] (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
+    let liftAgent :: Agent (->) [Post Text] (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         liftAgent sys =
-          machineP $ \((tag, hist), d) ->
+          machine $ \((tag, hist), d) ->
             let inp = monoDir d
-                (outs, next) = runMono sys hist
-             in ((tag, next inp), (outs, ()))
+                (hist', (outs, ())) = machineMorphism sys (hist, monoIn inp)
+             in ((tag, hist'), (outs, ()))
         calcOnly :: Agent (->) [Post Text] (Post Text) [Post Text]
         calcOnly = tape calc
         echoOnly :: Agent (->) [Post Text] (Post Text) [Post Text]
@@ -1006,7 +1010,7 @@ main = do
       not (fst (asState seatEcho))
 
   -------------------------------------------------------------------------
-  -- Port: batch >:> shard >:> unbatch (parser stream coalgebra around Shard)
+  -- Port: batch `compose` shard `compose` unbatch (parser stream coalgebra around Shard)
   -------------------------------------------------------------------------
   putStrLn "port (token seat)"
   do
@@ -1644,8 +1648,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = machineP $ K $ \(_, _) -> pure ((), ([p], ()))
-        slowRight = machineP $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
+        fastLeft = machine $ K $ \(_, _) -> pure ((), ([p], ()))
+        slowRight = machine $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft slowRight) ((), ()) seed
     assert "raceIO: fast left wins" $ outs == [p]
 
@@ -1653,8 +1657,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        slowLeft = machineP $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
-        fastRight = machineP $ K $ \(_, _) -> pure ((), ([q], ()))
+        slowLeft = machine $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
+        fastRight = machine $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO slowLeft fastRight) ((), ()) seed
     assert "raceIO: fast right wins" $ outs == [q]
 
@@ -1662,8 +1666,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = machineP $ K $ \(_, _) -> pure ((), ([p], ()))
-        fastRight = machineP $ K $ \(_, _) -> pure ((), ([q], ()))
+        fastLeft = machine $ K $ \(_, _) -> pure ((), ([p], ()))
+        fastRight = machine $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft fastRight) ((), ()) seed
     assert "raceIO: both emit -> one of them" $ outs == [p] || outs == [q]
 
@@ -1733,7 +1737,7 @@ main = do
         selfEcho = agentM $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
-        drainEnd :: Poles () () (K STM) (K STM) a a -> STM [a]
+        drainEnd :: Poles () (K STM) a a -> STM [a]
         drainEnd ends = go []
           where
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
@@ -1747,14 +1751,14 @@ main = do
         quiesce frame = fix $ \go -> (frame C..> go) `orElseA` C.id
 
         -- \| Spike A: one token per frame, no do/bind in the frame.
-        frameToken :: AgentS s a -> Poles () () (K STM) (K STM) a a -> Poles () () (K STM) (K STM) a a -> K STM s s
+        frameToken :: AgentS s a -> Poles () (K STM) a a -> Poles () (K STM) a a -> K STM s s
         frameToken agent inbox outbox =
           K (\s -> (s,) <$> readEndSTM inbox)
             C..> K (Prelude.uncurry (stepS agent))
             C..> K (\(s', outs) -> s' <$ traverse_ (writeEndSTM outbox) outs)
 
         -- \| Spike B: one bundle per frame over a bundle wire.
-        frameBundle :: AgentS s a -> Poles () () (K STM) (K STM) [a] [a] -> Poles () () (K STM) (K STM) [a] [a] -> K STM s s
+        frameBundle :: AgentS s a -> Poles () (K STM) [a] [a] -> Poles () (K STM) [a] [a] -> K STM s s
         frameBundle agent inbox outbox =
           K (\s -> (s,) <$> readEndSTM inbox)
             C..> K (Prelude.uncurry (stepsS agent))
@@ -1810,7 +1814,7 @@ main = do
         selfEcho = agentM $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
-        drainEnd :: Poles () () (K STM) (K STM) a a -> STM [a]
+        drainEnd :: Poles () (K STM) a a -> STM [a]
         drainEnd ends = go []
           where
             go acc = (readEndSTM ends >>= \a -> go (a : acc)) `orElse` pure (reverse acc)
@@ -1985,9 +1989,9 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let runnerPoles :: Poles () () (K IO) (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let runnerPoles :: Poles () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-        processPoles :: Poles () () (K IO) (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processPoles :: Poles () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         -- Responder: read one command and reply with the command id in thread.
         responder = do
@@ -2007,9 +2011,9 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let runnerPoles :: Poles () () (K IO) (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let runnerPoles :: Poles () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
-        processPoles :: Poles () () (K IO) (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        processPoles :: Poles () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         responder = do
           cmd <- runK (companion processPoles) ()
@@ -2025,7 +2029,7 @@ main = do
   do
     cmdQ <- newTQueueIO
     respQ <- newTQueueIO
-    let runnerPoles :: Poles () () (K IO) (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+    let runnerPoles :: Poles () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
     turnLoop <- TurnPort.turnTimeout 10000 runnerPoles
     result <- runK (eval turnLoop) "hello"

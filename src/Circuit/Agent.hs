@@ -34,11 +34,11 @@
 -- Token seat around a list shard (parser dual): stream @f = [Post]@, token
 -- @s = Post@.  'batchEnds' snocs tokens into a stream (build @f@); 'unbatchEnds'
 -- peels with the same coalgebra as 'Uncons' on lists.  Compose with the
--- shard via @('>:>')@:
+-- shard via @'compose'@:
 --
 -- @
--- portShard = batchEnds … >:> shard >:> unbatchEnds …
---   :: Shard m Post [Post] >:> Shard m [Post] [Post] >:> Shard m [Post] Post
+-- portShard = batchEnds … `compose` shard `compose` unbatchEnds …
+--   :: Shard m Post [Post] `compose` Shard m [Post] [Post] `compose` Shard m [Post] Post
 --   :: Port m
 -- @
 --
@@ -196,7 +196,6 @@ module Circuit.Agent
     suffixShard,
     codecShard,
     composeShard,
-    (>:>),
   )
 where
 
@@ -205,12 +204,12 @@ import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
 import Circuit.Equip (compose, imap, iomap, omap)
-import Circuit.Moore (MachineP (..), fromEvalMachineP, machineMorphismP, machineP, monoDir, monoIn, toEvalMachineP)
-import Circuit.Moore qualified as Moore
+import Circuit.Machine (Machine (..), fromEvalMachine, machine, machineMorphism, monoDir, monoIn)
 import Circuit.Poly (Eval (..), Mono)
 import Circuit.Process (after)
 import Circuit.Syntax (eval)
-import Circuit.Trace (Trace, base)
+import Circuit.Syntax (Syntax (Lift))
+import Circuit.Trace (Trace)
 import Circuit.Traced (yank)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
@@ -393,11 +392,11 @@ type TurnLog a = Seq (Bag a)
 
 -- | Agent: a Moore machine with free carrier, polymorphic in the base arrow.
 --
--- @MachineP (,) arr s (Mono a b) ≅ arr (s, a) (s, b)@ after collapsing unit
+-- @Machine (,) arr s (Mono a b) ≅ arr (s, a) (s, b)@ after collapsing unit
 -- positions.  Common log case: @Agent (->) s (Post a) [Post a]@ (input = one post,
 -- output = list of posts).  @Agent (K m) s a b@ is the monadic Moore
 -- machine.
-type Agent arr s a b = MachineP (,) s arr (Mono a b)
+type Agent arr s a b = Machine (,) s arr (Mono a b)
 
 -- | Opaque effectful ends: commit an @a@, emit a @b@.
 --
@@ -409,7 +408,7 @@ type Agent arr s a b = MachineP (,) s arr (Mono a b)
 -- @
 --
 -- Emit is an onslaught of posts (empty = quiet \/ done for that poll).
-type Shard m a b = Poles () () (K m) (K m) a b
+type Shard m a b = Poles () (K m) a b
 
 -- | Same ends shape as 'Shard' — dual seat on the log (journal 013).
 type LogEnds m a b = Shard m a b
@@ -427,14 +426,14 @@ logEnds = polesK
 -- >>> scan (asProcess (asProcessP (tape length) [])) [1,2,3 :: Int]
 -- [1,2,3]
 tape :: ([i] -> o) -> Agent (->) [i] i o
-tape f = machineP $ \(hist, d) -> (monoDir d : hist, (f hist, ()))
+tape f = machine $ \(hist, d) -> (monoDir d : hist, (f hist, ()))
 
 -- | Like 'tape', but also conses the agent's own output onto its history.
 --
 -- This is the internal-monologue construction: an agent's outputs are on the
 -- same log as its percepts, visible to its own future turns.
 selfrec :: ([i] -> i) -> Agent (->) [i] i i
-selfrec f = machineP $ \(hist, d) ->
+selfrec f = machine $ \(hist, d) ->
   let i = monoDir d
       h' = i : hist
    in (f h' : h', (f hist, ()))
@@ -705,7 +704,7 @@ meetingLoopSubs ::
   (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
   [RosterEntry s a] ->
   Trace Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
-meetingLoopSubs roster = yank (base body)
+meetingLoopSubs roster = yank (Lift body)
   where
     body (Right bundle@(states, _, _)) =
       if any (hasPending @a . snd) states
@@ -849,9 +848,8 @@ loopHeteroSubs roster log0 =
 -- post-input timing).
 run1 :: Agent (->) s i o -> s -> i -> (o, s)
 run1 sys s i =
-  let runMono st = case toEvalMachineP sys st of EP (EK o', EE f) -> (o', f)
-      s' = snd (runMono s) i
-      (o, _) = runMono s'
+  let (s', _) = machineMorphism sys (s, monoIn i)
+      (_, (o, ())) = machineMorphism sys (s', monoIn i)
    in (o, s')
 
 -- | Lift a pure agent into the 'K' arrow of any functor.
@@ -859,12 +857,12 @@ run1 sys s i =
 -- This is the change of base from @(->)@ to @K m@ on the agent itself:
 -- the same Moore coalgebra, but each step now lives in @m@.
 agentM :: (Applicative m) => Agent (->) s a b -> Agent (K m) s a b
-agentM sys = machineP (K (pure . machineMorphismP sys))
+agentM sys = machine (K (pure . machineMorphism sys))
 
 -- | Run one step of a monadic agent.
 runAgentM :: (Monad m) => Agent (K m) s a b -> s -> a -> m (b, s)
 runAgentM sys s a =
-  runK (machineMorphismP sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
+  runK (machineMorphism sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
 
 -- | STM agent: state is handled transparently inside an STM transaction.
 type AgentS s a = Agent (K STM) s a [a]
@@ -875,22 +873,22 @@ type AgentX s a = Agent (K IO) s a [a]
 
 -- | Cross from the transparent STM world into the IO boundary.
 agentX :: AgentS s a -> AgentX s a
-agentX sys = machineP (K (\(s, d) -> atomically (runK (machineMorphismP sys) (s, d))))
+agentX sys = machine (K (\(s, d) -> atomically (runK (machineMorphism sys) (s, d))))
 
 -- | Seat-level product / await in STM.
 awaitS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 awaitS sys1 sys2 =
-  machineP $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (machineMorphismP sys1) (s1, d)
-    (s2', (o2, ())) <- runK (machineMorphismP sys2) (s2, d)
+  machine $ K $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runK (machineMorphism sys1) (s1, d)
+    (s2', (o2, ())) <- runK (machineMorphism sys2) (s2, d)
     pure ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race in STM.
 raceS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 raceS sys1 sys2 =
-  machineP $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (machineMorphismP sys1) (s1, d)
-    (s2', (o2, ())) <- runK (machineMorphismP sys2) (s2, d)
+  machine $ K $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runK (machineMorphism sys1) (s1, d)
+    (s2', (o2, ())) <- runK (machineMorphism sys2) (s2, d)
     let o = if null o1 then o2 else o1
     pure ((s1', s2'), (o, ()))
 
@@ -903,8 +901,8 @@ raceS sys1 sys2 =
 -- step produces a mark first, not the left-biased deterministic rule.
 raceIO :: AgentX s1 a -> AgentX s2 a -> AgentX (s1, s2) a
 raceIO sys1 sys2 =
-  machineP $ K $ \((s1, s2), d) ->
-    raceFirst (runK (machineMorphismP sys1) (s1, d)) (runK (machineMorphismP sys2) (s2, d)) >>= \case
+  machine $ K $ \((s1, s2), d) ->
+    raceFirst (runK (machineMorphism sys1) (s1, d)) (runK (machineMorphism sys2) (s2, d)) >>= \case
       Left (s1', outs) -> pure ((s1', s2), (outs, ()))
       Right (s2', outs) -> pure ((s1, s2'), (outs, ()))
   where
@@ -928,7 +926,7 @@ raceIO sys1 sys2 =
 -- | Run one step of an STM agent.
 stepS :: AgentS s a -> s -> a -> STM (s, [a])
 stepS sys s i = do
-  (s', (outs, ())) <- runK (machineMorphismP sys) (s, monoIn i)
+  (s', (outs, ())) <- runK (machineMorphism sys) (s, monoIn i)
   pure (s', outs)
 
 -- | Fold an STM agent over a bundle of inputs within one transaction.
@@ -950,21 +948,21 @@ runAgentS :: AgentS s a -> s -> [a] -> IO ([a], s)
 runAgentS sys s0 ins = (\(s, os) -> (os, s)) <$> atomically (stepsS sys s0 ins)
 
 -- | Unit poles for lifting single-token reads/writes out of a 'Poles' value.
-unitEndsSTM :: Poles () () (K STM) (K STM) () ()
+unitEndsSTM :: Poles () (K STM) () ()
 unitEndsSTM = polesK (const (pure ())) (pure ())
 
 -- | Read one token from an STM pole.
-readEndSTM :: Poles () () (K STM) (K STM) a a -> STM a
-readEndSTM ends = runK (plug (Cat.id :: K STM () ()) (Poles (conjoint unitEndsSTM) (companion ends))) ()
+readEndSTM :: Poles () (K STM) a a -> STM a
+readEndSTM ends = runK (close (Poles (conjoint unitEndsSTM) (companion ends))) ()
 
 -- | Write one token to an STM pole.
-writeEndSTM :: Poles () () (K STM) (K STM) a a -> a -> STM ()
-writeEndSTM ends = runK (plug (Cat.id :: K STM () ()) (Poles (conjoint ends) (companion unitEndsSTM)))
+writeEndSTM :: Poles () (K STM) a a -> a -> STM ()
+writeEndSTM ends = runK (close (Poles (conjoint ends) (companion unitEndsSTM)))
 
 -- | Wire an STM agent between an inbox and an outbox, running until
 -- quiescence.  Quiescence is detected via 'orElse': if the inbox is empty
 -- (retry), the loop returns the current state.
-agentLoopS :: AgentS s a -> s -> Poles () () (K STM) (K STM) a a -> Poles () () (K STM) (K STM) a a -> STM s
+agentLoopS :: AgentS s a -> s -> Poles () (K STM) a a -> Poles () (K STM) a a -> STM s
 agentLoopS agent s0 inbox outbox = go s0
   where
     go s =
@@ -977,15 +975,15 @@ agentLoopS agent s0 inbox outbox = go s0
         `orElse` pure s
 
 -- | Self-loop: the agent reads from and writes to the same STM end.
-selfLoopS :: AgentS s a -> s -> Poles () () (K STM) (K STM) a a -> STM s
+selfLoopS :: AgentS s a -> s -> Poles () (K STM) a a -> STM s
 selfLoopS agent s0 ends = agentLoopS agent s0 ends ends
 
 -- | One frame of the bundle self-loop, expressed in the Either-trace halt
 -- alphabet: 'Left' = continue, 'Right' = quiesce and return this state.
 selfLoopFrame ::
   AgentS s a ->
-  Poles () () (K STM) (K STM) [a] [a] ->
-  Poles () () (K STM) (K STM) [a] [a] ->
+  Poles () (K STM) [a] [a] ->
+  Poles () (K STM) [a] [a] ->
   K STM (Either s s) (Either s s)
 selfLoopFrame agent inbox outbox = K $ \case
   Right s -> loopStep s
@@ -1007,16 +1005,16 @@ selfLoopFrame agent inbox outbox = K $ \case
 -- quiescence, expressed as a 'Trace Either' value.
 agentLoopL ::
   AgentS s a ->
-  Poles () () (K STM) (K STM) [a] [a] ->
-  Poles () () (K STM) (K STM) [a] [a] ->
+  Poles () (K STM) [a] [a] ->
+  Poles () (K STM) [a] [a] ->
   Trace Either (K STM) s s
-agentLoopL agent inbox outbox = yank (base (selfLoopFrame agent inbox outbox))
+agentLoopL agent inbox outbox = yank (Lift (selfLoopFrame agent inbox outbox))
 
 -- | Self-loop as a 'Trace Either' citizen.
 selfLoopL ::
   AgentS s a ->
   s ->
-  Poles () () (K STM) (K STM) [a] [a] ->
+  Poles () (K STM) [a] [a] ->
   STM s
 selfLoopL agent s0 ends = runK (eval (agentLoopL agent ends ends)) s0
 
@@ -1043,8 +1041,8 @@ beh sys s0 (i : ins) =
 -- branch's update function determines the next state.
 branchAgent :: (s -> Bool) -> Agent (->) s a b -> Agent (->) s a b -> Agent (->) s a b
 branchAgent cond sys1 sys2 =
-  machineP $ \(state, d) ->
-    if cond state then machineMorphismP sys1 (state, d) else machineMorphismP sys2 (state, d)
+  machine $ \(state, d) ->
+    if cond state then machineMorphism sys1 (state, d) else machineMorphism sys2 (state, d)
 
 -- | Seat-level product / await: both agents run on the same input; states are
 -- paired; emits are concatenated left-to-right.
@@ -1052,9 +1050,9 @@ awaitA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-awaitA sys1 sys2 = machineP $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = machineMorphismP sys1 (s1, d)
-      (s2', (o2, ())) = machineMorphismP sys2 (s2, d)
+awaitA sys1 sys2 = machine $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = machineMorphism sys1 (s1, d)
+      (s2', (o2, ())) = machineMorphism sys2 (s2, d)
    in ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race: both agents run on the same input; states are
@@ -1063,9 +1061,9 @@ raceA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-raceA sys1 sys2 = machineP $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = machineMorphismP sys1 (s1, d)
-      (s2', (o2, ())) = machineMorphismP sys2 (s2, d)
+raceA sys1 sys2 = machine $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = machineMorphism sys1 (s1, d)
+      (s2', (o2, ())) = machineMorphism sys2 (s2, d)
       o = if null o1 then o2 else o1
    in ((s1', s2'), (o, ()))
 
@@ -1161,7 +1159,7 @@ runAgentShard sys seat ins =
 -- A /tool call/ from an agent is just a 'Post': the 'to' list names the
 -- tool, 'body' carries the arguments. No extra type — emit that 'Post' on a
 -- 'Port' (or post it on the log for the tool agent to 'watch').
-type Port m a = Poles () () (K m) (K m) (Post a) (Post a)
+type Port m a = Poles () (K m) (Post a) (Post a)
 
 -- 'Snoc' is re-exported from 'Circuit.Stream' (construction dual of 'Uncons').
 
@@ -1229,7 +1227,7 @@ unbatchEnds getBuf putBuf =
 --
 -- @
 -- portShard getIn putIn getOut putOut sh
---   = batchEnds getIn putIn >:> sh >:> unbatchEnds getOut putOut
+--   = batchEnds getIn putIn `compose` sh `compose` unbatchEnds getOut putOut
 -- @
 --
 -- Flush\/drain is not a separate policy knob — it /is/ build-stream ('snoc')

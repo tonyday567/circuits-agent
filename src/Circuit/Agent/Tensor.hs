@@ -29,7 +29,7 @@ import Data.Text qualified as T
 
 -- | An effectful agent shard with a '[Post Text]' buffer threaded through the
 -- arrow.
-type AgentShard a b = Poles () () (Body (,) [Post Text] (K IO)) (Body (,) [Post Text] (K IO)) a b
+type AgentShard a b = Poles () (Body (,) [Post Text] (K IO)) a b
 
 -- | Run a child shard in isolation on the given input, discarding its
 -- residual state.  Branches in await / race / fan-out have private scratch
@@ -42,7 +42,7 @@ runSubShard sh xs = do
 
 -- | Close a same-type shard once, exposing both the output and the residual
 -- state.  Works for any state carrier @s@ and payload @a@.
-closeShardIO :: Poles () () (Body (,) s (K IO)) (Body (,) s (K IO)) a a -> a -> s -> IO (a, s)
+closeShardIO :: Poles () (Body (,) s (K IO)) a a -> a -> s -> IO (a, s)
 closeShardIO sh x s0 = do
   let thread = close sh
   (s', y) <- runK (morphism thread) (s0, x)

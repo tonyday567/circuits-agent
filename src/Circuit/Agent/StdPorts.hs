@@ -74,11 +74,13 @@ import Circuit.Agent (Agent, run1)
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
 import Circuit.Equip (Poles (..), companion, conjoint)
-import Circuit.Moore (fromEvalMachineP)
+import Circuit.Machine (fromEvalMachine)
 import Circuit.Poly (Eval (..))
-import Circuit.Process (Process, asProcess, asProcessP, scan)
+import Circuit.Machine (machineObsWith)
+import Circuit.Process (Process, asProcess, scanProcess)
 import Circuit.Tensor (Tensor (..))
-import Circuit.Trace (Trace, base)
+import Circuit.Syntax (Syntax (Lift))
+import Circuit.Trace (Trace)
 import Circuit.Traced (yank)
 import Control.Concurrent (forkIO, killThread)
 import Control.Exception (IOException, try)
@@ -199,9 +201,9 @@ splitFrame (ProcMarks marks) buf =
 -- the queue when the stream has not produced one yet.  There is no
 -- empty-read result — quiet is not an opinion here.
 data StdPorts a b c = StdPorts
-  { stdIn :: Poles () () (K IO) (K IO) a (),
-    stdOut :: Poles () () (K IO) (K IO) () b,
-    stdErr :: Poles () () (K IO) (K IO) () c,
+  { stdIn :: Poles () (K IO) a (),
+    stdOut :: Poles () (K IO) () b,
+    stdErr :: Poles () (K IO) () c,
     stdClose :: IO ()
   }
 
@@ -217,7 +219,7 @@ openStdPorts ::
   (BS.ByteString -> a) ->
   ProcConfig ->
   Trace Either (K IO) () (StdPorts a a a)
-openStdPorts encode decode cfg = yank (base (K step))
+openStdPorts encode decode cfg = yank (Lift (K step))
   where
     step (Right ()) = do
       let procSpec =
@@ -263,7 +265,7 @@ openStdPorts encode decode cfg = yank (base (K step))
       pure (Right ports)
 
 -- | Commit one token to a queue end.
-sink :: Poles () () (K IO) (K IO) a a -> a -> IO ()
+sink :: Poles () (K IO) a a -> a -> IO ()
 sink q = runK (conjoint q)
 
 -- | The pumper as an agent: a Moore machine from maybe-chunks to frame
@@ -273,10 +275,10 @@ sink q = runK (conjoint q)
 -- the same stateless grammar.  This is the level-0 mark machine made
 -- literal; 'pumpFrames' is merely its IO interpretation at a 'Handle'.
 --
--- >>> scan (asProcess (asProcessP (frameAgent lineMarks decodeUtf8) ("", []))) [Just "a\n", Just "b", Nothing]
+-- >>> scanProcess (asProcess (machineObs (frameAgent lineMarks decodeUtf8)) ("", [])) [Just "a\n", Just "b", Nothing]
 -- [["a"],[],["b"]]
 frameAgent :: ProcMarks -> (BS.ByteString -> a) -> Agent (->) (BS.ByteString, [a]) (Maybe BS.ByteString) [a]
-frameAgent marks decode = fromEvalMachineP $ \(buf, pending) ->
+frameAgent marks decode = fromEvalMachine $ \(buf, pending) ->
   EP
     ( EK pending,
       EE $ \case
@@ -294,9 +296,9 @@ frameAgent marks decode = fromEvalMachineP $ \(buf, pending) ->
          in (p : ps, rest')
 
 -- | The same machine as a 'Process': chunk stream in, frame lists out,
--- state carried implicitly.
-frameProcess :: ProcMarks -> (BS.ByteString -> a) -> Process (Maybe BS.ByteString) [a]
-frameProcess marks decode = asProcess (asProcessP (frameAgent marks decode) (BS.empty, []))
+-- seed carried as the Process state.
+frameProcess :: ProcMarks -> (BS.ByteString -> a) -> Process (BS.ByteString, [a]) (Maybe BS.ByteString) [a]
+frameProcess marks decode = asProcess (machineObsWith (\(_buf, pending) -> (pending, ())) (frameAgent marks decode)) (BS.empty, [])
 
 -- | The pumper: the IO interpretation of 'frameAgent' at a 'Handle'.
 -- Blocking reads deliver percepts; payloads are sunk into the queue.
@@ -325,17 +327,17 @@ pumpFrames marks decode h snk = go (BS.empty, [])
 
 -- | Client view of a process: two 'Poles' sharing stdin, plus resource close.
 data ProcEnds a b c = ProcEnds
-  { procStdio :: Poles () () (K IO) (K IO) a b,
-    procStderr :: Poles () () (K IO) (K IO) a c,
+  { procStdio :: Poles () (K IO) a b,
+    procStderr :: Poles () (K IO) a c,
     procClose :: IO ()
   }
 
 -- | Stdin write + stdout read as matched 'Poles'.
-stdioEnds :: StdPorts a b c -> Poles () () (K IO) (K IO) a b
+stdioEnds :: StdPorts a b c -> Poles () (K IO) a b
 stdioEnds pp = Poles (conjoint (stdIn pp)) (companion (stdOut pp))
 
 -- | Stdin write + stderr read as matched 'Poles'.
-stderrEnds :: StdPorts a b c -> Poles () () (K IO) (K IO) a c
+stderrEnds :: StdPorts a b c -> Poles () (K IO) a c
 stderrEnds pp = Poles (conjoint (stdIn pp)) (companion (stdErr pp))
 
 -- | Open a process and return the dual-seat client view as a 'Trace' 'Either'.
@@ -345,7 +347,7 @@ openProc ::
   ProcConfig ->
   Trace Either (K IO) () (ProcEnds a a a)
 openProc encode decode cfg =
-  openStdPorts encode decode cfg .> base portsToProcEnds
+  openStdPorts encode decode cfg .> Lift portsToProcEnds
   where
     portsToProcEnds = K $ \pp ->
       pure
@@ -359,9 +361,9 @@ openProc encode decode cfg =
 portsEnds :: StdPorts a b c -> Trace (,) (K IO) (a, ((), ())) ((), (b, c))
 portsEnds pp = tensor commitM (tensor outM errM)
   where
-    commitM = base (conjoint (stdIn pp))
-    outM = base (companion (stdOut pp))
-    errM = base (companion (stdErr pp))
+    commitM = Lift (conjoint (stdIn pp))
+    outM = Lift (companion (stdOut pp))
+    errM = Lift (companion (stdErr pp))
 
 -- ---------------------------------------------------------------------------
 -- In-memory test harness

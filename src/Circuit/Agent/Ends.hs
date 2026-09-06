@@ -44,7 +44,7 @@ where
 
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.Equip (Poles (..), companion, conjoint, open, plug, polesK, splay0)
+import Circuit.Equip (Poles (..), close, companion, conjoint, open, plug, polesK, splay0)
 import Control.Applicative
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM
@@ -106,22 +106,22 @@ policyToQueue = \case
   NewestN n -> Newest n
 
 -- | Open a channel policy as IO @Poles@.
-openChannel :: ChannelPolicy a -> IO (Poles () () (K IO) (K IO) a a)
+openChannel :: ChannelPolicy a -> IO (Poles () (K IO) a a)
 openChannel = openIO . policyToQueue
 
 -- | Open a channel policy as STM @Poles@.
-openChannelSTM :: ChannelPolicy a -> STM (Poles () () (K STM) (K STM) a a)
+openChannelSTM :: ChannelPolicy a -> STM (Poles () (K STM) a a)
 openChannelSTM = openSTM . policyToQueue
 
 -- | Open a linear channel as IO @Poles@.
 --
 -- 'Linear' is the default policy: unbounded FIFO, empty residual, preserves
 -- every token in order.  This is the effectful face of a linear process.
-openLinearChannel :: IO (Poles () () (K IO) (K IO) a a)
+openLinearChannel :: IO (Poles () (K IO) a a)
 openLinearChannel = openChannel Linear
 
 -- | Open a linear channel as STM @Poles@.
-openLinearChannelSTM :: STM (Poles () () (K STM) (K STM) a a)
+openLinearChannelSTM :: STM (Poles () (K STM) a a)
 openLinearChannelSTM = openChannelSTM Linear
 
 -- | Type-level witness that a channel policy is linear.
@@ -139,7 +139,7 @@ type family IsLinear (p :: ChannelPolicy a) :: Constraint where
 -- to typecheck.
 type HaltChannel :: ChannelPolicy a -> Type
 data HaltChannel p where
-  HaltChannel :: (IsLinear p) => Poles () () (K STM) (K STM) a a -> HaltChannel (p :: ChannelPolicy a)
+  HaltChannel :: (IsLinear p) => Poles () (K STM) a a -> HaltChannel (p :: ChannelPolicy a)
 
 -- | Open a halt-mark channel.  This is 'openLinearChannelSTM' with a
 -- type-level certificate.
@@ -155,7 +155,7 @@ readHaltChannel :: forall a (p :: ChannelPolicy a). HaltChannel p -> STM a
 readHaltChannel (HaltChannel ends) = runK (companion ends) ()
 
 -- | Unit ends specialised to 'K STM'.
-unitEndsSTM :: Poles () () (K STM) (K STM) () ()
+unitEndsSTM :: Poles () (K STM) () ()
 unitEndsSTM = polesK (const (pure ())) (pure ())
 
 -- | Internal STM primitive for a queue strategy.
@@ -190,7 +190,7 @@ endsSTM = \case
 -- Allocates STM primitives and returns a matched pair of ends sharing
 -- the same mutable channel.  Both ends live in 'STM', so you can compose
 -- operations across channels in a single 'atomically' block.
-openSTM :: Queue a -> STM (Poles () () (K STM) (K STM) a a)
+openSTM :: Queue a -> STM (Poles () (K STM) a a)
 openSTM q = do
   (write, read') <- endsSTM q
   pure (polesK write read')
@@ -201,7 +201,7 @@ openSTM q = do
 -- 'atomically'.  You cannot batch multiple writes or a write-plus-read
 -- into a single STM transaction; for that use 'openSTM' and wrap in
 -- 'atomically' yourself.
-openIO :: Queue a -> IO (Poles () () (K IO) (K IO) a a)
+openIO :: Queue a -> IO (Poles () (K IO) a a)
 openIO q = do
   e <- atomically (openSTM q)
   let (K write, K receive) = splay0 e
@@ -220,18 +220,18 @@ openIO q = do
 -- unit type, so a multi-read consumer can accumulate inputs before emitting.
 pipeEnds ::
   forall a b c.
-  Poles () () (K IO) (K IO) a b ->
-  (TQueue b -> IO (Poles () () (K IO) (K IO) b c)) ->
-  IO (Poles () () (K IO) (K IO) a c, IO ())
+  Poles () (K IO) a b ->
+  (TQueue b -> IO (Poles () (K IO) b c)) ->
+  IO (Poles () (K IO) a c, IO ())
 pipeEnds e1 makeE2 = do
   q <- newTQueueIO
   e2 <- makeE2 q
-  let unitEnds :: Poles () () (K IO) (K IO) () ()
+  let unitEnds :: Poles () (K IO) () ()
       unitEnds = open
       readFromE1 :: IO b
-      readFromE1 = runK (plug (Cat.id :: K IO () ()) (Poles (conjoint unitEnds) (companion e1))) ()
+      readFromE1 = runK (close (Poles (conjoint unitEnds) (companion e1))) ()
       writeToE2 :: b -> IO ()
-      writeToE2 x = runK (plug (Cat.id :: K IO () ()) (Poles (conjoint e2) (companion unitEnds))) x
+      writeToE2 x = runK (close (Poles (conjoint e2) (companion unitEnds))) x
   pump <- async . forever $ do
     x <- readFromE1
     writeToE2 x

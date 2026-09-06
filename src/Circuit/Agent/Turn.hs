@@ -32,11 +32,11 @@ module Circuit.Agent.Turn
   )
 where
 
-import Circuit (Trace, base)
+import Circuit (Syntax (Lift), Trace)
 import Circuit.Agent (PostId)
 import Circuit.Category (K (..))
 import Circuit.Equip (Poles (..), companion, conjoint)
-import Circuit.Process (Process, mealy)
+import Circuit.Process (Mealy, mealy)
 import Data.IORef
 import Data.Text (Text)
 import System.Timeout (timeout)
@@ -77,13 +77,13 @@ matchResponse st@TurnState {pending = Just (cmdId, cmd)} resp
   | turnThread resp == [cmdId] = (st {pending = Nothing}, Just (cmd, resp))
   | otherwise = (st, Nothing)
 
--- | Process that correlates responses with the pending command by thread.
+-- | Mealy that correlates responses with the pending command by thread.
 --
 -- * A token with empty thread is treated as a command: it receives the next
 --   id and is stored as the pending command.
 -- * A token with non-empty thread is treated as a response: it matches when
 --   its thread equals the pending command's id, emitting the pair.
-turnProcess :: Process (TurnToken a) (Maybe (TurnToken a, TurnToken a))
+turnProcess :: Mealy (TurnToken a) (Maybe (TurnToken a, TurnToken a))
 turnProcess =
   mealy emptyTurnState $ \st tok ->
     if null (turnThread tok)
@@ -93,11 +93,11 @@ turnProcess =
 -- | Run one turn: commit a body, then block until a matching response
 -- arrives.  The correlation is by 'thread', not by position.
 turn ::
-  Poles () () (K IO) (K IO) (TurnToken Text) (TurnToken Text) ->
+  Poles () (K IO) (TurnToken Text) (TurnToken Text) ->
   IO (Trace (,) (K IO) Text Text)
 turn e = do
   ref <- newIORef emptyTurnState
-  pure . base . K $ \body -> do
+  pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
     runK (conjoint e) cmd
     let loop = do
@@ -112,11 +112,11 @@ turn e = do
 -- unarrived response is not lost — the next emit still receives it.
 turnTimeout ::
   Int ->
-  Poles () () (K IO) (K IO) (TurnToken Text) (TurnToken Text) ->
+  Poles () (K IO) (TurnToken Text) (TurnToken Text) ->
   IO (Trace (,) (K IO) Text (Maybe Text))
 turnTimeout us e = do
   ref <- newIORef emptyTurnState
-  pure . base . K $ \body -> do
+  pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
     runK (conjoint e) cmd
     timeout us $ do
