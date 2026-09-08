@@ -1,4 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -70,16 +69,12 @@ module Circuit.Agent.StdPorts
   )
 where
 
-import Circuit.Agent (Agent, run1)
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
+import Circuit.Cell (Cell (..), Process, processFromSeed, scanProcess)
 import Circuit.Equip (Poles (..), companion, conjoint)
-import Circuit.Machine (fromEvalMachine)
-import Circuit.Poly (Eval (..))
-import Circuit.Machine (machineObsWith)
-import Circuit.Process (Process, asProcess, scanProcess)
-import Circuit.Tensor (Tensor (..))
 import Circuit.Syntax (Syntax (Lift))
+import Circuit.Tensor (Tensor (..))
 import Circuit.Trace (Trace)
 import Circuit.Traced (yank)
 import Control.Concurrent (forkIO, killThread)
@@ -105,7 +100,7 @@ import Prelude
 
 -- $setup
 --
--- >>> import Circuit.Process (scan)
+-- >>> import Circuit.Cell (processFromSeed, scan, scanProcess)
 -- >>> import Circuit.Equip (Poles (..), companion, conjoint, open)
 -- >>> import Circuit.Category (K (..))
 -- >>> import Data.Text.Encoding (decodeUtf8)
@@ -275,19 +270,16 @@ sink q = runK (conjoint q)
 -- the same stateless grammar.  This is the level-0 mark machine made
 -- literal; 'pumpFrames' is merely its IO interpretation at a 'Handle'.
 --
--- >>> scanProcess (asProcess (machineObs (frameAgent lineMarks decodeUtf8)) ("", [])) [Just "a\n", Just "b", Nothing]
+-- >>> scanProcess (processFromSeed ("", []) (frameAgent lineMarks decodeUtf8)) [Just "a\n", Just "b", Nothing]
 -- [["a"],[],["b"]]
-frameAgent :: ProcMarks -> (BS.ByteString -> a) -> Agent (->) (BS.ByteString, [a]) (Maybe BS.ByteString) [a]
-frameAgent marks decode = fromEvalMachine $ \(buf, pending) ->
-  EP
-    ( EK pending,
-      EE $ \case
-        Just chunk ->
-          let (fs, buf') = peel (buf <> chunk)
-           in (buf', map decode fs)
-        Nothing ->
-          (BS.empty, [decode buf | not (BS.null buf)])
-    )
+frameAgent :: ProcMarks -> (BS.ByteString -> a) -> Cell (,) (BS.ByteString, [a]) (->) (Maybe BS.ByteString) [a]
+frameAgent marks decode = Cell snd $ \((buf, _), i) ->
+  case i of
+    Just chunk ->
+      let (fs, buf') = peel (buf <> chunk)
+       in (buf', map decode fs)
+    Nothing ->
+      (BS.empty, [decode buf | not (BS.null buf)])
   where
     peel buf = case splitFrame marks buf of
       Nothing -> ([], buf)
@@ -297,8 +289,12 @@ frameAgent marks decode = fromEvalMachine $ \(buf, pending) ->
 
 -- | The same machine as a 'Process': chunk stream in, frame lists out,
 -- seed carried as the Process state.
-frameProcess :: ProcMarks -> (BS.ByteString -> a) -> Process (BS.ByteString, [a]) (Maybe BS.ByteString) [a]
-frameProcess marks decode = asProcess (machineObsWith (\(_buf, pending) -> (pending, ())) (frameAgent marks decode)) (BS.empty, [])
+frameProcess :: ProcMarks -> (BS.ByteString -> a) -> Process (,) (BS.ByteString, [a]) (->) (Maybe BS.ByteString) [a]
+frameProcess marks decode = processFromSeed (BS.empty, []) (frameAgent marks decode)
+
+-- | One cell step: the observation of the post-step state, with the state.
+runCell :: Cell (,) s (->) i o -> s -> i -> (o, s)
+runCell (Cell o k) s i = let s' = k (s, i) in (o s', s')
 
 -- | The pumper: the IO interpretation of 'frameAgent' at a 'Handle'.
 -- Blocking reads deliver percepts; payloads are sunk into the queue.
@@ -315,7 +311,7 @@ pumpFrames marks decode h snk = go (BS.empty, [])
             Right bs
               | BS.null bs -> Nothing
               | otherwise -> Just bs
-          (outs, st') = run1 sys st input
+          (outs, st') = runCell sys st input
       traverse_ snk outs
       case input of
         Nothing -> pure ()

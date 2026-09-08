@@ -68,6 +68,7 @@ module Circuit.Agent
     AgentState (..),
     emptyAgentState,
     tape,
+    cellToAgent,
     selfrec,
 
     -- * Inbox
@@ -199,16 +200,14 @@ module Circuit.Agent
   )
 where
 
-import Circuit hiding (eval, race, (.))
+import Circuit hiding (Body, after, eval, morphism, race, (.))
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
+import Circuit.Cell (Body (..), Cell (..), MonoBody, after, morphism)
 import Circuit.Equip (compose, imap, iomap, omap)
-import Circuit.Machine (Machine (..), fromEvalMachine, machine, machineMorphism, monoDir, monoIn)
-import Circuit.Poly (Eval (..), Mono)
-import Circuit.Process (after)
-import Circuit.Syntax (eval)
-import Circuit.Syntax (Syntax (Lift))
+import Circuit.Poly (Eval (..), Mono, monoDir, monoIn)
+import Circuit.Syntax (Syntax (Lift), eval)
 import Circuit.Trace (Trace)
 import Circuit.Traced (yank)
 import Control.Concurrent (threadDelay)
@@ -222,13 +221,14 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
 import Data.Text (Text, empty)
+import Data.Void (absurd)
 import Numeric.Natural (Natural)
 import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
--- >>> import Circuit.Process (asProcessP, asProcess, scan)
+-- >>> import Circuit.Cell (scanProcess, processFromSeed)
 
 -- | Agent name on the shared log.
 type Name = Text
@@ -390,13 +390,21 @@ fromBag (Bag m) = concatMap (\(a, n) -> replicate n a) (Map.toList m)
 -- | Log algebra: a sequence of bags, one bag per turn.
 type TurnLog a = Seq (Bag a)
 
--- | Agent: a Moore machine with free carrier, polymorphic in the base arrow.
+-- | Agent: a monomial body with free carrier, polymorphic in the base arrow.
 --
--- @Machine (,) arr s (Mono a b) ≅ arr (s, a) (s, b)@ after collapsing unit
+-- @Agent arr s a b ≅ arr (s, a) (s, b)@ after collapsing unit
 -- positions.  Common log case: @Agent (->) s (Post a) [Post a]@ (input = one post,
 -- output = list of posts).  @Agent (K m) s a b@ is the monadic Moore
 -- machine.
-type Agent arr s a b = Machine (,) s arr (Mono a b)
+type Agent arr s a b = MonoBody (,) s arr a b
+
+-- | The observation-carrying bridge into the graph's fused world: the
+-- body's position leg reads the cell's observation of the incoming
+-- state (pre-step), which is what the delivery runners consume.
+cellToAgent :: Cell (,) s (->) a b -> Agent (->) s a b
+cellToAgent (Cell o k) = Body $ \(s, d) -> case d of
+  Left v -> absurd v
+  Right i -> (k (s, i), (o s, ()))
 
 -- | Opaque effectful ends: commit an @a@, emit a @b@.
 --
@@ -423,17 +431,17 @@ logEnds = polesK
 
 -- | Born empty, conses each received input onto its history.
 --
--- >>> scan (asProcess (asProcessP (tape length) [])) [1,2,3 :: Int]
+-- >>> scanProcess (processFromSeed [] (tape length)) [1,2,3 :: Int]
 -- [1,2,3]
-tape :: ([i] -> o) -> Agent (->) [i] i o
-tape f = machine $ \(hist, d) -> (monoDir d : hist, (f hist, ()))
+tape :: ([i] -> o) -> Cell (,) [i] (->) i o
+tape f = Cell f (\(hist, i) -> i : hist)
 
 -- | Like 'tape', but also conses the agent's own output onto its history.
 --
 -- This is the internal-monologue construction: an agent's outputs are on the
 -- same log as its percepts, visible to its own future turns.
 selfrec :: ([i] -> i) -> Agent (->) [i] i i
-selfrec f = machine $ \(hist, d) ->
+selfrec f = Body $ \(hist, d) ->
   let i = monoDir d
       h' = i : hist
    in (f h' : h', (f hist, ()))
@@ -848,8 +856,8 @@ loopHeteroSubs roster log0 =
 -- post-input timing).
 run1 :: Agent (->) s i o -> s -> i -> (o, s)
 run1 sys s i =
-  let (s', _) = machineMorphism sys (s, monoIn i)
-      (_, (o, ())) = machineMorphism sys (s', monoIn i)
+  let (s', _) = morphism sys (s, monoIn i)
+      (_, (o, ())) = morphism sys (s', monoIn i)
    in (o, s')
 
 -- | Lift a pure agent into the 'K' arrow of any functor.
@@ -857,12 +865,12 @@ run1 sys s i =
 -- This is the change of base from @(->)@ to @K m@ on the agent itself:
 -- the same Moore coalgebra, but each step now lives in @m@.
 agentM :: (Applicative m) => Agent (->) s a b -> Agent (K m) s a b
-agentM sys = machine (K (pure . machineMorphism sys))
+agentM sys = Body (K (pure . morphism sys))
 
 -- | Run one step of a monadic agent.
 runAgentM :: (Monad m) => Agent (K m) s a b -> s -> a -> m (b, s)
 runAgentM sys s a =
-  runK (machineMorphism sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
+  runK (morphism sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
 
 -- | STM agent: state is handled transparently inside an STM transaction.
 type AgentS s a = Agent (K STM) s a [a]
@@ -873,22 +881,22 @@ type AgentX s a = Agent (K IO) s a [a]
 
 -- | Cross from the transparent STM world into the IO boundary.
 agentX :: AgentS s a -> AgentX s a
-agentX sys = machine (K (\(s, d) -> atomically (runK (machineMorphism sys) (s, d))))
+agentX sys = Body (K (\(s, d) -> atomically (runK (morphism sys) (s, d))))
 
 -- | Seat-level product / await in STM.
 awaitS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 awaitS sys1 sys2 =
-  machine $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (machineMorphism sys1) (s1, d)
-    (s2', (o2, ())) <- runK (machineMorphism sys2) (s2, d)
+  Body $ K $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runK (morphism sys1) (s1, d)
+    (s2', (o2, ())) <- runK (morphism sys2) (s2, d)
     pure ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race in STM.
 raceS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 raceS sys1 sys2 =
-  machine $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (machineMorphism sys1) (s1, d)
-    (s2', (o2, ())) <- runK (machineMorphism sys2) (s2, d)
+  Body $ K $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runK (morphism sys1) (s1, d)
+    (s2', (o2, ())) <- runK (morphism sys2) (s2, d)
     let o = if null o1 then o2 else o1
     pure ((s1', s2'), (o, ()))
 
@@ -901,8 +909,8 @@ raceS sys1 sys2 =
 -- step produces a mark first, not the left-biased deterministic rule.
 raceIO :: AgentX s1 a -> AgentX s2 a -> AgentX (s1, s2) a
 raceIO sys1 sys2 =
-  machine $ K $ \((s1, s2), d) ->
-    raceFirst (runK (machineMorphism sys1) (s1, d)) (runK (machineMorphism sys2) (s2, d)) >>= \case
+  Body $ K $ \((s1, s2), d) ->
+    raceFirst (runK (morphism sys1) (s1, d)) (runK (morphism sys2) (s2, d)) >>= \case
       Left (s1', outs) -> pure ((s1', s2), (outs, ()))
       Right (s2', outs) -> pure ((s1, s2'), (outs, ()))
   where
@@ -926,7 +934,7 @@ raceIO sys1 sys2 =
 -- | Run one step of an STM agent.
 stepS :: AgentS s a -> s -> a -> STM (s, [a])
 stepS sys s i = do
-  (s', (outs, ())) <- runK (machineMorphism sys) (s, monoIn i)
+  (s', (outs, ())) <- runK (morphism sys) (s, monoIn i)
   pure (s', outs)
 
 -- | Fold an STM agent over a bundle of inputs within one transaction.
@@ -1041,8 +1049,8 @@ beh sys s0 (i : ins) =
 -- branch's update function determines the next state.
 branchAgent :: (s -> Bool) -> Agent (->) s a b -> Agent (->) s a b -> Agent (->) s a b
 branchAgent cond sys1 sys2 =
-  machine $ \(state, d) ->
-    if cond state then machineMorphism sys1 (state, d) else machineMorphism sys2 (state, d)
+  Body $ \(state, d) ->
+    if cond state then morphism sys1 (state, d) else morphism sys2 (state, d)
 
 -- | Seat-level product / await: both agents run on the same input; states are
 -- paired; emits are concatenated left-to-right.
@@ -1050,9 +1058,9 @@ awaitA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-awaitA sys1 sys2 = machine $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = machineMorphism sys1 (s1, d)
-      (s2', (o2, ())) = machineMorphism sys2 (s2, d)
+awaitA sys1 sys2 = Body $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = morphism sys1 (s1, d)
+      (s2', (o2, ())) = morphism sys2 (s2, d)
    in ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race: both agents run on the same input; states are
@@ -1061,9 +1069,9 @@ raceA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-raceA sys1 sys2 = machine $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = machineMorphism sys1 (s1, d)
-      (s2', (o2, ())) = machineMorphism sys2 (s2, d)
+raceA sys1 sys2 = Body $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = morphism sys1 (s1, d)
+      (s2', (o2, ())) = morphism sys2 (s2, d)
       o = if null o1 then o2 else o1
    in ((s1', s2'), (o, ()))
 

@@ -10,7 +10,7 @@
 module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
-import Circuit.Agent (Agent, Post (..), mkPost, tape)
+import Circuit.Agent (Agent, Post (..), cellToAgent, mkPost, tape)
 import Circuit.Agent.Graph
   ( AgentGraph,
     AgentRegistry,
@@ -32,7 +32,7 @@ run g reg ins = sortOn (\p -> (from p, body p)) (runGraph g reg ins)
 
 -- | One-shot ack agent: replies to the newest post it did not send itself.
 ack :: Text -> Agent (->) [Post Text] (Post Text) [Post Text]
-ack name = tape $ \hist ->
+ack name = cellToAgent $ tape $ \hist ->
   case filter (\p -> from p /= name) hist of
     (p : _) -> [p {from = name, to = [], body = "ack:" <> body p}]
     [] -> []

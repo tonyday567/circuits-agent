@@ -35,8 +35,8 @@ where
 import Circuit (Syntax (Lift), Trace)
 import Circuit.Agent (PostId)
 import Circuit.Category (K (..))
+import Circuit.Cell (Cell (..), Process, processFromSeed)
 import Circuit.Equip (Poles (..), companion, conjoint)
-import Circuit.Process (Moore, mealy)
 import Data.IORef
 import Data.Text (Text)
 import System.Timeout (timeout)
@@ -83,12 +83,13 @@ matchResponse st@TurnState {pending = Just (cmdId, cmd)} resp
 --   id and is stored as the pending command.
 -- * A token with non-empty thread is treated as a response: it matches when
 --   its thread equals the pending command's id, emitting the pair.
-turnProcess :: Moore (TurnToken a) (Maybe (TurnToken a, TurnToken a))
-turnProcess =
-  mealy emptyTurnState $ \st tok ->
-    if null (turnThread tok)
-      then (fst (injectCommand st (turnBody tok)), Nothing)
-      else matchResponse st tok
+turnProcess :: Process (,) (TurnState a, Maybe (TurnToken a, TurnToken a)) (->) (TurnToken a) (Maybe (TurnToken a, TurnToken a))
+turnProcess = processFromSeed (emptyTurnState, Nothing) (Cell snd step)
+  where
+    step ((st, _), tok) =
+      if null (turnThread tok)
+        then (fst (injectCommand st (turnBody tok)), Nothing)
+        else matchResponse st tok
 
 -- | Run one turn: commit a body, then block until a matching response
 -- arrives.  The correlation is by 'thread', not by position.

@@ -51,7 +51,7 @@ import Circuit.Agent
     runAgentShard,
     watch,
   )
-import Circuit.Machine (Machine (..), machine)
+import Circuit.Cell (Body (..))
 import Data.List (foldl')
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -152,7 +152,7 @@ channelMap = LG.foldg Map.empty singleton connectInfo
 -- and return it on the next observation.
 routeAgent :: ChannelSet -> Agent (->) [Post Text] (Post Text) [Post Text] -> GraphAgent
 routeAgent outChs inner =
-  machine $ \((hist, mout), d) ->
+  Body $ \((hist, mout), d) ->
     case d of
       Left _ -> ((hist, mout), (fromMaybe [] mout, ()))
       Right inp ->
@@ -172,7 +172,7 @@ injectChannels ins outs g =
 -- emitted.
 toAgent :: AgentGraph -> AgentRegistry -> Agent (->) [Post Text] (Post Text) [Post Text]
 toAgent graph registry =
-  machine $ \(hist, d) ->
+  Body $ \(hist, d) ->
     case d of
       Left _ -> (hist, ([], ()))
       Right inp ->

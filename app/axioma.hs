@@ -11,7 +11,7 @@
 module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
-import Circuit hiding (Stamped, eval, id, (.))
+import Circuit hiding (Body, Stamped, eval, id, morphism, scanProcess, (.))
 import Circuit.Agent
 import Circuit.Agent.Delivery
   ( DelRel,
@@ -70,12 +70,12 @@ import Circuit.Agent.Tensor
     synthesisSummary,
   )
 import Circuit.Agent.Turn qualified as TurnPort
+import Circuit.Body qualified as B0
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
+import Circuit.Cell (Body (..), Cell (..), evalAsCell, processFromSeed, scanProcess)
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
-import Circuit.Machine (Machine, MachineObs, machine, machineMorphism, machineObs, machineObsWith, moMachine, monoDir, monoIn)
-import Circuit.Poly (Dir, Eval (..), Mono, Pos)
-import Circuit.Process (asProcess, scanProcess)
+import Circuit.Poly (Eval (..), monoDir, monoIn)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Circuit.Syntax (eval)
 import Control.Concurrent (forkIO, threadDelay)
@@ -112,19 +112,18 @@ assert msg ok =
       putStrLn ("  FAIL " ++ msg)
       exitFailure
 
--- | Replacement for the removed 'iterateAgent' runner.
-iterateAgent :: MachineObs s (Mono i o) -> s -> [i] -> [o]
-iterateAgent sys s0 = scanProcess (asProcess sys s0)
+-- | The runner 'iterateAgent' once was: a cell is already observable, so
+-- this is 'scanProcess' composed with the seeded commit.
+iterateAgent :: Cell (,) s (->) i o -> s -> [i] -> [o]
+iterateAgent sys s0 = scanProcess (processFromSeed s0 sys)
 
--- | Replacement for the removed 'finalAgent' runner.
-finalAgent :: MachineObs s (Mono i o) -> s -> [i] -> s
-finalAgent sys s0 is = foldl' step s0 is
-  where
-    step s i = fst (machineMorphism (moMachine sys) (s, monoIn i))
+-- | The final state of the run — 'foldProcess' without the observation.
+finalAgent :: Cell (,) s (->) i o -> s -> [i] -> s
+finalAgent (Cell _ k) s0 is = foldl' (\s i -> k (s, i)) s0 is
 
--- | Observation for 'tape'-shaped agents: the position is @f@ of the state.
-tapeObs :: ([i] -> o) -> MachineObs [i] (Mono i o)
-tapeObs f = machineObsWith (\s -> (f s, ())) (tape f)
+-- | One cell step: the observation of the post-step state, with the state.
+runCell :: Cell (,) s (->) i o -> s -> i -> (o, s)
+runCell (Cell o k) s i = let s' = k (s, i) in (o s', s')
 
 -- | Remove a file if present.
 wipe :: FilePath -> IO ()
@@ -135,7 +134,7 @@ wipe f = do
 -- | Close a same-type agent shard once.
 closeShardIO :: AgentShard [Post Text] [Post Text] -> [Post Text] -> [Post Text] -> IO ([Post Text], [Post Text])
 closeShardIO sh x s0 = do
-  (s', outs) <- runK (morphism (close sh)) (s0, x)
+  (s', outs) <- runK (B0.morphism (close sh)) (s0, x)
   pure (outs, s')
 
 peek :: [Post Text] -> Post Text
@@ -200,11 +199,11 @@ outcomesRace f g hist = nub [raceP f g hist, raceP g f hist]
 
 -- | Agent that ignores its history and always emits the same list.
 constAgent :: [Post Text] -> Agent (->) [Post Text] (Post Text) [Post Text]
-constAgent outs = tape (const outs)
+constAgent outs = cellToAgent (tape (const outs))
 
 -- | STM agent that ignores its history and always emits the same list.
 constAgentS :: [Post Text] -> AgentS [Post Text] (Post Text)
-constAgentS outs = agentM (tape (const outs))
+constAgentS outs = agentM (cellToAgent (tape (const outs)))
 
 main :: IO ()
 main = do
@@ -222,10 +221,10 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "A0: identity agent"
   do
-    let idAgent :: Agent (->) [Int] Int Int
+    let idAgent :: Cell (,) [Int] (->) Int Int
         idAgent = tape head
     assert "A0: tape head streams inputs through unchanged" $
-      iterateAgent (tapeObs head) [] [1, 2, 3 :: Int] == [1, 2, 3]
+      iterateAgent (tape head) [] [1, 2, 3 :: Int] == [1, 2, 3]
 
   -------------------------------------------------------------------------
   -- A1: sequential stream composition
@@ -236,13 +235,13 @@ main = do
         f = (+ 10)
         g :: Int -> Int
         g = (* 2)
-        fAgent :: Agent (->) [Int] Int Int
+        fAgent :: Cell (,) [Int] (->) Int Int
         fAgent = tape (f . head)
-        gAgent :: Agent (->) [Int] Int Int
+        gAgent :: Cell (,) [Int] (->) Int Int
         gAgent = tape (g . head)
         inputs = [1, 2, 3 :: Int]
-        chained = iterateAgent (tapeObs (g . head)) [] (iterateAgent (tapeObs (f . head)) [] inputs)
-        direct = iterateAgent (tapeObs (g . f . head)) [] inputs
+        chained = iterateAgent (tape (g . head)) [] (iterateAgent (tape (f . head)) [] inputs)
+        direct = iterateAgent (tape (g . f . head)) [] inputs
     assert "A1: chaining outputs equals feeding the composed function" $
       chained == direct
 
@@ -251,10 +250,10 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "the pretense"
   do
-    let sumAgent :: MachineObs Int (Mono Int Int)
-        sumAgent = machineObs $ \s -> EP (EK s, EE (+ s))
+    let sumAgent :: Cell (,) Int (->) Int Int
+        sumAgent = evalAsCell $ \s -> EP (EK s, EE (+ s))
     assert "tape sum == [1,3,6]" $
-      iterateAgent (tapeObs sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
+      iterateAgent (tape sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
     assert "sumAgent == [1,3,6]" $
       iterateAgent sumAgent 0 [1, 2, 3 :: Int] == [1, 3, 6]
 
@@ -264,7 +263,7 @@ main = do
     -- initial empty prefix from scanl.
     let xs = [1, 2, 3 :: Int]
     assert "O1: tape f xs == map f (drop 1 (scanl (flip (:)) [] xs))" $
-      iterateAgent (tapeObs sum) [] xs == map sum (drop 1 (scanl (flip (:)) [] xs))
+      iterateAgent (tape sum) [] xs == map sum (drop 1 (scanl (flip (:)) [] xs))
 
   -------------------------------------------------------------------------
   -- O2: coalgebra homomorphism (compaction invariance as behaviour preservation)
@@ -274,12 +273,12 @@ main = do
     let xs = [1, 2, 3 :: Int]
         f hist = [head hist]
         h = take 1
-        sys1 :: Agent (->) [Int] Int [Int]
+        sys1 :: Cell (,) [Int] (->) Int [Int]
         sys1 = tape f
-        sys2 :: Agent (->) [Int] Int [Int]
+        sys2 :: Cell (,) [Int] (->) Int [Int]
         sys2 = tape (f . h)
     assert "O2: summarizer h preserves behaviour" $
-      iterateAgent (tapeObs (f . h)) (h []) xs == iterateAgent (tapeObs f) [] xs
+      iterateAgent (tape (f . h)) (h []) xs == iterateAgent (tape f) [] xs
 
   -------------------------------------------------------------------------
   -- S3: behaviour is functorial over stream concatenation.
@@ -288,28 +287,28 @@ main = do
   do
     let xs = [1, 2 :: Int]
         ys = [3 :: Int]
-        agent :: Agent (->) [Int] Int [Int]
+        agent :: Cell (,) [Int] (->) Int [Int]
         agent = tape (\hist -> [head hist])
         s0 = [] :: [Int]
     assert "S3: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalAgent agent s0 xs) ys" $
       behA agent s0 (xs ++ ys)
-        == behA agent s0 xs ++ behA agent (finalAgent (tapeObs (\hist -> [head hist])) s0 xs) ys
+        == behA agent s0 xs ++ behA agent (finalAgent (tape (\hist -> [head hist])) s0 xs) ys
 
   -------------------------------------------------------------------------
   -- Compaction invariance: summary-insensitive folds survive it.
   -------------------------------------------------------------------------
   putStrLn "compaction invariance"
   do
-    let a = tape sum :: Machine (,) [Int] (->) (Mono Int Int)
-    let (_, s1) = run1 a [] 1
-    let (_, s2) = run1 a s1 2
-    let (o3, _) = run1 a [sum s2] 3
+    let a = tape sum :: Cell (,) [Int] (->) Int Int
+    let (_, s1) = runCell a [] 1
+    let (_, s2) = runCell a s1 2
+    let (o3, _) = runCell a [sum s2] 3
     assert "sum survives wholesale compaction" $ o3 == 6
 
-    let b = tape length :: Machine (,) [Int] (->) (Mono Int Int)
-    let (_, t1) = run1 b [] 1
-    let (_, t2) = run1 b t1 2
-    let (p3, _) = run1 b [sum t2] 3
+    let b = tape length :: Cell (,) [Int] (->) Int Int
+    let (_, t1) = runCell b [] 1
+    let (_, t2) = runCell b t1 2
+    let (p3, _) = runCell b [sum t2] 3
     assert "length notices wholesale compaction" $ p3 == 2
 
   -------------------------------------------------------------------------
@@ -330,12 +329,12 @@ main = do
         ins = [p1, p2, p3]
         f = reply "j"
         h = take 1
-        sys1 :: Agent (->) [Post Text] (Post Text) [Post Text]
+        sys1 :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
         sys1 = tape f
-        sys2 :: Agent (->) [Post Text] (Post Text) [Post Text]
+        sys2 :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
         sys2 = tape (f . h)
     assert "reply homomorphism: summarizer h preserves behaviour" $
-      beh sys2 (h []) ins == beh sys1 [] ins
+      beh (cellToAgent sys2) (h []) ins == beh (cellToAgent sys1) [] ins
 
   do
     let p1 = mkPost "human" ["j"] "one"
@@ -343,12 +342,12 @@ main = do
         p3 = mkPost "human" ["j"] "three"
         xs = [p1, p2]
         ys = [p3]
-        agent :: Agent (->) [Post Text] (Post Text) [Post Text]
+        agent :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
         agent = tape (reply "j")
         s0 = [] :: [Post Text]
     assert "reply functoriality: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalAgent agent s0 xs) ys" $
-      beh agent s0 (xs ++ ys)
-        == beh agent s0 xs ++ beh agent (finalAgent (tapeObs (reply "j")) s0 xs) ys
+      beh (cellToAgent agent) s0 (xs ++ ys)
+        == beh (cellToAgent agent) s0 xs ++ beh (cellToAgent agent) (finalAgent agent s0 xs) ys
 
   -------------------------------------------------------------------------
   -- Delivery: addressed posts, no redelivery.
@@ -359,8 +358,8 @@ main = do
           [ mkPost "human" ["k"] "hi k",
             mkPost "human" ["j"] "hi j"
           ]
-    let (stJ1, t1, _) = turn (tape (reply "j")) (seedState ["j"] t0) t0
-    let (stK1, t2, _) = turn (tape (reply "k")) (seedState ["k"] t1) t1
+    let (stJ1, t1, _) = turn (cellToAgent (tape (reply "j"))) (seedState ["j"] t0) t0
+    let (stK1, t2, _) = turn (cellToAgent (tape (reply "k"))) (seedState ["k"] t1) t1
     assert "j receives only its addressed posts" $
       map body (reverse (asCarrier stJ1)) == ["hi j"]
     assert "k receives only its addressed posts" $
@@ -386,7 +385,7 @@ main = do
         && not (deliversTo (mkPost "human" [""] "hi") ["k"])
 
     let t3 = post (mkPost "human" ["j"] "again") t2
-    let (stJ2, _t4, _) = turn (tape (reply "j")) (feedState (newFor ["j"] t3 stJ1) stJ1) t3
+    let (stJ2, _t4, _) = turn (cellToAgent (tape (reply "j"))) (feedState (newFor ["j"] t3 stJ1) stJ1) t3
     assert "j sees the new post, no redelivery" $
       map body (reverse (asCarrier stJ2)) == ["hi j", "again"]
 
@@ -707,9 +706,9 @@ main = do
   putStrLn "turn integrity"
   do
     let t0 = [mkPost "human" ["j"] "calc:1 2 3"]
-    let (stJ1, t1, _) = turn (tape llmJ) (seedState ["j"] t0) t0
-    let (_stCalc, t2, _) = turn (tape calc) (seedState ["calc"] t1) t1
-    let (_stJ2, t3, _) = turn (tape llmJ) (feedState (newFor ["j"] t2 stJ1) stJ1) t2
+    let (stJ1, t1, _) = turn (cellToAgent (tape llmJ)) (seedState ["j"] t0) t0
+    let (_stCalc, t2, _) = turn (cellToAgent (tape calc)) (seedState ["calc"] t1) t1
+    let (_stJ2, t3, _) = turn (cellToAgent (tape llmJ)) (feedState (newFor ["j"] t2 stJ1) stJ1) t2
     assert "tool-call chain produces expected final post" $
       body (peek t3) == "final: 6"
     assert "turn appends exactly one post per input" $
@@ -721,8 +720,8 @@ main = do
   putStrLn "loop quiescence"
   do
     let roster =
-          [ ("j", tape (reply "j")),
-            ("k", tape (reply "k"))
+          [ ("j", cellToAgent (tape (reply "j"))),
+            ("k", cellToAgent (tape (reply "k")))
           ]
     let t0 =
           [ mkPost "human" ["k"] "hi k",
@@ -749,7 +748,7 @@ main = do
         Just d -> dInput d == pToJ && dOutputs d == [expectedAckJ] && null (dChildren d)
         Nothing -> False
 
-    let roster2 = [("j", tape llmJ), ("calc", tape calc)]
+    let roster2 = [("j", cellToAgent (tape llmJ)), ("calc", cellToAgent (tape calc))]
     let tCalc0 = [mkPost "human" ["j"] "calc:1 2 3"]
     let (_states2, tCalc, derivs2) = loop roster2 tCalc0
     assert "loop runs tool-call chain to final" $
@@ -778,8 +777,8 @@ main = do
   putStrLn "multi-seat card"
   do
     let cardRoster =
-          [ ("alpha", ["xyzzy"], tape (reply "alpha")),
-            ("beta", ["xyzzy"], tape (reply "beta"))
+          [ ("alpha", ["xyzzy"], cellToAgent (tape (reply "alpha"))),
+            ("beta", ["xyzzy"], cellToAgent (tape (reply "beta")))
           ]
         seed = [mkPost "human" ["xyzzy"] "hello card"]
         (cardStates, cardLog, cardDerivs) = loopSubs cardRoster seed
@@ -806,8 +805,8 @@ main = do
   putStrLn "O8: schedule independence"
   do
     let rosterInd =
-          [ ("j", tape (reply "j")),
-            ("k", tape (reply "k"))
+          [ ("j", cellToAgent (tape (reply "j"))),
+            ("k", cellToAgent (tape (reply "k")))
           ]
         t0Ind =
           [ mkPost "human" ["k"] "hi k",
@@ -825,8 +824,8 @@ main = do
         ackToHuman hist =
           [mkPost "k" ["human"] ("ack: " <> body (peek hist))]
         rosterDep =
-          [ ("j", tape (forwardTo "k")),
-            ("k", tape ackToHuman)
+          [ ("j", cellToAgent (tape (forwardTo "k"))),
+            ("k", cellToAgent (tape ackToHuman))
           ]
         t0Dep = [mkPost "human" ["j"] "tell k"]
         (_, loopDep, derivsDep) = loop rosterDep t0Dep
@@ -845,16 +844,20 @@ main = do
     let rounds = 3 :: Int
         nudge :: Agent (->) [Post Text] (Post Text) [Post Text]
         nudge =
-          tape
-            ( const
-                [mkPost "nudge" ["worker"] "tell me more."]
+          cellToAgent
+            ( tape
+                ( const
+                    [mkPost "nudge" ["worker"] "tell me more."]
+                )
             )
         worker :: Agent (->) [Post Text] (Post Text) [Post Text]
         worker =
-          tape
-            ( \hist ->
-                let p = peek hist
-                 in [mkPost "worker" ["nudge"] ("ack:" <> body p)]
+          cellToAgent
+            ( tape
+                ( \hist ->
+                    let p = peek hist
+                     in [mkPost "worker" ["nudge"] ("ack:" <> body p)]
+                )
             )
         -- seed: human addresses worker
         t0 = [mkPost "human" ["worker"] "start"]
@@ -929,7 +932,7 @@ main = do
   putStrLn "agent as shard"
   do
     let ack :: Agent (->) [Post Text] (Post Text) [Post Text]
-        ack = tape (reply "j")
+        ack = cellToAgent (tape (reply "j"))
         pIn = mkPost "human" ["j"] "hi"
         -- pure closed form
         (outs, seat) = runAgentShard ack (AgentSeat [] []) [pIn]
@@ -958,12 +961,14 @@ main = do
   do
     let arityBreaker :: Agent (->) [Post Text] (Post Text) [Post Text]
         arityBreaker =
-          tape
-            ( \hist ->
-                let n = length hist
-                 in [ mkPost "bot" ["human"] ("x" <> T.pack (show n))
-                    | _ <- [1 .. n]
-                    ]
+          cellToAgent
+            ( tape
+                ( \hist ->
+                    let n = length hist
+                     in [ mkPost "bot" ["human"] ("x" <> T.pack (show n))
+                        | _ <- [1 .. n]
+                        ]
+                )
             )
         pIn = mkPost "human" ["j"] "a"
         pIn2 = mkPost "human" ["j"] "b"
@@ -980,15 +985,15 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "branch agent"
   do
-    let liftAgent :: Agent (->) [Post Text] (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
+    let liftAgent :: Cell (,) [Post Text] (->) (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         liftAgent sys =
-          machine $ \((tag, hist), d) ->
+          Body $ \((tag, hist), d) ->
             let inp = monoDir d
-                (hist', (outs, ())) = machineMorphism sys (hist, monoIn inp)
-             in ((tag, hist'), (outs, ()))
-        calcOnly :: Agent (->) [Post Text] (Post Text) [Post Text]
+                Cell o k = sys
+             in ((tag, k (hist, inp)), (o hist, ()))
+        calcOnly :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
         calcOnly = tape calc
-        echoOnly :: Agent (->) [Post Text] (Post Text) [Post Text]
+        echoOnly :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
         echoOnly = tape (reply "j")
         branchy :: Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         branchy = branchAgent fst (liftAgent calcOnly) (liftAgent echoOnly)
@@ -1015,7 +1020,7 @@ main = do
   putStrLn "port (token seat)"
   do
     let ack :: Agent (->) [Post Text] (Post Text) [Post Text]
-        ack = tape (reply "j")
+        ack = cellToAgent (tape (reply "j"))
         pIn = mkPost "human" ["j"] "hi"
         -- agent as list shard, then token seat via stream buffers
         sh :: Shard (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) [Post Text] [Post Text]
@@ -1070,7 +1075,7 @@ main = do
 
     -- code: pure Agent that emits a tool-call Post
     let caller :: Agent (->) [Post Text] (Post Text) [Post Text]
-        caller = tape callCalc
+        caller = cellToAgent (tape callCalc)
         human = mkPost "human" ["j"] "please sum 1 2 3"
         (outs, _) = runAgentShard caller (AgentSeat [] []) [human]
     assert "agent emits one tool-call post" $
@@ -1111,7 +1116,7 @@ main = do
     let secret = mkPost "ops" ["j"] "bus emergency — do not show yet"
         public = mkPost "human" ["j"] "hi j"
         held = [secret, public] -- store exists; not all of it is delivered
-        agent = tape (reply "j") :: Agent (->) [Post Text] (Post Text) [Post Text]
+        agent = cellToAgent (tape (reply "j")) :: Agent (->) [Post Text] (Post Text) [Post Text]
 
         -- release only public (withhold secret)
         released = filter ((== "human") . from) held
@@ -1150,8 +1155,8 @@ main = do
         reg :: AgentRegistry
         reg =
           Map.fromList
-            [ ("j", atomic (tape (echo "j"))),
-              ("k", atomic (tape (echo "k")))
+            [ ("j", atomic (cellToAgent (tape (echo "j")))),
+              ("k", atomic (cellToAgent (tape (echo "k"))))
             ]
         t0 = [mkPost "human" ["bus"] "hello"]
         logBus = runGraph (bus ["j", "k"] "bus") reg t0
@@ -1170,8 +1175,8 @@ main = do
         reg :: AgentRegistry
         reg =
           Map.fromList
-            [ ("hub", atomic (tape summary)),
-              ("leaf", atomic (tape leafEcho))
+            [ ("hub", atomic (cellToAgent (tape summary))),
+              ("leaf", atomic (cellToAgent (tape leafEcho)))
             ]
         -- leaf subscribes to the "hub" channel, so the seed must be posted
         -- there for leaf to receive it first.
@@ -1187,8 +1192,8 @@ main = do
         reg :: AgentRegistry
         reg =
           Map.fromList
-            [ ("j", atomic (tape (echo "j"))),
-              ("k", atomic (tape (echo "k")))
+            [ ("j", atomic (cellToAgent (tape (echo "j")))),
+              ("k", atomic (cellToAgent (tape (echo "k"))))
             ]
         t0 = [mkPost "human" ["bus"] "hello"]
         g = bus ["j", "k"] "bus"
@@ -1218,7 +1223,7 @@ main = do
   putStrLn "self-loop halts on mark"
   do
     let k = 3 :: Int
-        roster = [("xyzzy", tape (selfLoopPolicy "xyzzy" k))]
+        roster = [("xyzzy", cellToAgent (tape (selfLoopPolicy "xyzzy" k)))]
         t0 = [mkPost "human" ["xyzzy"] "start"]
         (states, tF, derivs) = loop roster t0
     assert "self-loop halts on mark: log is 1 seed + k replies + 1 halt" $
@@ -1238,7 +1243,7 @@ main = do
   do
     let quietLog :: [Post Text]
         quietLog = [mkPost "human" ["someone-else"] "not addressed to the card"]
-        (_qStates, qLog, qDerivs) = loop [("xyzzy", tape (reply "xyzzy"))] quietLog
+        (_qStates, qLog, qDerivs) = loop [("xyzzy", cellToAgent (tape (reply "xyzzy")))] quietLog
     assert "silence is quiescence: loop with no card posts is identity on the log" $
       qLog == quietLog
     assert "silence is quiescence: no derivations" $
@@ -1250,7 +1255,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "fork is id"
   do
-    let agent = tape (reply "xyzzy") :: Agent (->) [Post Text] (Post Text) [Post Text]
+    let agent = cellToAgent (tape (reply "xyzzy")) :: Agent (->) [Post Text] (Post Text) [Post Text]
         p1 = mkPost "human" ["xyzzy"] "one"
         p2 = mkPost "human" ["xyzzy"] "two"
         (_outs0, seat0) = runAgentShard agent (AgentSeat [] []) [p1]
@@ -1271,7 +1276,7 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "fan-in lands exactly one post"
   do
-    let worker = tape (reply "xyzzy") :: Agent (->) [Post Text] (Post Text) [Post Text]
+    let worker = cellToAgent (tape (reply "xyzzy")) :: Agent (->) [Post Text] (Post Text) [Post Text]
         main0 = AgentSeat [] [] :: AgentSeat [Post Text] Text
         prompt1 = mkPost "human" ["xyzzy"] "task one"
         prompt2 = mkPost "human" ["xyzzy"] "task two"
@@ -1309,8 +1314,8 @@ main = do
   do
     let seed = mkPost "human" ["xyzzy"] "start"
         t0 = [seed]
-        agentA = tape (cardEcho "a") :: Agent (->) [Post Text] (Post Text) [Post Text]
-        agentB = tape (cardEcho "b") :: Agent (->) [Post Text] (Post Text) [Post Text]
+        agentA = cellToAgent (tape (cardEcho "a")) :: Agent (->) [Post Text] (Post Text) [Post Text]
+        agentB = cellToAgent (tape (cardEcho "b")) :: Agent (->) [Post Text] (Post Text) [Post Text]
         -- one round: first seat turns, new card posts route to both inboxes
         -- (self-loop: its own reply re-enters), then the second seat turns.
         mkRound first second (stF, stS, lg) =
@@ -1648,8 +1653,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = machine $ K $ \(_, _) -> pure ((), ([p], ()))
-        slowRight = machine $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
+        fastLeft = Body $ K $ \(_, _) -> pure ((), ([p], ()))
+        slowRight = Body $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft slowRight) ((), ()) seed
     assert "raceIO: fast left wins" $ outs == [p]
 
@@ -1657,8 +1662,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        slowLeft = machine $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
-        fastRight = machine $ K $ \(_, _) -> pure ((), ([q], ()))
+        slowLeft = Body $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
+        fastRight = Body $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO slowLeft fastRight) ((), ()) seed
     assert "raceIO: fast right wins" $ outs == [q]
 
@@ -1666,8 +1671,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = machine $ K $ \(_, _) -> pure ((), ([p], ()))
-        fastRight = machine $ K $ \(_, _) -> pure ((), ([q], ()))
+        fastLeft = Body $ K $ \(_, _) -> pure ((), ([p], ()))
+        fastRight = Body $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft fastRight) ((), ()) seed
     assert "raceIO: both emit -> one of them" $ outs == [p] || outs == [q]
 
@@ -1700,7 +1705,7 @@ main = do
   do
     let k = 3 :: Int
         selfEcho :: AgentS [Post Text] (Post Text)
-        selfEcho = agentM $ tape $ \hist ->
+        selfEcho = agentM $ cellToAgent $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
         drainEnd ends = go []
@@ -1734,7 +1739,7 @@ main = do
   do
     let k = 3 :: Int
         selfEcho :: AgentS [Post Text] (Post Text)
-        selfEcho = agentM $ tape $ \hist ->
+        selfEcho = agentM $ cellToAgent $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
         drainEnd :: Poles () (K STM) a a -> STM [a]
@@ -1811,7 +1816,7 @@ main = do
   do
     let k = 3 :: Int
         selfEcho :: AgentS [Post Text] (Post Text)
-        selfEcho = agentM $ tape $ \hist ->
+        selfEcho = agentM $ cellToAgent $ tape $ \hist ->
           [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
         seed = mkPost "human" ["self"] "start"
         drainEnd :: Poles () (K STM) a a -> STM [a]
@@ -2123,7 +2128,7 @@ main = do
         posts = [mkPost "human" [] "one"]
         (outsAgent, _) =
           runAgentShard
-            (raceA (tape (const [p])) (tape (const [q])))
+            (raceA (cellToAgent (tape (const [p]))) (cellToAgent (tape (const [q]))))
             (AgentSeat ([], []) [])
             posts
     (outsShard, _) <- closeShardIO (raceShard (constShard [p]) (constShard [q])) posts []
@@ -2406,10 +2411,10 @@ main = do
   putStrLn "All tests passed"
   where
     -- \| Generic behaviour for Tier A agents (output lists are concatenated).
-    behA :: Agent (->) s a [b] -> s -> [a] -> [b]
+    behA :: Cell (,) s (->) a [b] -> s -> [a] -> [b]
     behA _sys _s0 [] = []
     behA sys s0 (i : ins) =
-      let (os, s') = run1 sys s0 i
+      let (os, s') = runCell sys s0 i
        in os ++ behA sys s' ins
 
     -- \| Tool call as data: from = caller, to = [tool], body = args.

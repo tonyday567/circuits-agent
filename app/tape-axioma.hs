@@ -54,7 +54,7 @@ fm xh xk = 2 * xh + 3 * xk
 -- | j answers everything it receives, forwarding to k.  Parent ids are the
 -- deterministic positions of the received post in the oldest-first log.
 jAgent :: Agent (->) [Post Double] (Post Double) [Post Double]
-jAgent = tape $ \hist ->
+jAgent = cellToAgent $ tape $ \hist ->
   let p = head hist
       parentId = case length hist of
         1 -> 0 -- seed-a
@@ -65,7 +65,7 @@ jAgent = tape $ \hist ->
 
 -- | k chains back to j on its first percept, forwards to m on its second.
 kAgent :: Agent (->) [Post Double] (Post Double) [Post Double]
-kAgent = tape $ \hist ->
+kAgent = cellToAgent $ tape $ \hist ->
   let p = head hist
       dest = if length hist == 1 then ["j"] else ["m"]
       parentId = case length hist of
@@ -77,7 +77,7 @@ kAgent = tape $ \hist ->
 -- | m stays silent until it has seen both parents, then synthesises.
 -- The seed-b seed has id 1 and the final k reply has id 6.
 mAgent :: Agent (->) [Post Double] (Post Double) [Post Double]
-mAgent = tape $ \hist ->
+mAgent = cellToAgent $ tape $ \hist ->
   case (find ((== "k") . from) hist, find ((== "seed-b") . from) hist) of
     (Just kp, Just hp) -> [synthesis "m" [] [1, 6] (fm (body hp) (body kp))]
     _ -> []
