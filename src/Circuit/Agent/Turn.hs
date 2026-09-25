@@ -35,8 +35,8 @@ where
 import Circuit (Syntax (Lift), Trace)
 import Circuit.Agent (PostId)
 import Circuit.Category (K (..))
-import Circuit.Cell (Cell (..), Process, processFromSeed)
 import Circuit.Equip (Poles (..), companion, conjoint)
+import Circuit.GMachine (Cell (..), Process, processFromSeed)
 import Data.IORef
 import Data.Text (Text)
 import System.Timeout (timeout)
@@ -84,7 +84,7 @@ matchResponse st@TurnState {pending = Just (cmdId, cmd)} resp
 -- * A token with non-empty thread is treated as a response: it matches when
 --   its thread equals the pending command's id, emitting the pair.
 turnProcess :: Process (,) (TurnState a, Maybe (TurnToken a, TurnToken a)) (->) (TurnToken a) (Maybe (TurnToken a, TurnToken a))
-turnProcess = processFromSeed (emptyTurnState, Nothing) (Cell snd step)
+turnProcess = processFromSeed (emptyTurnState, Nothing) (Cell {absorb = step, observe = snd})
   where
     step ((st, _), tok) =
       if null (turnThread tok)

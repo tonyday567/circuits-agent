@@ -204,8 +204,8 @@ import Circuit hiding (Body, after, eval, morphism, race, (.))
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.Cell (Body (..), Cell (..), MonoBody, after, morphism)
 import Circuit.Equip (compose, imap, iomap, omap)
+import Circuit.GMachine (Cell (..), MonoBody, Stratum (..), after, morphism)
 import Circuit.Poly (Eval (..), Mono, monoDir, monoIn)
 import Circuit.Syntax (Syntax (Lift), eval)
 import Circuit.Trace (Trace)
@@ -228,7 +228,7 @@ import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
--- >>> import Circuit.Cell (scanProcess, processFromSeed)
+-- >>> import Circuit.GMachine (scanProcess, processFromSeed)
 
 -- | Agent name on the shared log.
 type Name = Text
@@ -402,7 +402,7 @@ type Agent arr s a b = MonoBody (,) s arr a b
 -- body's position leg reads the cell's observation of the incoming
 -- state (pre-step), which is what the delivery runners consume.
 cellToAgent :: Cell (,) s (->) a b -> Agent (->) s a b
-cellToAgent (Cell o k) = Body $ \(s, d) -> case d of
+cellToAgent (Cell {absorb = k, observe = o}) = Stratum $ \(s, d) -> case d of
   Left v -> absurd v
   Right i -> (k (s, i), (o s, ()))
 
@@ -434,14 +434,14 @@ logEnds = polesK
 -- >>> scanProcess (processFromSeed [] (tape length)) [1,2,3 :: Int]
 -- [1,2,3]
 tape :: ([i] -> o) -> Cell (,) [i] (->) i o
-tape f = Cell f (\(hist, i) -> i : hist)
+tape f = Cell {absorb = \(hist, i) -> i : hist, observe = f}
 
 -- | Like 'tape', but also conses the agent's own output onto its history.
 --
 -- This is the internal-monologue construction: an agent's outputs are on the
 -- same log as its percepts, visible to its own future turns.
 selfrec :: ([i] -> i) -> Agent (->) [i] i i
-selfrec f = Body $ \(hist, d) ->
+selfrec f = Stratum $ \(hist, d) ->
   let i = monoDir d
       h' = i : hist
    in (f h' : h', (f hist, ()))
@@ -865,7 +865,7 @@ run1 sys s i =
 -- This is the change of base from @(->)@ to @K m@ on the agent itself:
 -- the same Moore coalgebra, but each step now lives in @m@.
 agentM :: (Applicative m) => Agent (->) s a b -> Agent (K m) s a b
-agentM sys = Body (K (pure . morphism sys))
+agentM sys = Stratum (K (pure . morphism sys))
 
 -- | Run one step of a monadic agent.
 runAgentM :: (Monad m) => Agent (K m) s a b -> s -> a -> m (b, s)
@@ -881,12 +881,12 @@ type AgentX s a = Agent (K IO) s a [a]
 
 -- | Cross from the transparent STM world into the IO boundary.
 agentX :: AgentS s a -> AgentX s a
-agentX sys = Body (K (\(s, d) -> atomically (runK (morphism sys) (s, d))))
+agentX sys = Stratum (K (\(s, d) -> atomically (runK (morphism sys) (s, d))))
 
 -- | Seat-level product / await in STM.
 awaitS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 awaitS sys1 sys2 =
-  Body $ K $ \((s1, s2), d) -> do
+  Stratum $ K $ \((s1, s2), d) -> do
     (s1', (o1, ())) <- runK (morphism sys1) (s1, d)
     (s2', (o2, ())) <- runK (morphism sys2) (s2, d)
     pure ((s1', s2'), (o1 <> o2, ()))
@@ -894,7 +894,7 @@ awaitS sys1 sys2 =
 -- | Seat-level coproduct / race in STM.
 raceS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 raceS sys1 sys2 =
-  Body $ K $ \((s1, s2), d) -> do
+  Stratum $ K $ \((s1, s2), d) -> do
     (s1', (o1, ())) <- runK (morphism sys1) (s1, d)
     (s2', (o2, ())) <- runK (morphism sys2) (s2, d)
     let o = if null o1 then o2 else o1
@@ -909,7 +909,7 @@ raceS sys1 sys2 =
 -- step produces a mark first, not the left-biased deterministic rule.
 raceIO :: AgentX s1 a -> AgentX s2 a -> AgentX (s1, s2) a
 raceIO sys1 sys2 =
-  Body $ K $ \((s1, s2), d) ->
+  Stratum $ K $ \((s1, s2), d) ->
     raceFirst (runK (morphism sys1) (s1, d)) (runK (morphism sys2) (s2, d)) >>= \case
       Left (s1', outs) -> pure ((s1', s2), (outs, ()))
       Right (s2', outs) -> pure ((s1, s2'), (outs, ()))
@@ -1049,7 +1049,7 @@ beh sys s0 (i : ins) =
 -- branch's update function determines the next state.
 branchAgent :: (s -> Bool) -> Agent (->) s a b -> Agent (->) s a b -> Agent (->) s a b
 branchAgent cond sys1 sys2 =
-  Body $ \(state, d) ->
+  Stratum $ \(state, d) ->
     if cond state then morphism sys1 (state, d) else morphism sys2 (state, d)
 
 -- | Seat-level product / await: both agents run on the same input; states are
@@ -1058,7 +1058,7 @@ awaitA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-awaitA sys1 sys2 = Body $ \((s1, s2), d) ->
+awaitA sys1 sys2 = Stratum $ \((s1, s2), d) ->
   let (s1', (o1, ())) = morphism sys1 (s1, d)
       (s2', (o2, ())) = morphism sys2 (s2, d)
    in ((s1', s2'), (o1 <> o2, ()))
@@ -1069,7 +1069,7 @@ raceA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-raceA sys1 sys2 = Body $ \((s1, s2), d) ->
+raceA sys1 sys2 = Stratum $ \((s1, s2), d) ->
   let (s1', (o1, ())) = morphism sys1 (s1, d)
       (s2', (o2, ())) = morphism sys2 (s2, d)
       o = if null o1 then o2 else o1

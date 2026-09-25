@@ -73,7 +73,7 @@ import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Body qualified as B0
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
-import Circuit.Cell (Body (..), Cell (..), evalAsCell, processFromSeed, scanProcess)
+import Circuit.GMachine (Cell (..), Stratum (..), evalAsCell, processFromSeed, scanProcess)
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Poly (Eval (..), monoDir, monoIn)
 import Circuit.Stream (These (..), Uncons, uncons)
@@ -119,11 +119,11 @@ iterateAgent sys s0 = scanProcess (processFromSeed s0 sys)
 
 -- | The final state of the run — 'foldProcess' without the observation.
 finalAgent :: Cell (,) s (->) i o -> s -> [i] -> s
-finalAgent (Cell _ k) s0 is = foldl' (\s i -> k (s, i)) s0 is
+finalAgent Cell {absorb = k} s0 is = foldl' (\s i -> k (s, i)) s0 is
 
 -- | One cell step: the observation of the post-step state, with the state.
 runCell :: Cell (,) s (->) i o -> s -> i -> (o, s)
-runCell (Cell o k) s i = let s' = k (s, i) in (o s', s')
+runCell (Cell {absorb = k, observe = o}) s i = let s' = k (s, i) in (o s', s')
 
 -- | Remove a file if present.
 wipe :: FilePath -> IO ()
@@ -987,9 +987,9 @@ main = do
   do
     let liftAgent :: Cell (,) [Post Text] (->) (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         liftAgent sys =
-          Body $ \((tag, hist), d) ->
+          Stratum $ \((tag, hist), d) ->
             let inp = monoDir d
-                Cell o k = sys
+                Cell {absorb = k, observe = o} = sys
              in ((tag, k (hist, inp)), (o hist, ()))
         calcOnly :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
         calcOnly = tape calc
@@ -1653,8 +1653,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = Body $ K $ \(_, _) -> pure ((), ([p], ()))
-        slowRight = Body $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
+        fastLeft = Stratum $ K $ \(_, _) -> pure ((), ([p], ()))
+        slowRight = Stratum $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft slowRight) ((), ()) seed
     assert "raceIO: fast left wins" $ outs == [p]
 
@@ -1662,8 +1662,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        slowLeft = Body $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
-        fastRight = Body $ K $ \(_, _) -> pure ((), ([q], ()))
+        slowLeft = Stratum $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
+        fastRight = Stratum $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO slowLeft fastRight) ((), ()) seed
     assert "raceIO: fast right wins" $ outs == [q]
 
@@ -1671,8 +1671,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = Body $ K $ \(_, _) -> pure ((), ([p], ()))
-        fastRight = Body $ K $ \(_, _) -> pure ((), ([q], ()))
+        fastLeft = Stratum $ K $ \(_, _) -> pure ((), ([p], ()))
+        fastRight = Stratum $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft fastRight) ((), ()) seed
     assert "raceIO: both emit -> one of them" $ outs == [p] || outs == [q]
 

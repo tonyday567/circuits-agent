@@ -71,8 +71,8 @@ where
 
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
-import Circuit.Cell (Cell (..), Process, processFromSeed, scanProcess)
 import Circuit.Equip (Poles (..), companion, conjoint)
+import Circuit.GMachine (Cell (..), Process, processFromSeed, scanProcess)
 import Circuit.Syntax (Syntax (Lift))
 import Circuit.Tensor (Tensor (..))
 import Circuit.Trace (Trace)
@@ -100,7 +100,7 @@ import Prelude
 
 -- $setup
 --
--- >>> import Circuit.Cell (processFromSeed, scan, scanProcess)
+-- >>> import Circuit.GMachine (processFromSeed, scan, scanProcess)
 -- >>> import Circuit.Equip (Poles (..), companion, conjoint, open)
 -- >>> import Circuit.Category (K (..))
 -- >>> import Data.Text.Encoding (decodeUtf8)
@@ -273,13 +273,16 @@ sink q = runK (conjoint q)
 -- >>> scanProcess (processFromSeed ("", []) (frameAgent lineMarks decodeUtf8)) [Just "a\n", Just "b", Nothing]
 -- [["a"],[],["b"]]
 frameAgent :: ProcMarks -> (BS.ByteString -> a) -> Cell (,) (BS.ByteString, [a]) (->) (Maybe BS.ByteString) [a]
-frameAgent marks decode = Cell snd $ \((buf, _), i) ->
-  case i of
-    Just chunk ->
-      let (fs, buf') = peel (buf <> chunk)
-       in (buf', map decode fs)
-    Nothing ->
-      (BS.empty, [decode buf | not (BS.null buf)])
+frameAgent marks decode =
+  Cell
+    { absorb = \((buf, _), i) -> case i of
+        Just chunk ->
+          let (fs, buf') = peel (buf <> chunk)
+           in (buf', map decode fs)
+        Nothing ->
+          (BS.empty, [decode buf | not (BS.null buf)]),
+      observe = snd
+    }
   where
     peel buf = case splitFrame marks buf of
       Nothing -> ([], buf)
@@ -294,7 +297,7 @@ frameProcess marks decode = processFromSeed (BS.empty, []) (frameAgent marks dec
 
 -- | One cell step: the observation of the post-step state, with the state.
 runCell :: Cell (,) s (->) i o -> s -> i -> (o, s)
-runCell (Cell o k) s i = let s' = k (s, i) in (o s', s')
+runCell (Cell {absorb = k, observe = o}) s i = let s' = k (s, i) in (o s', s')
 
 -- | The pumper: the IO interpretation of 'frameAgent' at a 'Handle'.
 -- Blocking reads deliver percepts; payloads are sunk into the queue.
