@@ -11,7 +11,7 @@
 module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
-import Circuit hiding (Body, Stamped, eval, id, morphism, scanProcess, (.))
+import Circuit hiding (Body, Poles, Stamped, close, commit, eval, id, morphism, observe, polesK, scanProcess, splay0, (.))
 import Circuit.Agent
 import Circuit.Agent.Delivery
   ( DelRel,
@@ -70,10 +70,10 @@ import Circuit.Agent.Tensor
     synthesisSummary,
   )
 import Circuit.Agent.Turn qualified as TurnPort
-import Circuit.Body qualified as B0
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
-import Circuit.GMachine (Cell (..), Stratum (..), evalAsCell, processFromSeed, scanProcess)
+import Circuit.GMachine (Cell (Cell), Poles (..), Stratum (..), close, evalAsCell, polesK, processFromSeed, scanProcess, splay0)
+import Circuit.GMachine qualified as B0
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Poly (Eval (..), monoDir, monoIn)
 import Circuit.Stream (These (..), Uncons, uncons)
@@ -119,11 +119,11 @@ iterateAgent sys s0 = scanProcess (processFromSeed s0 sys)
 
 -- | The final state of the run — 'foldProcess' without the observation.
 finalAgent :: Cell (,) s (->) i o -> s -> [i] -> s
-finalAgent Cell {absorb = k} s0 is = foldl' (\s i -> k (s, i)) s0 is
+finalAgent (Cell k _) s0 is = foldl' (\s i -> k (s, i)) s0 is
 
 -- | One cell step: the observation of the post-step state, with the state.
 runCell :: Cell (,) s (->) i o -> s -> i -> (o, s)
-runCell (Cell {absorb = k, observe = o}) s i = let s' = k (s, i) in (o s', s')
+runCell (Cell k o) s i = let s' = k (s, i) in (o s', s')
 
 -- | Remove a file if present.
 wipe :: FilePath -> IO ()
@@ -989,7 +989,7 @@ main = do
         liftAgent sys =
           Stratum $ \((tag, hist), d) ->
             let inp = monoDir d
-                Cell {absorb = k, observe = o} = sys
+                Cell k o = sys
              in ((tag, k (hist, inp)), (o hist, ()))
         calcOnly :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
         calcOnly = tape calc
@@ -2000,9 +2000,9 @@ main = do
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         -- Responder: read one command and reply with the command id in thread.
         responder = do
-          cmd <- runK (companion processPoles) ()
+          cmd <- runK (observe processPoles) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runK (conjoint processPoles) resp
+          runK (commit processPoles) resp
     turnLoop <- TurnPort.turn runnerPoles
     -- Run the responder in parallel with the turn, but wait for the turn
     -- result before cancelling the responder.  A raw race cancels the loser
@@ -2021,9 +2021,9 @@ main = do
         processPoles :: Poles () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         responder = do
-          cmd <- runK (companion processPoles) ()
+          cmd <- runK (observe processPoles) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runK (conjoint processPoles) resp
+          runK (commit processPoles) resp
     turnLoop <- TurnPort.turnTimeout 100000 runnerPoles
     responderA <- async responder
     result <- runK (eval turnLoop) "hello"

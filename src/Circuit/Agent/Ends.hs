@@ -5,10 +5,10 @@
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE TypeFamilies #-}
 
--- | Effectful 'Circuit.Equip.Poles' constructors and queueing strategies.
+-- | Effectful 'Circuit.GMachine.Poles' constructors and queueing strategies.
 --
 -- This module lives in @circuits-agent@ because it needs @STM@.  Core
--- 'Circuit.Equip' is pure in the base arrow; the queue implementations here
+-- 'Circuit.GMachine' is pure in the base arrow; the queue implementations here
 -- are one possible effectful instantiation, placed beside their consumers
 -- rather than forcing the core library to depend on @stm@.
 module Circuit.Agent.Ends
@@ -44,7 +44,7 @@ where
 
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.Equip (Poles (..), close, companion, conjoint, open, plug, polesK, splay0)
+import Circuit.GMachine (Poles (..), close, copycat, polesK, splay0)
 import Control.Applicative
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM
@@ -148,11 +148,11 @@ openHaltChannel = HaltChannel <$> openLinearChannelSTM
 
 -- | Write a token to a halt-mark channel.
 writeHaltChannel :: forall a (p :: ChannelPolicy a). HaltChannel p -> a -> STM ()
-writeHaltChannel (HaltChannel ends) = runK (conjoint ends)
+writeHaltChannel (HaltChannel ends) = runK (commit ends)
 
 -- | Read a token from a halt-mark channel.
 readHaltChannel :: forall a (p :: ChannelPolicy a). HaltChannel p -> STM a
-readHaltChannel (HaltChannel ends) = runK (companion ends) ()
+readHaltChannel (HaltChannel ends) = runK (observe ends) ()
 
 -- | Unit ends specialised to 'K STM'.
 unitEndsSTM :: Poles () (K STM) () ()
@@ -227,12 +227,12 @@ pipeEnds e1 makeE2 = do
   q <- newTQueueIO
   e2 <- makeE2 q
   let unitEnds :: Poles () (K IO) () ()
-      unitEnds = open
+      unitEnds = copycat
       readFromE1 :: IO b
-      readFromE1 = runK (close (Poles (conjoint unitEnds) (companion e1))) ()
+      readFromE1 = runK (close (Poles (commit unitEnds) (observe e1))) ()
       writeToE2 :: b -> IO ()
-      writeToE2 x = runK (close (Poles (conjoint e2) (companion unitEnds))) x
+      writeToE2 x = runK (close (Poles (commit e2) (observe unitEnds))) x
   pump <- async . forever $ do
     x <- readFromE1
     writeToE2 x
-  pure (Poles (conjoint e1) (companion e2), cancel pump)
+  pure (Poles (commit e1) (observe e2), cancel pump)

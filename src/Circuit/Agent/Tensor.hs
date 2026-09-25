@@ -1,8 +1,8 @@
 -- | Seat-level tensor combinators over 'Ends' with state carried by
--- 'Body'.
+-- 'Stratum'.
 --
 -- These are the semantic citizens that free-agent 'FreeSeat' terms fold into.
--- The buffer state is part of the base arrow ('Body (,) (K IO)
+-- The buffer state is part of the base arrow ('Stratum (,) (K IO)
 -- [Post Text]') rather than a monad transformer.
 module Circuit.Agent.Tensor
   ( AgentShard,
@@ -20,16 +20,15 @@ module Circuit.Agent.Tensor
   )
 where
 
-import Circuit (Body (..), close, companion, conjoint)
 import Circuit.Agent (Name, Post (..), PostId, mkPost, synthesis)
 import Circuit.Category (K (..))
-import Circuit.Equip (Poles, poles0)
+import Circuit.GMachine (Poles, Stratum (..), close, poles0)
 import Data.Text (Text)
 import Data.Text qualified as T
 
 -- | An effectful agent shard with a '[Post Text]' buffer threaded through the
 -- arrow.
-type AgentShard a b = Poles () (Body (,) [Post Text] (K IO)) a b
+type AgentShard a b = Poles () (Stratum (,) [Post Text] (K IO)) a b
 
 -- | Run a child shard in isolation on the given input, discarding its
 -- residual state.  Branches in await / race / fan-out have private scratch
@@ -42,26 +41,26 @@ runSubShard sh xs = do
 
 -- | Close a same-type shard once, exposing both the output and the residual
 -- state.  Works for any state carrier @s@ and payload @a@.
-closeShardIO :: Poles () (Body (,) s (K IO)) a a -> a -> s -> IO (a, s)
+closeShardIO :: Poles () (Stratum (,) s (K IO)) a a -> a -> s -> IO (a, s)
 closeShardIO sh x s0 = do
   let thread = close sh
   (s', y) <- runK (morphism thread) (s0, x)
   pure (y, s')
 
 -- | Helper: store the input batch as the buffer.
-writeBatch :: Body (,) [Post Text] (K IO) [Post Text] ()
-writeBatch = Body $ K $ \(_, xs) -> pure (xs, ())
+writeBatch :: Stratum (,) [Post Text] (K IO) [Post Text] ()
+writeBatch = Stratum $ K $ \(_, xs) -> pure (xs, ())
 
 -- | Helper: return the buffer as output and clear it.
-readBatch :: Body (,) [Post Text] (K IO) () [Post Text]
-readBatch = Body $ K $ \(s, ()) -> pure ([], s)
+readBatch :: Stratum (,) [Post Text] (K IO) () [Post Text]
+readBatch = Stratum $ K $ \(s, ()) -> pure ([], s)
 
 -- | Build an agent shard that stores the input batch, then computes outputs
 -- from that batch in 'IO'.
 ioShard :: ([Post Text] -> IO [Post Text]) -> AgentShard [Post Text] [Post Text]
 ioShard emit = poles0 writeBatch read'
   where
-    read' = Body $ K $ \(s, ()) -> do
+    read' = Stratum $ K $ \(s, ()) -> do
       outs <- emit s
       pure ([], outs)
 
@@ -77,7 +76,7 @@ awaitShard ::
   AgentShard [Post Text] [Post Text]
 awaitShard sh1 sh2 = poles0 writeBatch read'
   where
-    read' = Body $ K $ \(s, ()) -> do
+    read' = Stratum $ K $ \(s, ()) -> do
       o1 <- runSubShard sh1 s
       o2 <- runSubShard sh2 s
       pure ([], o1 ++ o2)
@@ -89,7 +88,7 @@ raceShard ::
   AgentShard [Post Text] [Post Text]
 raceShard sh1 sh2 = poles0 writeBatch read'
   where
-    read' = Body $ K $ \(s, ()) -> do
+    read' = Stratum $ K $ \(s, ()) -> do
       o1 <- runSubShard sh1 s
       o2 <- runSubShard sh2 s
       pure ([], if null o1 then o2 else o1)
@@ -101,7 +100,7 @@ fanOutShard ::
   AgentShard [Post Text] [Post Text]
 fanOutShard shs = poles0 writeBatch read'
   where
-    read' = Body $ K $ \(s, ()) -> do
+    read' = Stratum $ K $ \(s, ()) -> do
       os <- traverse (`runSubShard` s) shs
       pure ([], concat os)
 
@@ -113,7 +112,7 @@ fanInShard ::
   AgentShard [Post Text] [Post Text]
 fanInShard summary shs = poles0 writeBatch read'
   where
-    read' = Body $ K $ \(s, ()) -> do
+    read' = Stratum $ K $ \(s, ()) -> do
       os <- traverse (`runSubShard` s) shs
       pure ([], summary os)
 

@@ -200,12 +200,11 @@ module Circuit.Agent
   )
 where
 
-import Circuit hiding (Body, after, eval, morphism, race, (.))
+import Circuit hiding (Body, Poles, after, close, commit, compose, eval, imap, iomap, morphism, observe, omap, polesK, race, (.))
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.Equip (compose, imap, iomap, omap)
-import Circuit.GMachine (Cell (..), MonoBody, Stratum (..), after, morphism)
+import Circuit.GMachine (Cell (Cell), MonoBody, Poles (..), Stratum (..), after, close, compose, imap, iomap, morphism, omap, polesK)
 import Circuit.Poly (Eval (..), Mono, monoDir, monoIn)
 import Circuit.Syntax (Syntax (Lift), eval)
 import Circuit.Trace (Trace)
@@ -402,7 +401,7 @@ type Agent arr s a b = MonoBody (,) s arr a b
 -- body's position leg reads the cell's observation of the incoming
 -- state (pre-step), which is what the delivery runners consume.
 cellToAgent :: Cell (,) s (->) a b -> Agent (->) s a b
-cellToAgent (Cell {absorb = k, observe = o}) = Stratum $ \(s, d) -> case d of
+cellToAgent (Cell k o) = Stratum $ \(s, d) -> case d of
   Left v -> absurd v
   Right i -> (k (s, i), (o s, ()))
 
@@ -412,7 +411,7 @@ cellToAgent (Cell {absorb = k, observe = o}) = Stratum $ \(s, d) -> case d of
 -- commit and emit.  Keyboard one-shot:
 --
 -- @
--- prefixIn (:[])  -- Post -> [Post] on the conjoint
+-- prefixIn (:[])  -- Post -> [Post] on the commit
 -- @
 --
 -- Emit is an onslaught of posts (empty = quiet \/ done for that poll).
@@ -434,7 +433,7 @@ logEnds = polesK
 -- >>> scanProcess (processFromSeed [] (tape length)) [1,2,3 :: Int]
 -- [1,2,3]
 tape :: ([i] -> o) -> Cell (,) [i] (->) i o
-tape f = Cell {absorb = \(hist, i) -> i : hist, observe = f}
+tape f = Cell (\(hist, i) -> i : hist) f
 
 -- | Like 'tape', but also conses the agent's own output onto its history.
 --
@@ -961,11 +960,11 @@ unitEndsSTM = polesK (const (pure ())) (pure ())
 
 -- | Read one token from an STM pole.
 readEndSTM :: Poles () (K STM) a a -> STM a
-readEndSTM ends = runK (close (Poles (conjoint unitEndsSTM) (companion ends))) ()
+readEndSTM ends = runK (close (Poles (commit unitEndsSTM) (observe ends))) ()
 
 -- | Write one token to an STM pole.
 writeEndSTM :: Poles () (K STM) a a -> a -> STM ()
-writeEndSTM ends = runK (close (Poles (conjoint ends) (companion unitEndsSTM)))
+writeEndSTM ends = runK (close (Poles (commit ends) (observe unitEndsSTM)))
 
 -- | Wire an STM agent between an inbox and an outbox, running until
 -- quiescence.  Quiescence is detected via 'orElse': if the inbox is empty
@@ -1123,7 +1122,7 @@ flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 -- @
 -- let sys = tape (\\hist -> (peek hist) { from = "j", to = [from (peek hist)], body = "ack: " <> body (peek hist) })
 --     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post])) [Post] [Post]
--- in  evalState (runK (close (conjoint sh) (companion sh)) [humanPost]) (AgentSeat [] [])
+-- in  evalState (runK (close (commit sh) (observe sh)) [humanPost]) (AgentSeat [] [])
 -- @
 agentShard ::
   (Monad m) =>

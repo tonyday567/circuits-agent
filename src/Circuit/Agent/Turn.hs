@@ -35,8 +35,7 @@ where
 import Circuit (Syntax (Lift), Trace)
 import Circuit.Agent (PostId)
 import Circuit.Category (K (..))
-import Circuit.Equip (Poles (..), companion, conjoint)
-import Circuit.GMachine (Cell (..), Process, processFromSeed)
+import Circuit.GMachine (Cell (Cell), Poles (..), Process, processFromSeed)
 import Data.IORef
 import Data.Text (Text)
 import System.Timeout (timeout)
@@ -84,7 +83,7 @@ matchResponse st@TurnState {pending = Just (cmdId, cmd)} resp
 -- * A token with non-empty thread is treated as a response: it matches when
 --   its thread equals the pending command's id, emitting the pair.
 turnProcess :: Process (,) (TurnState a, Maybe (TurnToken a, TurnToken a)) (->) (TurnToken a) (Maybe (TurnToken a, TurnToken a))
-turnProcess = processFromSeed (emptyTurnState, Nothing) (Cell {absorb = step, observe = snd})
+turnProcess = processFromSeed (emptyTurnState, Nothing) (Cell step snd)
   where
     step ((st, _), tok) =
       if null (turnThread tok)
@@ -100,9 +99,9 @@ turn e = do
   ref <- newIORef emptyTurnState
   pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
-    runK (conjoint e) cmd
+    runK (commit e) cmd
     let loop = do
-          resp <- runK (companion e) ()
+          resp <- runK (observe e) ()
           mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
           case mResult of
             Just (_, resp') -> pure (turnBody resp')
@@ -119,10 +118,10 @@ turnTimeout us e = do
   ref <- newIORef emptyTurnState
   pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
-    runK (conjoint e) cmd
+    runK (commit e) cmd
     timeout us $ do
       let loop = do
-            resp <- runK (companion e) ()
+            resp <- runK (observe e) ()
             mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
             case mResult of
               Just (_, resp') -> pure (turnBody resp')
