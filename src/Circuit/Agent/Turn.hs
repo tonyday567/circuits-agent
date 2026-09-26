@@ -35,11 +35,11 @@ where
 import Circuit (Syntax (Lift), Trace)
 import Circuit.Agent (PostId)
 import Circuit.Category (K (..))
-import Circuit.GMachine (Cell (Cell), Poles (..), Process, processFromSeed)
+import Circuit.GMachine (Cell (Cell), GMoore, Poles (..), processFromSeed)
 import Data.IORef
 import Data.Text (Text)
 import System.Timeout (timeout)
-import Prelude
+import Prelude hiding (read)
 
 -- | A turn envelope.  Commands are sent with an empty 'turnThread'; the
 -- turn assigns them a fresh id.  Responses must carry that id in their
@@ -82,7 +82,7 @@ matchResponse st@TurnState {pending = Just (cmdId, cmd)} resp
 --   id and is stored as the pending command.
 -- * A token with non-empty thread is treated as a response: it matches when
 --   its thread equals the pending command's id, emitting the pair.
-turnProcess :: Process (,) (TurnState a, Maybe (TurnToken a, TurnToken a)) (->) (TurnToken a) (Maybe (TurnToken a, TurnToken a))
+turnProcess :: GMoore (,) (TurnState a, Maybe (TurnToken a, TurnToken a)) (->) (TurnToken a) (Maybe (TurnToken a, TurnToken a))
 turnProcess = processFromSeed (emptyTurnState, Nothing) (Cell step snd)
   where
     step ((st, _), tok) =
@@ -99,9 +99,9 @@ turn e = do
   ref <- newIORef emptyTurnState
   pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
-    runK (commit e) cmd
+    runK (write e) cmd
     let loop = do
-          resp <- runK (observe e) ()
+          resp <- runK (read e) ()
           mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
           case mResult of
             Just (_, resp') -> pure (turnBody resp')
@@ -118,10 +118,10 @@ turnTimeout us e = do
   ref <- newIORef emptyTurnState
   pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
-    runK (commit e) cmd
+    runK (write e) cmd
     timeout us $ do
       let loop = do
-            resp <- runK (observe e) ()
+            resp <- runK (read e) ()
             mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
             case mResult of
               Just (_, resp') -> pure (turnBody resp')

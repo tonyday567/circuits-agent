@@ -223,6 +223,7 @@ import Data.Text (Text, empty)
 import Data.Void (absurd)
 import Numeric.Natural (Natural)
 import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
+import Prelude hiding (read)
 
 -- $setup
 -- >>> :set -XOverloadedStrings
@@ -411,7 +412,7 @@ cellToAgent (Cell k o) = Stratum $ \(s, d) -> case d of
 -- commit and emit.  Keyboard one-shot:
 --
 -- @
--- prefixIn (:[])  -- Post -> [Post] on the commit
+-- prefixIn (:[])  -- Post -> [Post] on the write
 -- @
 --
 -- Emit is an onslaught of posts (empty = quiet \/ done for that poll).
@@ -960,11 +961,11 @@ unitEndsSTM = polesK (const (pure ())) (pure ())
 
 -- | Read one token from an STM pole.
 readEndSTM :: Poles () (K STM) a a -> STM a
-readEndSTM ends = runK (close (Poles (commit unitEndsSTM) (observe ends))) ()
+readEndSTM ends = runK (close (Poles (write unitEndsSTM) (read ends))) ()
 
 -- | Write one token to an STM pole.
 writeEndSTM :: Poles () (K STM) a a -> a -> STM ()
-writeEndSTM ends = runK (close (Poles (commit ends) (observe unitEndsSTM)))
+writeEndSTM ends = runK (close (Poles (write ends) (read unitEndsSTM)))
 
 -- | Wire an STM agent between an inbox and an outbox, running until
 -- quiescence.  Quiescence is detected via 'orElse': if the inbox is empty
@@ -1122,7 +1123,7 @@ flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 -- @
 -- let sys = tape (\\hist -> (peek hist) { from = "j", to = [from (peek hist)], body = "ack: " <> body (peek hist) })
 --     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post])) [Post] [Post]
--- in  evalState (runK (close (commit sh) (observe sh)) [humanPost]) (AgentSeat [] [])
+-- in  evalState (runK (close (write sh) (read sh)) [humanPost]) (AgentSeat [] [])
 -- @
 agentShard ::
   (Monad m) =>

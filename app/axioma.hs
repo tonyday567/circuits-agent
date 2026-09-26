@@ -101,6 +101,8 @@ import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (exitFailure)
 import System.FilePath ((</>))
 import System.Timeout (timeout)
+import Prelude hiding (read)
+import Prelude qualified
 
 default (Text)
 
@@ -2000,9 +2002,9 @@ main = do
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         -- Responder: read one command and reply with the command id in thread.
         responder = do
-          cmd <- runK (observe processPoles) ()
+          cmd <- runK (read processPoles) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runK (commit processPoles) resp
+          runK (write processPoles) resp
     turnLoop <- TurnPort.turn runnerPoles
     -- Run the responder in parallel with the turn, but wait for the turn
     -- result before cancelling the responder.  A raw race cancels the loser
@@ -2021,9 +2023,9 @@ main = do
         processPoles :: Poles () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         responder = do
-          cmd <- runK (observe processPoles) ()
+          cmd <- runK (read processPoles) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runK (commit processPoles) resp
+          runK (write processPoles) resp
     turnLoop <- TurnPort.turnTimeout 100000 runnerPoles
     responderA <- async responder
     result <- runK (eval turnLoop) "hello"
@@ -2449,7 +2451,7 @@ main = do
        in [ mkPost
               "calc"
               [from p]
-              (T.pack (show (sum [read (T.unpack w) :: Int | w <- T.words (body p)])))
+              (T.pack (show (sum [Prelude.read (T.unpack w) :: Int | w <- T.words (body p)])))
           ]
 
     -- \| Self-loop policy: echo card posts back to the same card; after k

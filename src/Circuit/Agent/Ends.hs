@@ -51,7 +51,7 @@ import Control.Concurrent.STM
 import Control.Monad (forever, void)
 import Data.Kind (Constraint, Type)
 import GHC.TypeLits (ErrorMessage (..), TypeError)
-import Prelude
+import Prelude hiding (read)
 
 -- | How messages are queued between producer and consumer.
 data Queue a
@@ -148,11 +148,11 @@ openHaltChannel = HaltChannel <$> openLinearChannelSTM
 
 -- | Write a token to a halt-mark channel.
 writeHaltChannel :: forall a (p :: ChannelPolicy a). HaltChannel p -> a -> STM ()
-writeHaltChannel (HaltChannel ends) = runK (commit ends)
+writeHaltChannel (HaltChannel ends) = runK (write ends)
 
 -- | Read a token from a halt-mark channel.
 readHaltChannel :: forall a (p :: ChannelPolicy a). HaltChannel p -> STM a
-readHaltChannel (HaltChannel ends) = runK (observe ends) ()
+readHaltChannel (HaltChannel ends) = runK (read ends) ()
 
 -- | Unit ends specialised to 'K STM'.
 unitEndsSTM :: Poles () (K STM) () ()
@@ -229,10 +229,10 @@ pipeEnds e1 makeE2 = do
   let unitEnds :: Poles () (K IO) () ()
       unitEnds = copycat
       readFromE1 :: IO b
-      readFromE1 = runK (close (Poles (commit unitEnds) (observe e1))) ()
+      readFromE1 = runK (close (Poles (write unitEnds) (read e1))) ()
       writeToE2 :: b -> IO ()
-      writeToE2 x = runK (close (Poles (commit e2) (observe unitEnds))) x
+      writeToE2 x = runK (close (Poles (write e2) (read unitEnds))) x
   pump <- async . forever $ do
     x <- readFromE1
     writeToE2 x
-  pure (Poles (commit e1) (observe e2), cancel pump)
+  pure (Poles (write e1) (read e2), cancel pump)

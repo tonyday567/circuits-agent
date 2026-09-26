@@ -24,7 +24,7 @@
 --
 -- A pump thread per output handle frames the raw stream and closes each
 -- payload into a queue ('openIO' 'Unbounded').  The emit ends are the queue
--- observe legs: an emit /blocks/ until a complete frame arrives — the queue's
+-- read legs: an emit /blocks/ until a complete frame arrives — the queue's
 -- @readTQueue@ retry IS the blocking boundary.  Arrival is decided by
 -- content, never inferred from quiet; there is no timeout and no empty
 -- poll result on the emit side.
@@ -71,7 +71,7 @@ where
 
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
-import Circuit.GMachine (Cell (Cell), Poles (..), Process, processFromSeed, scanProcess)
+import Circuit.GMachine (Cell (Cell), GMoore, Poles (..), processFromSeed, scanProcess)
 import Circuit.Syntax (Syntax (Lift))
 import Circuit.Tensor (Tensor (..))
 import Circuit.Trace (Trace)
@@ -95,12 +95,12 @@ import System.IO
     hSetBuffering,
   )
 import System.Process
-import Prelude
+import Prelude hiding (read)
 
 -- $setup
 --
 -- >>> import Circuit.GMachine (processFromSeed, scan, scanProcess)
--- >>> import Circuit.GMachine (Poles (..), commit, observe)
+-- >>> import Circuit.GMachine (Poles (..), write, read)
 -- >>> import Circuit.Category (K (..))
 -- >>> import Data.Text.Encoding (decodeUtf8)
 
@@ -246,8 +246,8 @@ openStdPorts encode decode cfg = yank (Lift (K step))
                         hFlush stdinH
                     )
                     (K $ \_ -> pure ()),
-                stdOut = Poles (K $ \_ -> pure ()) (observe qOut),
-                stdErr = Poles (K $ \_ -> pure ()) (observe qErr),
+                stdOut = Poles (K $ \_ -> pure ()) (read qOut),
+                stdErr = Poles (K $ \_ -> pure ()) (read qErr),
                 stdClose = do
                   void $ try @IOException (hClose stdinH)
                   terminateProcess ph
@@ -260,7 +260,7 @@ openStdPorts encode decode cfg = yank (Lift (K step))
 
 -- | Commit one token to a queue end.
 sink :: Poles () (K IO) a a -> a -> IO ()
-sink q = runK (commit q)
+sink q = runK (write q)
 
 -- | The pumper as an agent: a Moore machine from maybe-chunks to frame
 -- lists.  The carrier is @(buffer, pending)@ — the unexplained suffix and
@@ -289,9 +289,9 @@ frameAgent marks decode =
         let (ps, rest') = peel rest
          in (p : ps, rest')
 
--- | The same machine as a 'Process': chunk stream in, frame lists out,
--- seed carried as the Process state.
-frameProcess :: ProcMarks -> (BS.ByteString -> a) -> Process (,) (BS.ByteString, [a]) (->) (Maybe BS.ByteString) [a]
+-- | The same machine as a 'GMoore': chunk stream in, frame lists out,
+-- seed carried as the GMoore state.
+frameProcess :: ProcMarks -> (BS.ByteString -> a) -> GMoore (,) (BS.ByteString, [a]) (->) (Maybe BS.ByteString) [a]
 frameProcess marks decode = processFromSeed (BS.empty, []) (frameAgent marks decode)
 
 -- | One cell step: the observation of the post-step state, with the state.
@@ -332,11 +332,11 @@ data ProcEnds a b c = ProcEnds
 
 -- | Stdin write + stdout read as matched 'Poles'.
 stdioEnds :: StdPorts a b c -> Poles () (K IO) a b
-stdioEnds pp = Poles (commit (stdIn pp)) (observe (stdOut pp))
+stdioEnds pp = Poles (write (stdIn pp)) (read (stdOut pp))
 
 -- | Stdin write + stderr read as matched 'Poles'.
 stderrEnds :: StdPorts a b c -> Poles () (K IO) a c
-stderrEnds pp = Poles (commit (stdIn pp)) (observe (stdErr pp))
+stderrEnds pp = Poles (write (stdIn pp)) (read (stdErr pp))
 
 -- | Open a process and return the dual-seat client view as a 'Trace' 'Either'.
 openProc ::
@@ -359,9 +359,9 @@ openProc encode decode cfg =
 portsEnds :: StdPorts a b c -> Trace (,) (K IO) (a, ((), ())) ((), (b, c))
 portsEnds pp = tensor commitM (tensor outM errM)
   where
-    commitM = Lift (commit (stdIn pp))
-    outM = Lift (observe (stdOut pp))
-    errM = Lift (observe (stdErr pp))
+    commitM = Lift (write (stdIn pp))
+    outM = Lift (read (stdOut pp))
+    errM = Lift (read (stdErr pp))
 
 -- ---------------------------------------------------------------------------
 -- In-memory test harness
@@ -371,8 +371,8 @@ portsEnds pp = tensor commitM (tensor outM errM)
 -- No process, no files.  For fast bus-connector testing.
 --
 -- >>> pp <- echo pure :: IO (StdPorts String String ())
--- >>> runK (commit (stdIn pp)) "hi"
--- >>> runK (observe (stdOut pp)) ()
+-- >>> runK (write (stdIn pp)) "hi"
+-- >>> runK (read (stdOut pp)) ()
 -- "hi"
 echo :: (a -> IO a) -> IO (StdPorts a a ())
 echo f = do

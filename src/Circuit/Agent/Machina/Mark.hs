@@ -30,6 +30,7 @@ import Circuit.Trace (Trace)
 import Circuit.Traced (yank)
 import Control.Concurrent.STM (STM)
 import Data.Function (fix)
+import Prelude hiding (read)
 
 -- | Unit poles for plugging the unused slot when reading or writing one end.
 endsU :: Poles () (K STM) () ()
@@ -45,7 +46,7 @@ endsU = polesK (const (pure ())) (pure ())
 -- the mark are never consumed.
 spinMark :: (a -> Bool) -> (s -> a -> s) -> Poles () (K STM) a a -> K STM s s
 spinMark isMark step e = fix $ \go -> K $ \s -> do
-  a <- runK (close (Poles (commit endsU) (observe e))) ()
+  a <- runK (close (Poles (write endsU) (read e))) ()
   if isMark a
     then pure s
     else runK go (step s a)
@@ -56,7 +57,7 @@ spinMark isMark step e = fix $ \go -> K $ \s -> do
 markFrame :: (a -> Bool) -> (s -> a -> s) -> Poles () (K STM) a a -> K STM (Either s s) (Either s s)
 markFrame isMark step e = K $ \es -> do
   let s = either id id es
-  a <- runK (close (Poles (commit endsU) (observe e))) ()
+  a <- runK (close (Poles (write endsU) (read e))) ()
   pure
     ( if isMark a
         then Right s
