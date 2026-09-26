@@ -11,7 +11,7 @@
 module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
-import Circuit hiding (Body, Poles, Stamped, close, commit, eval, id, morphism, observe, polesK, scanProcess, splay0, (.))
+import Circuit hiding (Body, Poles, Stamped, close, commit, eval, id, morphism, observe, peek, polesK, scanProcess, splay0, (.))
 import Circuit.Agent
 import Circuit.Agent.Delivery
   ( DelRel,
