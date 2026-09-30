@@ -164,7 +164,6 @@ module Circuit.Agent
     -- * Behaviour (stream semantics)
     Beh,
     beh,
-    after,
 
     -- * Choice (level-1 grammar fragment)
     branchAgent,
@@ -200,11 +199,11 @@ module Circuit.Agent
   )
 where
 
-import Circuit hiding (Body, Poles, after, close, commit, compose, eval, imap, iomap, morphism, observe, omap, polesK, race, (.))
+import Circuit hiding (Body, Poles, close, commit, compose, eval, iomap, morphism, observe, polesK, race, (.))
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.GMachine (Cell (Cell), MonoBody, Poles (..), Stratum (..), after, close, compose, imap, iomap, morphism, omap, polesK)
+import Circuit.GMachine (Cell (Cell), Poles (..), Stratum (..), close, compose, iomap, morphism, polesK)
 import Circuit.Poly (Eval (..), Mono, monoDir, monoIn)
 import Circuit.Syntax (Syntax (Lift), eval)
 import Circuit.Trace (Trace)
@@ -220,7 +219,7 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
 import Data.Text (Text, empty)
-import Data.Void (absurd)
+import Data.Void (Void, absurd)
 import Numeric.Natural (Natural)
 import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import Prelude hiding (read)
@@ -228,7 +227,7 @@ import Prelude hiding (read)
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
--- >>> import Circuit.GMachine (scanProcess, processFromSeed)
+-- >>> import Circuit.GMachine (moore, scan)
 
 -- | Agent name on the shared log.
 type Name = Text
@@ -396,7 +395,7 @@ type TurnLog a = Seq (Bag a)
 -- positions.  Common log case: @Agent (->) s (Post a) [Post a]@ (input = one post,
 -- output = list of posts).  @Agent (K m) s a b@ is the monadic Moore
 -- machine.
-type Agent arr s a b = MonoBody (,) s arr a b
+type Agent arr s a b = Stratum (,) s arr (Either Void a) (b, ())
 
 -- | The observation-carrying bridge into the graph's fused world: the
 -- body's position leg reads the cell's observation of the incoming
@@ -431,7 +430,7 @@ logEnds = polesK
 
 -- | Born empty, conses each received input onto its history.
 --
--- >>> scanProcess (processFromSeed [] (tape length)) [1,2,3 :: Int]
+-- >>> let Cell k o = tape length in scan (moore (\i -> k ([], i)) (curry k) o) [1,2,3 :: Int]
 -- [1,2,3]
 tape :: ([i] -> o) -> Cell (,) [i] (->) i o
 tape f = Cell (\(hist, i) -> i : hist) f
@@ -1261,7 +1260,7 @@ portShard getIn putIn getOut putOut sh =
 -- session assembly: @prefixShard session@ changes the payload that the
 -- shard posts.
 prefixShard :: (Monad m) => (a' -> a) -> Shard m a b -> Shard m a' b
-prefixShard f = imap (K $ pure . f)
+prefixShard f = iomap (K $ pure . f) Cat.id
 
 -- | Adapt a shard on the emit side (covariant).
 --
@@ -1269,7 +1268,7 @@ prefixShard f = imap (K $ pure . f)
 -- transport envelope: @suffixShard (map addHeader)@ decorates every
 -- emitted post.
 suffixShard :: (Monad m) => (b -> b') -> Shard m a b -> Shard m a b'
-suffixShard g = omap (K $ pure . g)
+suffixShard g = iomap Cat.id (K $ pure . g)
 
 -- | Adapt both sides of a shard at once.
 --

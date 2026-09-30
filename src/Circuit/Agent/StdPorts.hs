@@ -71,7 +71,7 @@ where
 
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
-import Circuit.GMachine (Cell (Cell), GMoore, Poles (..), processFromSeed, scanProcess)
+import Circuit.GMachine (Cell (Cell), GMoore, Poles (..), processOf)
 import Circuit.Syntax (Syntax (Lift))
 import Circuit.Tensor (SemiTensor (..), Tensor)
 import Circuit.Trace (Trace)
@@ -99,7 +99,7 @@ import Prelude hiding (read)
 
 -- $setup
 --
--- >>> import Circuit.GMachine (processFromSeed, scan, scanProcess)
+-- >>> import Circuit.GMachine (moore, scan)
 -- >>> import Circuit.GMachine (Poles (..), write, read)
 -- >>> import Circuit.Category (K (..))
 -- >>> import Data.Text.Encoding (decodeUtf8)
@@ -269,7 +269,7 @@ sink q = runK (write q)
 -- the same stateless grammar.  This is the level-0 mark machine made
 -- literal; 'pumpFrames' is merely its IO interpretation at a 'Handle'.
 --
--- >>> scanProcess (processFromSeed ("", []) (frameAgent lineMarks decodeUtf8)) [Just "a\n", Just "b", Nothing]
+-- >>> let Cell k o = frameAgent lineMarks decodeUtf8 in scan (moore (\i -> k (("", []), i)) (curry k) o) [Just "a\n", Just "b", Nothing]
 -- [["a"],[],["b"]]
 frameAgent :: ProcMarks -> (BS.ByteString -> a) -> Cell (,) (BS.ByteString, [a]) (->) (Maybe BS.ByteString) [a]
 frameAgent marks decode =
@@ -292,7 +292,7 @@ frameAgent marks decode =
 -- | The same machine as a 'GMoore': chunk stream in, frame lists out,
 -- seed carried as the GMoore state.
 frameProcess :: ProcMarks -> (BS.ByteString -> a) -> GMoore (,) (BS.ByteString, [a]) (->) (Maybe BS.ByteString) [a]
-frameProcess marks decode = processFromSeed (BS.empty, []) (frameAgent marks decode)
+frameProcess marks decode = processOf (\i -> ((BS.empty, []), i)) (frameAgent marks decode)
 
 -- | One cell step: the observation of the post-step state, with the state.
 runCell :: Cell (,) s (->) i o -> s -> i -> (o, s)

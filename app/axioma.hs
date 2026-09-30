@@ -11,7 +11,7 @@
 module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
-import Circuit hiding (Body, Poles, Stamped, close, commit, eval, id, morphism, observe, peek, polesK, scanProcess, splay0, (.))
+import Circuit hiding (Body, Poles, Stamped, close, commit, eval, evalAsCell, id, morphism, observe, peek, polesK, (.))
 import Circuit.Agent
 import Circuit.Agent.Delivery
   ( DelRel,
@@ -72,10 +72,10 @@ import Circuit.Agent.Tensor
 import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
-import Circuit.GMachine (Cell (Cell), Poles (..), Stratum (..), close, evalAsCell, polesK, processFromSeed, scanProcess, splay0)
+import Circuit.GMachine (Cell (Cell), Poles (..), Stratum (..), close, polesK)
 import Circuit.GMachine qualified as B0
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
-import Circuit.Poly (Eval (..), monoDir, monoIn)
+import Circuit.Poly (Eval (..), Mono, monoDir, monoIn)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Circuit.Syntax (eval)
 import Control.Concurrent (forkIO, threadDelay)
@@ -115,9 +115,17 @@ assert msg ok =
       exitFailure
 
 -- | The runner 'iterateAgent' once was: a cell is already observable, so
--- this is 'scanProcess' composed with the seeded commit.
+-- this is 'scan' over a 'moore' at constant seed.
 iterateAgent :: Cell (,) s (->) i o -> s -> [i] -> [o]
-iterateAgent sys s0 = scanProcess (processFromSeed s0 sys)
+iterateAgent (Cell k o) s0 = scan (moore (\a -> k (s0, a)) (curry k) o)
+
+-- | 'Circuit.GMachine.evalAsCell' is leaving the GMachine api; defined here
+-- until its replacement lands in 'Circuit.Poly'.
+evalAsCell :: (s -> Eval (Mono i o) s) -> Cell (,) s (->) i o
+evalAsCell f =
+  Cell
+    (\(s, i) -> case f s of EP (_, EE g) -> g i)
+    (\s -> case f s of EP (EK o, _) -> o)
 
 -- | The final state of the run — 'foldProcess' without the observation.
 finalAgent :: Cell (,) s (->) i o -> s -> [i] -> s
@@ -912,15 +920,15 @@ main = do
       e1 <- openIO Unbounded :: IO (Shard IO Int Int)
       e2 <- pairSumEnd =<< newTQueueIO
       let e12 = composeShard e1 e2
-          (e1Write, _) = splay0 e1
-          (_, e12Read) = splay0 e12
+          Poles e1Write _ = e1
+          Poles _ e12Read = e12
       runK e1Write 1
       runK e1Write 2
       serialResult <- timeout 100000 $ runK e12Read ()
       e1' <- openIO Unbounded :: IO (Shard IO Int Int)
       (ePipe, closePipe) <- pipeEnds e1' pairSumEnd
-      let (e1Write', _) = splay0 e1'
-          (_, ePipeRead) = splay0 ePipe
+      let Poles e1Write' _ = e1'
+          Poles _ ePipeRead = ePipe
       runK e1Write' 1
       runK e1Write' 2
       pipelinedResult <- timeout 1000000 $ runK ePipeRead ()

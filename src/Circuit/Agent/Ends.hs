@@ -44,7 +44,7 @@ where
 
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.GMachine (Poles (..), close, copycat, polesK, splay0)
+import Circuit.GMachine (Poles (..), close, polesK, unclose)
 import Control.Applicative
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM
@@ -204,7 +204,7 @@ openSTM q = do
 openIO :: Queue a -> IO (Poles () (K IO) a a)
 openIO q = do
   e <- atomically (openSTM q)
-  let (K write, K receive) = splay0 e
+  let Poles (K write) (K receive) = e
   pure (polesK (atomically . write) (atomically (receive ())))
 
 -- | Honest sequential composition of two allocated ends via an intermediate
@@ -227,7 +227,7 @@ pipeEnds e1 makeE2 = do
   q <- newTQueueIO
   e2 <- makeE2 q
   let unitEnds :: Poles () (K IO) () ()
-      unitEnds = copycat
+      unitEnds = unclose Cat.id
       readFromE1 :: IO b
       readFromE1 = runK (close (Poles (write unitEnds) (read e1))) ()
       writeToE2 :: b -> IO ()

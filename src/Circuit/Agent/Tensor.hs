@@ -22,7 +22,7 @@ where
 
 import Circuit.Agent (Name, Post (..), PostId, mkPost, synthesis)
 import Circuit.Category (K (..))
-import Circuit.GMachine (Poles, Stratum (..), close, poles0)
+import Circuit.GMachine (Poles (..), Stratum (..), close)
 import Data.Text (Text)
 import Data.Text qualified as T
 
@@ -58,7 +58,7 @@ readBatch = Stratum $ K $ \(s, ()) -> pure ([], s)
 -- | Build an agent shard that stores the input batch, then computes outputs
 -- from that batch in 'IO'.
 ioShard :: ([Post Text] -> IO [Post Text]) -> AgentShard [Post Text] [Post Text]
-ioShard emit = poles0 writeBatch read'
+ioShard emit = Poles writeBatch read'
   where
     read' = Stratum $ K $ \(s, ()) -> do
       outs <- emit s
@@ -74,7 +74,7 @@ awaitShard ::
   AgentShard [Post Text] [Post Text] ->
   AgentShard [Post Text] [Post Text] ->
   AgentShard [Post Text] [Post Text]
-awaitShard sh1 sh2 = poles0 writeBatch read'
+awaitShard sh1 sh2 = Poles writeBatch read'
   where
     read' = Stratum $ K $ \(s, ()) -> do
       o1 <- runSubShard sh1 s
@@ -86,7 +86,7 @@ raceShard ::
   AgentShard [Post Text] [Post Text] ->
   AgentShard [Post Text] [Post Text] ->
   AgentShard [Post Text] [Post Text]
-raceShard sh1 sh2 = poles0 writeBatch read'
+raceShard sh1 sh2 = Poles writeBatch read'
   where
     read' = Stratum $ K $ \(s, ()) -> do
       o1 <- runSubShard sh1 s
@@ -98,7 +98,7 @@ raceShard sh1 sh2 = poles0 writeBatch read'
 fanOutShard ::
   [AgentShard [Post Text] [Post Text]] ->
   AgentShard [Post Text] [Post Text]
-fanOutShard shs = poles0 writeBatch read'
+fanOutShard shs = Poles writeBatch read'
   where
     read' = Stratum $ K $ \(s, ()) -> do
       os <- traverse (`runSubShard` s) shs
@@ -110,7 +110,7 @@ fanInShard ::
   ([[Post Text]] -> [Post Text]) ->
   [AgentShard [Post Text] [Post Text]] ->
   AgentShard [Post Text] [Post Text]
-fanInShard summary shs = poles0 writeBatch read'
+fanInShard summary shs = Poles writeBatch read'
   where
     read' = Stratum $ K $ \(s, ()) -> do
       os <- traverse (`runSubShard` s) shs
