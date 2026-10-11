@@ -199,7 +199,6 @@ module Circuit.Agent
   )
 where
 
-import Circuit hiding (Body, Poles, close, commit, compose, emit, eval, init, iomap, observe, polesK, run, (.))
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat

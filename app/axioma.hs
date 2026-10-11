@@ -11,7 +11,6 @@
 module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
-import Circuit hiding (Body, Poles, Stamped, Step, close, commit, emit, eval, evalAsCell, id, init, observe, polesK, run, (.))
 import Circuit.Agent
 import Circuit.Agent.Delivery
   ( DelRel,
@@ -72,12 +71,13 @@ import Circuit.Agent.Tensor
 import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
-import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..), close, polesK)
+import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..), close, polesK, scan)
 import Circuit.Machine qualified as B0
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Poly (Eval (..), Mono, evalAsCell, monoDir, monoIn)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Circuit.Syntax (eval)
+import Circuit.Tensor (Const (..), unConst)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (async, cancel, race)
 import Control.Concurrent.STM
