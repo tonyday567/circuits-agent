@@ -8,7 +8,7 @@
 -- Pure agent shape:
 --
 -- @
--- type Agent arr s a b = Moore (,) arr s (Mono a b)
+-- type Agent arr s a b = Step (,) (,) s s arr (Either Void a) (b, ())
 -- @
 --
 -- Free carrier @s@ is required by the pretense (tape vs summary).  The common
@@ -199,13 +199,14 @@ module Circuit.Agent
   )
 where
 
-import Circuit hiding (Body, Poles, close, commit, compose, eval, iomap, morphism, observe, polesK, race, (.))
+import Circuit hiding (Body, Poles, close, commit, compose, emit, eval, init, iomap, observe, polesK, run, (.))
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.GMachine (Cell (Cell), Poles (..), Stratum (..), close, compose, iomap, morphism, polesK)
+import Circuit.Machine (Body (Body), Moore, Poles (..), Step (..), close, compose, iomap, polesK)
 import Circuit.Poly (Eval (..), Mono, monoDir, monoIn)
 import Circuit.Syntax (Syntax (Lift), eval)
+import Circuit.Tensor (Const (..), unConst)
 import Circuit.Trace (Trace)
 import Circuit.Traced (yank)
 import Control.Concurrent (threadDelay)
@@ -227,7 +228,7 @@ import Prelude hiding (read)
 -- $setup
 -- >>> :set -XOverloadedStrings
 -- >>> import Circuit.Agent
--- >>> import Circuit.GMachine (moore, scan)
+-- >>> import Circuit.Machine (MooreT (..), scan)
 
 -- | Agent name on the shared log.
 type Name = Text
@@ -395,15 +396,15 @@ type TurnLog a = Seq (Bag a)
 -- positions.  Common log case: @Agent (->) s (Post a) [Post a]@ (input = one post,
 -- output = list of posts).  @Agent (K m) s a b@ is the monadic Moore
 -- machine.
-type Agent arr s a b = Stratum (,) s arr (Either Void a) (b, ())
+type Agent arr s a b = Step (,) (,) s s arr (Either Void a) (b, ())
 
 -- | The observation-carrying bridge into the graph's fused world: the
--- body's position leg reads the cell's observation of the incoming
+-- body's position leg reads the body's observation of the incoming
 -- state (pre-step), which is what the delivery runners consume.
-cellToAgent :: Cell (,) s (->) a b -> Agent (->) s a b
-cellToAgent (Cell k o) = Stratum $ \(s, d) -> case d of
+cellToAgent :: Moore (,) s (->) a b -> Agent (->) s a b
+cellToAgent (Body _ k o) = Step $ \(s, d) -> case d of
   Left v -> absurd v
-  Right i -> (k (s, i), (o s, ()))
+  Right i -> (k (s, i), (unConst (o s), ()))
 
 -- | Opaque effectful ends: commit an @a@, emit a @b@.
 --
@@ -421,26 +422,26 @@ type Shard m a b = Poles () (K m) a b
 type LogEnds m a b = Shard m a b
 
 -- | Build a 'Shard' from monadic commit and emit actions.
-shard :: (Monad m) => (a -> m ()) -> m a -> Shard m a a
+shard :: (a -> m ()) -> m a -> Shard m a a
 shard = polesK
 
 -- | Build log ends (same as 'shard'; dual seat).
-logEnds :: (Monad m) => (a -> m ()) -> m a -> LogEnds m a a
+logEnds :: (a -> m ()) -> m a -> LogEnds m a a
 logEnds = polesK
 
 -- | Born empty, conses each received input onto its history.
 --
--- >>> let Cell k o = tape length in scan (moore (\i -> k ([], i)) (curry k) o) [1,2,3 :: Int]
+-- >>> scan (MooreT (tape length)) [1,2,3 :: Int]
 -- [1,2,3]
-tape :: ([i] -> o) -> Cell (,) [i] (->) i o
-tape f = Cell (\(hist, i) -> i : hist) f
+tape :: ([i] -> o) -> Moore (,) [i] (->) i o
+tape f = Body (\i -> [i]) (\(hist, i) -> i : hist) (Const . f)
 
 -- | Like 'tape', but also conses the agent's own output onto its history.
 --
 -- This is the internal-monologue construction: an agent's outputs are on the
 -- same log as its percepts, visible to its own future turns.
 selfrec :: ([i] -> i) -> Agent (->) [i] i i
-selfrec f = Stratum $ \(hist, d) ->
+selfrec f = Step $ \(hist, d) ->
   let i = monoDir d
       h' = i : hist
    in (f h' : h', (f hist, ()))
@@ -855,8 +856,8 @@ loopHeteroSubs roster log0 =
 -- post-input timing).
 run1 :: Agent (->) s i o -> s -> i -> (o, s)
 run1 sys s i =
-  let (s', _) = morphism sys (s, monoIn i)
-      (_, (o, ())) = morphism sys (s', monoIn i)
+  let (s', _) = run sys (s, monoIn i)
+      (_, (o, ())) = run sys (s', monoIn i)
    in (o, s')
 
 -- | Lift a pure agent into the 'K' arrow of any functor.
@@ -864,12 +865,12 @@ run1 sys s i =
 -- This is the change of base from @(->)@ to @K m@ on the agent itself:
 -- the same Moore coalgebra, but each step now lives in @m@.
 agentM :: (Applicative m) => Agent (->) s a b -> Agent (K m) s a b
-agentM sys = Stratum (K (pure . morphism sys))
+agentM sys = Step (K (pure . run sys))
 
 -- | Run one step of a monadic agent.
 runAgentM :: (Monad m) => Agent (K m) s a b -> s -> a -> m (b, s)
 runAgentM sys s a =
-  runK (morphism sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
+  runK (run sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
 
 -- | STM agent: state is handled transparently inside an STM transaction.
 type AgentS s a = Agent (K STM) s a [a]
@@ -880,22 +881,22 @@ type AgentX s a = Agent (K IO) s a [a]
 
 -- | Cross from the transparent STM world into the IO boundary.
 agentX :: AgentS s a -> AgentX s a
-agentX sys = Stratum (K (\(s, d) -> atomically (runK (morphism sys) (s, d))))
+agentX sys = Step (K (\(s, d) -> atomically (runK (run sys) (s, d))))
 
 -- | Seat-level product / await in STM.
 awaitS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 awaitS sys1 sys2 =
-  Stratum $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (morphism sys1) (s1, d)
-    (s2', (o2, ())) <- runK (morphism sys2) (s2, d)
+  Step $ K $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runK (run sys1) (s1, d)
+    (s2', (o2, ())) <- runK (run sys2) (s2, d)
     pure ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race in STM.
 raceS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 raceS sys1 sys2 =
-  Stratum $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (morphism sys1) (s1, d)
-    (s2', (o2, ())) <- runK (morphism sys2) (s2, d)
+  Step $ K $ \((s1, s2), d) -> do
+    (s1', (o1, ())) <- runK (run sys1) (s1, d)
+    (s2', (o2, ())) <- runK (run sys2) (s2, d)
     let o = if null o1 then o2 else o1
     pure ((s1', s2'), (o, ()))
 
@@ -908,8 +909,8 @@ raceS sys1 sys2 =
 -- step produces a mark first, not the left-biased deterministic rule.
 raceIO :: AgentX s1 a -> AgentX s2 a -> AgentX (s1, s2) a
 raceIO sys1 sys2 =
-  Stratum $ K $ \((s1, s2), d) ->
-    raceFirst (runK (morphism sys1) (s1, d)) (runK (morphism sys2) (s2, d)) >>= \case
+  Step $ K $ \((s1, s2), d) ->
+    raceFirst (runK (run sys1) (s1, d)) (runK (run sys2) (s2, d)) >>= \case
       Left (s1', outs) -> pure ((s1', s2), (outs, ()))
       Right (s2', outs) -> pure ((s1, s2'), (outs, ()))
   where
@@ -933,7 +934,7 @@ raceIO sys1 sys2 =
 -- | Run one step of an STM agent.
 stepS :: AgentS s a -> s -> a -> STM (s, [a])
 stepS sys s i = do
-  (s', (outs, ())) <- runK (morphism sys) (s, monoIn i)
+  (s', (outs, ())) <- runK (run sys) (s, monoIn i)
   pure (s', outs)
 
 -- | Fold an STM agent over a bundle of inputs within one transaction.
@@ -960,11 +961,11 @@ unitEndsSTM = polesK (const (pure ())) (pure ())
 
 -- | Read one token from an STM pole.
 readEndSTM :: Poles () (K STM) a a -> STM a
-readEndSTM ends = runK (close (Poles (write unitEndsSTM) (read ends))) ()
+readEndSTM ends = runK (close (Poles (commit unitEndsSTM) (commit unitEndsSTM) (emit ends))) ()
 
 -- | Write one token to an STM pole.
 writeEndSTM :: Poles () (K STM) a a -> a -> STM ()
-writeEndSTM ends = runK (close (Poles (write ends) (read unitEndsSTM)))
+writeEndSTM ends = runK (close (Poles (commit ends) (commit ends) (emit unitEndsSTM)))
 
 -- | Wire an STM agent between an inbox and an outbox, running until
 -- quiescence.  Quiescence is detected via 'orElse': if the inbox is empty
@@ -1048,8 +1049,8 @@ beh sys s0 (i : ins) =
 -- branch's update function determines the next state.
 branchAgent :: (s -> Bool) -> Agent (->) s a b -> Agent (->) s a b -> Agent (->) s a b
 branchAgent cond sys1 sys2 =
-  Stratum $ \(state, d) ->
-    if cond state then morphism sys1 (state, d) else morphism sys2 (state, d)
+  Step $ \(state, d) ->
+    if cond state then run sys1 (state, d) else run sys2 (state, d)
 
 -- | Seat-level product / await: both agents run on the same input; states are
 -- paired; emits are concatenated left-to-right.
@@ -1057,9 +1058,9 @@ awaitA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-awaitA sys1 sys2 = Stratum $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = morphism sys1 (s1, d)
-      (s2', (o2, ())) = morphism sys2 (s2, d)
+awaitA sys1 sys2 = Step $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = run sys1 (s1, d)
+      (s2', (o2, ())) = run sys2 (s2, d)
    in ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race: both agents run on the same input; states are
@@ -1068,9 +1069,9 @@ raceA ::
   Agent (->) s1 (Post a) [Post a] ->
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
-raceA sys1 sys2 = Stratum $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = morphism sys1 (s1, d)
-      (s2', (o2, ())) = morphism sys2 (s2, d)
+raceA sys1 sys2 = Step $ \((s1, s2), d) ->
+  let (s1', (o1, ())) = run sys1 (s1, d)
+      (s2', (o2, ())) = run sys2 (s2, d)
       o = if null o1 then o2 else o1
    in ((s1', s2'), (o, ()))
 
@@ -1122,7 +1123,7 @@ flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 -- @
 -- let sys = tape (\\hist -> (peek hist) { from = "j", to = [from (peek hist)], body = "ack: " <> body (peek hist) })
 --     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post])) [Post] [Post]
--- in  evalState (runK (close (write sh) (read sh)) [humanPost]) (AgentSeat [] [])
+-- in  evalState (runK (close sh) [humanPost]) (AgentSeat [] [])
 -- @
 agentShard ::
   (Monad m) =>

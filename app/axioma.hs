@@ -11,7 +11,7 @@
 module Main (main) where
 
 import Algebra.Graph.Labelled qualified as LG
-import Circuit hiding (Body, Poles, Stamped, close, commit, eval, evalAsCell, id, morphism, observe, peek, polesK, (.))
+import Circuit hiding (Body, Poles, Stamped, Step, close, commit, emit, eval, evalAsCell, id, init, observe, polesK, run, (.))
 import Circuit.Agent
 import Circuit.Agent.Delivery
   ( DelRel,
@@ -72,10 +72,10 @@ import Circuit.Agent.Tensor
 import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
-import Circuit.GMachine (Cell (Cell), Poles (..), Stratum (..), close, polesK)
-import Circuit.GMachine qualified as B0
+import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..), close, polesK)
+import Circuit.Machine qualified as B0
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
-import Circuit.Poly (Eval (..), Mono, monoDir, monoIn)
+import Circuit.Poly (Eval (..), Mono, evalAsCell, monoDir, monoIn)
 import Circuit.Stream (These (..), Uncons, uncons)
 import Circuit.Syntax (eval)
 import Control.Concurrent (forkIO, threadDelay)
@@ -114,26 +114,18 @@ assert msg ok =
       putStrLn ("  FAIL " ++ msg)
       exitFailure
 
--- | The runner 'iterateAgent' once was: a cell is already observable, so
--- this is 'scan' over a 'moore' at constant seed.
-iterateAgent :: Cell (,) s (->) i o -> s -> [i] -> [o]
-iterateAgent (Cell k o) s0 = scan (moore (\a -> k (s0, a)) (curry k) o)
-
--- | 'Circuit.GMachine.evalAsCell' is leaving the GMachine api; defined here
--- until its replacement lands in 'Circuit.Poly'.
-evalAsCell :: (s -> Eval (Mono i o) s) -> Cell (,) s (->) i o
-evalAsCell f =
-  Cell
-    (\(s, i) -> case f s of EP (_, EE g) -> g i)
-    (\s -> case f s of EP (EK o, _) -> o)
+-- | The runner 'iterateAgent' once was: a body is already observable, so
+-- this is 'scan' over a 'MooreT' at constant seed.
+iterateAgent :: Moore (,) s (->) i o -> s -> [i] -> [o]
+iterateAgent (Body _ k o) s0 = scan (MooreT (Body (\i -> k (s0, i)) k o))
 
 -- | The final state of the run — 'foldProcess' without the observation.
-finalAgent :: Cell (,) s (->) i o -> s -> [i] -> s
-finalAgent (Cell k _) s0 is = foldl' (\s i -> k (s, i)) s0 is
+finalAgent :: Moore (,) s (->) i o -> s -> [i] -> s
+finalAgent (Body _ k _) s0 is = foldl' (\s i -> k (s, i)) s0 is
 
--- | One cell step: the observation of the post-step state, with the state.
-runCell :: Cell (,) s (->) i o -> s -> i -> (o, s)
-runCell (Cell k o) s i = let s' = k (s, i) in (o s', s')
+-- | One body step: the observation of the post-step state, with the state.
+runCell :: Moore (,) s (->) i o -> s -> i -> (o, s)
+runCell (Body _ k o) s i = let s' = k (s, i) in (unConst (o s'), s')
 
 -- | Remove a file if present.
 wipe :: FilePath -> IO ()
@@ -144,7 +136,7 @@ wipe f = do
 -- | Close a same-type agent shard once.
 closeShardIO :: AgentShard [Post Text] [Post Text] -> [Post Text] -> [Post Text] -> IO ([Post Text], [Post Text])
 closeShardIO sh x s0 = do
-  (s', outs) <- runK (B0.morphism (close sh)) (s0, x)
+  (s', outs) <- runK (B0.run (close sh)) (s0, x)
   pure (outs, s')
 
 peek :: [Post Text] -> Post Text
@@ -231,10 +223,10 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "A0: identity agent"
   do
-    let idAgent :: Cell (,) [Int] (->) Int Int
+    let idAgent :: Moore (,) [Int] (->) Int Int
         idAgent = tape head
     assert "A0: tape head streams inputs through unchanged" $
-      iterateAgent (tape head) [] [1, 2, 3 :: Int] == [1, 2, 3]
+      iterateAgent idAgent [] [1, 2, 3 :: Int] == [1, 2, 3]
 
   -------------------------------------------------------------------------
   -- A1: sequential stream composition
@@ -245,12 +237,12 @@ main = do
         f = (+ 10)
         g :: Int -> Int
         g = (* 2)
-        fAgent :: Cell (,) [Int] (->) Int Int
+        fAgent :: Moore (,) [Int] (->) Int Int
         fAgent = tape (f . head)
-        gAgent :: Cell (,) [Int] (->) Int Int
+        gAgent :: Moore (,) [Int] (->) Int Int
         gAgent = tape (g . head)
         inputs = [1, 2, 3 :: Int]
-        chained = iterateAgent (tape (g . head)) [] (iterateAgent (tape (f . head)) [] inputs)
+        chained = iterateAgent gAgent [] (iterateAgent fAgent [] inputs)
         direct = iterateAgent (tape (g . f . head)) [] inputs
     assert "A1: chaining outputs equals feeding the composed function" $
       chained == direct
@@ -260,8 +252,9 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "the pretense"
   do
-    let sumAgent :: Cell (,) Int (->) Int Int
-        sumAgent = evalAsCell $ \s -> EP (EK s, EE (+ s))
+    let sumAgent :: Moore (,) Int (->) Int Int
+        (k, o) = evalAsCell (\s -> EP (EK s, EE (+ s)))
+        sumAgent = Body (\i -> k (0, i)) k (Const . o)
     assert "tape sum == [1,3,6]" $
       iterateAgent (tape sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
     assert "sumAgent == [1,3,6]" $
@@ -283,12 +276,12 @@ main = do
     let xs = [1, 2, 3 :: Int]
         f hist = [head hist]
         h = take 1
-        sys1 :: Cell (,) [Int] (->) Int [Int]
+        sys1 :: Moore (,) [Int] (->) Int [Int]
         sys1 = tape f
-        sys2 :: Cell (,) [Int] (->) Int [Int]
+        sys2 :: Moore (,) [Int] (->) Int [Int]
         sys2 = tape (f . h)
     assert "O2: summarizer h preserves behaviour" $
-      iterateAgent (tape (f . h)) (h []) xs == iterateAgent (tape f) [] xs
+      iterateAgent sys2 (h []) xs == iterateAgent sys1 [] xs
 
   -------------------------------------------------------------------------
   -- S3: behaviour is functorial over stream concatenation.
@@ -297,7 +290,7 @@ main = do
   do
     let xs = [1, 2 :: Int]
         ys = [3 :: Int]
-        agent :: Cell (,) [Int] (->) Int [Int]
+        agent :: Moore (,) [Int] (->) Int [Int]
         agent = tape (\hist -> [head hist])
         s0 = [] :: [Int]
     assert "S3: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalAgent agent s0 xs) ys" $
@@ -309,13 +302,13 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "compaction invariance"
   do
-    let a = tape sum :: Cell (,) [Int] (->) Int Int
+    let a = tape sum :: Moore (,) [Int] (->) Int Int
     let (_, s1) = runCell a [] 1
     let (_, s2) = runCell a s1 2
     let (o3, _) = runCell a [sum s2] 3
     assert "sum survives wholesale compaction" $ o3 == 6
 
-    let b = tape length :: Cell (,) [Int] (->) Int Int
+    let b = tape length :: Moore (,) [Int] (->) Int Int
     let (_, t1) = runCell b [] 1
     let (_, t2) = runCell b t1 2
     let (p3, _) = runCell b [sum t2] 3
@@ -339,9 +332,9 @@ main = do
         ins = [p1, p2, p3]
         f = reply "j"
         h = take 1
-        sys1 :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
+        sys1 :: Moore (,) [Post Text] (->) (Post Text) [Post Text]
         sys1 = tape f
-        sys2 :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
+        sys2 :: Moore (,) [Post Text] (->) (Post Text) [Post Text]
         sys2 = tape (f . h)
     assert "reply homomorphism: summarizer h preserves behaviour" $
       beh (cellToAgent sys2) (h []) ins == beh (cellToAgent sys1) [] ins
@@ -352,7 +345,7 @@ main = do
         p3 = mkPost "human" ["j"] "three"
         xs = [p1, p2]
         ys = [p3]
-        agent :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
+        agent :: Moore (,) [Post Text] (->) (Post Text) [Post Text]
         agent = tape (reply "j")
         s0 = [] :: [Post Text]
     assert "reply functoriality: beh s0 (xs ++ ys) == beh s0 xs ++ beh (finalAgent agent s0 xs) ys" $
@@ -920,15 +913,15 @@ main = do
       e1 <- openIO Unbounded :: IO (Shard IO Int Int)
       e2 <- pairSumEnd =<< newTQueueIO
       let e12 = composeShard e1 e2
-          Poles e1Write _ = e1
-          Poles _ e12Read = e12
+          Poles e1Write _ _ = e1
+          Poles _ _ e12Read = e12
       runK e1Write 1
       runK e1Write 2
       serialResult <- timeout 100000 $ runK e12Read ()
       e1' <- openIO Unbounded :: IO (Shard IO Int Int)
       (ePipe, closePipe) <- pipeEnds e1' pairSumEnd
-      let Poles e1Write' _ = e1'
-          Poles _ ePipeRead = ePipe
+      let Poles e1Write' _ _ = e1'
+          Poles _ _ ePipeRead = ePipe
       runK e1Write' 1
       runK e1Write' 2
       pipelinedResult <- timeout 1000000 $ runK ePipeRead ()
@@ -995,15 +988,15 @@ main = do
   -------------------------------------------------------------------------
   putStrLn "branch agent"
   do
-    let liftAgent :: Cell (,) [Post Text] (->) (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
+    let liftAgent :: Moore (,) [Post Text] (->) (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         liftAgent sys =
-          Stratum $ \((tag, hist), d) ->
+          Step $ \((tag, hist), d) ->
             let inp = monoDir d
-                Cell k o = sys
-             in ((tag, k (hist, inp)), (o hist, ()))
-        calcOnly :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
+                Body _ k o = sys
+             in ((tag, k (hist, inp)), (unConst (o hist), ()))
+        calcOnly :: Moore (,) [Post Text] (->) (Post Text) [Post Text]
         calcOnly = tape calc
-        echoOnly :: Cell (,) [Post Text] (->) (Post Text) [Post Text]
+        echoOnly :: Moore (,) [Post Text] (->) (Post Text) [Post Text]
         echoOnly = tape (reply "j")
         branchy :: Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
         branchy = branchAgent fst (liftAgent calcOnly) (liftAgent echoOnly)
@@ -1663,8 +1656,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = Stratum $ K $ \(_, _) -> pure ((), ([p], ()))
-        slowRight = Stratum $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
+        fastLeft = Step $ K $ \(_, _) -> pure ((), ([p], ()))
+        slowRight = Step $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft slowRight) ((), ()) seed
     assert "raceIO: fast left wins" $ outs == [p]
 
@@ -1672,8 +1665,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        slowLeft = Stratum $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
-        fastRight = Stratum $ K $ \(_, _) -> pure ((), ([q], ()))
+        slowLeft = Step $ K $ \(_, _) -> threadDelay 10000 >> pure ((), ([p], ()))
+        fastRight = Step $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO slowLeft fastRight) ((), ()) seed
     assert "raceIO: fast right wins" $ outs == [q]
 
@@ -1681,8 +1674,8 @@ main = do
     let p = mkPost "test" [] "p"
         q = mkPost "test" [] "q"
         seed = mkPost "human" [] "one"
-        fastLeft = Stratum $ K $ \(_, _) -> pure ((), ([p], ()))
-        fastRight = Stratum $ K $ \(_, _) -> pure ((), ([q], ()))
+        fastLeft = Step $ K $ \(_, _) -> pure ((), ([p], ()))
+        fastRight = Step $ K $ \(_, _) -> pure ((), ([q], ()))
     (outs, _) <- runAgentM (raceIO fastLeft fastRight) ((), ()) seed
     assert "raceIO: both emit -> one of them" $ outs == [p] || outs == [q]
 
@@ -2010,9 +2003,9 @@ main = do
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         -- Responder: read one command and reply with the command id in thread.
         responder = do
-          cmd <- runK (read processPoles) ()
+          cmd <- runK (emit processPoles) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runK (write processPoles) resp
+          runK (commit processPoles) resp
     turnLoop <- TurnPort.turn runnerPoles
     -- Run the responder in parallel with the turn, but wait for the turn
     -- result before cancelling the responder.  A raw race cancels the loser
@@ -2031,9 +2024,9 @@ main = do
         processPoles :: Poles () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
         processPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
         responder = do
-          cmd <- runK (read processPoles) ()
+          cmd <- runK (emit processPoles) ()
           let resp = TurnPort.TurnToken ("ack: " <> TurnPort.turnBody cmd) (TurnPort.turnThread cmd)
-          runK (write processPoles) resp
+          runK (commit processPoles) resp
     turnLoop <- TurnPort.turnTimeout 100000 runnerPoles
     responderA <- async responder
     result <- runK (eval turnLoop) "hello"
@@ -2421,7 +2414,7 @@ main = do
   putStrLn "All tests passed"
   where
     -- \| Generic behaviour for Tier A agents (output lists are concatenated).
-    behA :: Cell (,) s (->) a [b] -> s -> [a] -> [b]
+    behA :: Moore (,) s (->) a [b] -> s -> [a] -> [b]
     behA _sys _s0 [] = []
     behA sys s0 (i : ins) =
       let (os, s') = runCell sys s0 i

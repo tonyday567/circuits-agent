@@ -24,7 +24,7 @@ where
 
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.GMachine (Poles (..), close, polesK)
+import Circuit.Machine (Poles (..), close, polesK)
 import Circuit.Syntax (Syntax (Lift))
 import Circuit.Trace (Trace)
 import Circuit.Traced (yank)
@@ -46,7 +46,7 @@ endsU = polesK (const (pure ())) (pure ())
 -- the mark are never consumed.
 spinMark :: (a -> Bool) -> (s -> a -> s) -> Poles () (K STM) a a -> K STM s s
 spinMark isMark step e = fix $ \go -> K $ \s -> do
-  a <- runK (close (Poles (write endsU) (read e))) ()
+  a <- runK (close (Poles (commit endsU) (commit endsU) (emit e))) ()
   if isMark a
     then pure s
     else runK go (step s a)
@@ -57,7 +57,7 @@ spinMark isMark step e = fix $ \go -> K $ \s -> do
 markFrame :: (a -> Bool) -> (s -> a -> s) -> Poles () (K STM) a a -> K STM (Either s s) (Either s s)
 markFrame isMark step e = K $ \es -> do
   let s = either id id es
-  a <- runK (close (Poles (write endsU) (read e))) ()
+  a <- runK (close (Poles (commit endsU) (commit endsU) (emit e))) ()
   pure
     ( if isMark a
         then Right s

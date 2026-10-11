@@ -35,7 +35,8 @@ where
 import Circuit (Syntax (Lift), Trace)
 import Circuit.Agent (PostId)
 import Circuit.Category (K (..))
-import Circuit.GMachine (Cell (Cell), GMoore, Poles (..), processOf)
+import Circuit.Machine (Body (Body), Moore, Poles (..))
+import Circuit.Tensor (Const (..))
 import Data.IORef
 import Data.Text (Text)
 import System.Timeout (timeout)
@@ -82,8 +83,8 @@ matchResponse st@TurnState {pending = Just (cmdId, cmd)} resp
 --   id and is stored as the pending command.
 -- * A token with non-empty thread is treated as a response: it matches when
 --   its thread equals the pending command's id, emitting the pair.
-turnProcess :: GMoore (,) (TurnState a, Maybe (TurnToken a, TurnToken a)) (->) (TurnToken a) (Maybe (TurnToken a, TurnToken a))
-turnProcess = processOf (\tok -> ((emptyTurnState, Nothing), tok)) (Cell step snd)
+turnProcess :: Moore (,) (TurnState a, Maybe (TurnToken a, TurnToken a)) (->) (TurnToken a) (Maybe (TurnToken a, TurnToken a))
+turnProcess = Body (\tok -> step ((emptyTurnState, Nothing), tok)) step (Const . snd)
   where
     step ((st, _), tok) =
       if null (turnThread tok)
@@ -99,9 +100,9 @@ turn e = do
   ref <- newIORef emptyTurnState
   pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
-    runK (write e) cmd
+    runK (commit e) cmd
     let loop = do
-          resp <- runK (read e) ()
+          resp <- runK (emit e) ()
           mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
           case mResult of
             Just (_, resp') -> pure (turnBody resp')
@@ -118,10 +119,10 @@ turnTimeout us e = do
   ref <- newIORef emptyTurnState
   pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
-    runK (write e) cmd
+    runK (commit e) cmd
     timeout us $ do
       let loop = do
-            resp <- runK (read e) ()
+            resp <- runK (emit e) ()
             mResult <- atomicModifyIORef' ref $ \st -> matchResponse st resp
             case mResult of
               Just (_, resp') -> pure (turnBody resp')
