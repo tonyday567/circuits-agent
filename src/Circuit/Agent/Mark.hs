@@ -16,9 +16,10 @@
 --   * ↩ 'Amendment' — an amendment offered.
 --   * 🔴 'Escalate' — "I can't move this"; the human's door.
 --   * 🟢 'Landed' — halt: the claim landed.
---   * 🔵 'StandDown' — halt: standing down. Also the quiescence mark:
---     a runner that judges observed quiet posts this to convert its
---     judgment into decided quiet for everyone downstream.
+--   * 🔵 'StandDown' — halt: standing down, a decided quiet.
+--   * ⌛ 'Timeout' — NOT a halt: a timeout-driven stand-down. An inference
+--     from wall-clock silence, not a decision; downstream readers must be
+--     able to tell "decided quiet" (🔵) from "gave up waiting" (⌛).
 --
 -- History note: the quiescence marker was previously posted under 🟡,
 -- colliding with 'Motion'. Legacy bodies like @"🟡 quiescent after N
@@ -54,6 +55,8 @@ data Mark
     Landed
   | -- | 🔵 halt: standing down / quiescent.
     StandDown
+  | -- | ⌛ timeout stand-down: gave up waiting. Not a halt — loops keep spinning.
+    Timeout
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | The glyph that renders a mark.
@@ -65,6 +68,7 @@ markGlyph = \case
   Escalate -> "\x1F534" -- 🔴
   Landed -> "\x1F7E2" -- 🟢
   StandDown -> "\x1F535" -- 🔵
+  Timeout -> "\x231B" -- ⌛
 
 -- | Parse a mark from the start of a body. Tolerates the emoji variation
 -- selector (U+FE0F) between glyph and rest. Exact glyphs only — no fuzzy
@@ -85,6 +89,7 @@ markOf :: Post Text -> Maybe Mark
 markOf = parseMark . body
 
 -- | Halt marks: the exchange is over. 'Landed' and 'StandDown'.
+-- 'Timeout' is deliberately not one — a timeout decides nothing.
 isHalt :: Mark -> Bool
 isHalt = \case
   Landed -> True

@@ -1866,7 +1866,12 @@ main = do
       isNothing (parseMark "hello") && isNothing (parseMark "")
     assert "halt marks are Landed and StandDown" $
       all isHalt [Landed, StandDown]
-        && not (any isHalt [Motion, Consent, Amendment, Escalate])
+        && not (any isHalt [Motion, Consent, Amendment, Escalate, Timeout])
+    assert "⌛ parses and is not a decided quiet (🔵)" $
+      parseMark "⌛ timed out after 3 empty cycles" == Just Timeout
+        && markOf (mkPost "a" ["b"] "⌛ timed out") == Just Timeout
+        && markOf (mkPost "a" ["b"] "⌛ timed out") /= Just StandDown
+        && parseMark "🔵 standing down" == Just StandDown
     assert "escalation is its own class" $
       isEscalate Escalate && not (isEscalate Landed)
     assert "markOf reads the post body" $
