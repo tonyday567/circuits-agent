@@ -398,12 +398,17 @@ type TurnLog a = Seq (Bag a)
 type Agent arr s a b = Step (,) (,) s s arr (Either Void a) (b, ())
 
 -- | The observation-carrying bridge into the graph's fused world: the
--- body's position leg reads the body's observation of the incoming
--- state (pre-step), which is what the delivery runners consume.
+-- body's position leg reads the body's observation of the post-step
+-- state, which is what the delivery runners consume — a reply cites the
+-- delivery that triggered it, not the history before it.
+--
+-- Reading the post-step state here (rather than the incoming one) is
+-- what lets 'run1' be a single honest step: the output and the state
+-- come from the same transition.
 cellToAgent :: Moore (,) s (->) a b -> Agent (->) s a b
 cellToAgent (Body _ k o) = Step $ \(s, d) -> case d of
   Left v -> absurd v
-  Right i -> (k (s, i), (unConst (o s), ()))
+  Right i -> let s' = k (s, i) in (s', (unConst (o s'), ()))
 
 -- | Opaque effectful ends: commit an @a@, emit a @b@.
 --
@@ -438,12 +443,17 @@ tape f = Body (\i -> [i]) (\(hist, i) -> i : hist) (Const . f)
 -- | Like 'tape', but also conses the agent's own output onto its history.
 --
 -- This is the internal-monologue construction: an agent's outputs are on the
--- same log as its percepts, visible to its own future turns.
+-- same log as its percepts, visible to its own future turns. The recorded
+-- utterance is the emitted utterance — @f@ responds to the full history
+-- including the current percept, and that response is both what the world
+-- hears and what the monologue conses. Under 'run1' the pair stays honest:
+-- output equals the head of the recorded history.
 selfrec :: ([i] -> i) -> Agent (->) [i] i i
 selfrec f = Step $ \(hist, d) ->
   let i = monoDir d
       h' = i : hist
-   in (f h' : h', (f hist, ()))
+      r = f h'
+   in (r : h', (r, ()))
 
 -- | Addressed stream of unread posts for one agent.
 --
@@ -851,12 +861,14 @@ loopHeteroSubs roster log0 =
 
 -- | Run a monomial system for one step.
 --
--- Consume @i@, then extract the output from the successor state (Process /
--- post-input timing).
+-- One coalgebra step: the coalgebra's own output, paired with its
+-- successor state. Stepping twice here would report what the agent would
+-- emit /next/ against a state that only took one turn — for a
+-- self-recording agent, the monologue then remembers an utterance other
+-- than the one the world heard.
 run1 :: Agent (->) s i o -> s -> i -> (o, s)
 run1 sys s i =
-  let (s', _) = run sys (s, monoIn i)
-      (_, (o, ())) = run sys (s', monoIn i)
+  let (s', (o, ())) = run sys (s, monoIn i)
    in (o, s')
 
 -- | Lift a pure agent into the 'K' arrow of any functor.

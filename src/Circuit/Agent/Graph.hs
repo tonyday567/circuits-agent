@@ -147,9 +147,10 @@ channelMap = LG.foldg Map.empty singleton connectInfo
 
 -- | Wrap an agent so its emitted posts are addressed to the given channels.
 --
--- The outer carrier is @(innerHistory, lastOutput)@. Moore output is read from
--- the state, so we store the routed output produced by the most recent input
--- and return it on the next observation.
+-- The outer carrier is @(innerHistory, lastOutput)@; the observation leg
+-- replays the most recent routed output, and the input leg routes this
+-- input's output in the same step that produced it — 'run1' is one honest
+-- step, so the graph and the seat agree on what was said.
 routeAgent :: ChannelSet -> Agent (->) [Post Text] (Post Text) [Post Text] -> GraphAgent
 routeAgent outChs inner =
   Step $ \((hist, mout), d) ->
@@ -158,7 +159,7 @@ routeAgent outChs inner =
       Right inp ->
         let (outs, seat') = runAgentShard inner (AgentSeat hist []) [inp]
             routed = map (\p -> p {to = Set.toList outChs}) outs
-         in ((asState seat', Just routed), (fromMaybe [] mout, ()))
+         in ((asState seat', Just routed), (routed, ()))
 
 -- | Inject parent-imposed channels into a subgraph.  Every internal vertex
 -- receives the incoming channels and gains the outgoing channels, so that

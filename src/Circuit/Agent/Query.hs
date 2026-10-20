@@ -80,9 +80,13 @@ synthesisPosts who ins ids reply =
 -- Commit assembles a session prompt from the input posts; emit is
 -- 'replyPosts' of the query result (empty = quiet).
 --
--- TODO: this generic seat does not have access to stamped log ids, so
--- emitted replies carry no thread edge.  Callers that need provenance
--- should use a variant that supplies parent ids.
+-- Boundary: the 'Shard' protocol carries bare 'Post's — stamped ids live
+-- in the log this shard is mounted on, which the shard cannot see. The
+-- generic seat therefore emits replies with no thread edge; the ancestry
+-- law (every reply cites its delivery) is enforced one layer up, by the
+-- runners that hold the stamp ('runSeatBus', 'runAgentLoop'). Callers
+-- with log access can supply ids directly — 'replyPosts' threads onto
+-- them — or wrap this shard and prepend the edge at delivery.
 queryShard :: Text -> (Text -> IO Text) -> IO (Shard IO [Post Text] [Post Text])
 queryShard = queryShardWith replyPosts
 
@@ -91,8 +95,8 @@ queryShard = queryShardWith replyPosts
 -- whole input into one answer — the honest-provenance twin of
 -- 'queryShard'.
 --
--- TODO: like 'queryShard', the generic seat has no ids and therefore emits
--- syntheses without thread edges.
+-- Same boundary as 'queryShard': bare posts in, no ids at the shard; the
+-- ancestry law lives at the runner layer.
 synthShard :: Text -> (Text -> IO Text) -> IO (Shard IO [Post Text] [Post Text])
 synthShard = queryShardWith synthesisPosts
 
@@ -111,8 +115,9 @@ queryShardWith posts who query = do
             then writeIORef outbox []
             else do
               reply <- query (sessionPrompt ins)
-              -- Generic seats have no stamped parent ids; the builder's
-              -- fallback (mkPost) keeps addressing honest.
+              -- The shard protocol is Post-level: no stamped ids here, so
+              -- the builder's fallback (mkPost) keeps addressing honest.
+              -- The runner that holds the stamp prepends the thread edge.
               writeIORef outbox (posts who ins [] reply)
       )
       (atomicModifyIORef' outbox ([],))

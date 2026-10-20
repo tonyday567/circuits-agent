@@ -269,6 +269,28 @@ main = do
       iterateAgent (tape sum) [] xs == map sum (drop 1 (scanl (flip (:)) [] xs))
 
   -------------------------------------------------------------------------
+  -- M3: run1 is one honest step, and selfrec's monologue is its own
+  --
+  -- claude's hand-trace of the old double-step run1: run1 (selfrec sum)
+  -- [] 1 == (2, [1, 1]) — the emitted 2 came from a phantom second step,
+  -- so the agent recorded an utterance (1) other than the one reported
+  -- (2). Verified exact in the repl. The law: the output run1 reports is
+  -- the output the step produced, and selfrec conses exactly that.
+  -------------------------------------------------------------------------
+  putStrLn "run1 monologue law (M3)"
+  do
+    let (o1, s1) = run1 (selfrec sum) ([] :: [Int]) (1 :: Int)
+    assert "M3 run1 steps once: emitted equals the recorded head" $
+      o1 == head s1
+    assert "M3 the trace shape is (1, [1, 1]), not the double-step (2, [1, 1])" $
+      (o1, s1) == (1, [1, 1 :: Int])
+    -- The second turn reads the monologue back: the recorded utterance
+    -- drives the next response, newest first.
+    let (o2, s2) = run1 (selfrec sum) s1 (2 :: Int)
+    assert "M3 the next turn's monologue includes what was emitted" $
+      o2 == head s2 && drop 1 s2 == (2 :: Int) : s1
+
+  -------------------------------------------------------------------------
   -- O2: coalgebra homomorphism (compaction invariance as behaviour preservation)
   -------------------------------------------------------------------------
   putStrLn "O2: coalgebra homomorphism"
@@ -993,7 +1015,8 @@ main = do
           Step $ \((tag, hist), d) ->
             let inp = monoDir d
                 Body _ k o = sys
-             in ((tag, k (hist, inp)), (unConst (o hist), ()))
+                hist' = k (hist, inp)
+             in ((tag, hist'), (unConst (o hist'), ()))
         calcOnly :: Moore (,) [Post Text] (->) (Post Text) [Post Text]
         calcOnly = tape calc
         echoOnly :: Moore (,) [Post Text] (->) (Post Text) [Post Text]
@@ -1709,7 +1732,7 @@ main = do
     let k = 3 :: Int
         selfEcho :: AgentS [Post Text] (Post Text)
         selfEcho = agentM $ cellToAgent $ tape $ \hist ->
-          [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
+          [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist))) | length hist <= k]
         seed = mkPost "human" ["self"] "start"
         drainEnd ends = go []
           where
@@ -1743,7 +1766,7 @@ main = do
     let k = 3 :: Int
         selfEcho :: AgentS [Post Text] (Post Text)
         selfEcho = agentM $ cellToAgent $ tape $ \hist ->
-          [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
+          [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist))) | length hist <= k]
         seed = mkPost "human" ["self"] "start"
         drainEnd :: Poles () (K STM) a a -> STM [a]
         drainEnd ends = go []
@@ -1820,7 +1843,7 @@ main = do
     let k = 3 :: Int
         selfEcho :: AgentS [Post Text] (Post Text)
         selfEcho = agentM $ cellToAgent $ tape $ \hist ->
-          [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist + 1))) | length hist < k]
+          [mkPost "self" ["self"] ("echo:" <> T.pack (show (length hist))) | length hist <= k]
         seed = mkPost "human" ["self"] "start"
         drainEnd :: Poles () (K STM) a a -> STM [a]
         drainEnd ends = go []
@@ -2320,6 +2343,17 @@ main = do
       )
     r3 <- runShardIO sh []
     assert "empty commit emits nothing" (null r3)
+
+    putStrLn "shard boundary: id-blind by protocol (M1b)"
+    -- The Shard protocol carries bare Posts; stamped ids live in the log
+    -- it is mounted on. A bare shard reply therefore carries no thread
+    -- edge — the ancestry law is enforced by the runners that hold the
+    -- stamp (runSeatBus, runAgentLoop), one layer up.
+    shB <- echoShard "kimi"
+    rb <- runShardIO shB [p1]
+    assert
+      "a bare shard reply carries no thread edge (ids live in the stamped log)"
+      (map thread rb == [[]])
 
     putStrLn "thread (ancestry) oracles"
     assert "root post has no parents" (thread p1 == [])

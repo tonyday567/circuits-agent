@@ -2,6 +2,16 @@
 
 ## unreleased
 
+- **M3: `run1` steps once; the monologue is honest.** `run1` no longer
+  steps the coalgebra twice per input: the output it reports is the output
+  the step produced (verified trace of the old shape:
+  `run1 (selfrec sum) [] 1 == (2, [1, 1])` — a phantom second step). The
+  observation point moved into `cellToAgent` (post-step state) and
+  `routeAgent` routes output in the step that produced it, replacing three
+  sites that each compensated for the double step. `selfrec` now emits the
+  utterance it records, so output equals the recorded head. Query shards
+  stay id-blind by protocol — the ancestry law lives at the runner layer.
+  Pinned by the M1b/M3 oracles in `circuits-agent-axioma`.
 - Multi-seat cards: additive `*Subs` API in `Circuit.Agent` — `RosterEntry`,
   `turnAs`, `loopSubs`, `loopWithSubs`, `loopsSubs`, `loopHeteroSubs`,
   `meetingLoopSubs`. Backwards-compatible wrappers keep the old names.
