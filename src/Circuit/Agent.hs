@@ -142,7 +142,7 @@ module Circuit.Agent
     agentLoopL,
     selfLoopL,
 
-    -- * Container dial (Bag / Seq log algebra)
+    -- * Container dial (Bag algebra)
     Bag (..),
     toBag,
 

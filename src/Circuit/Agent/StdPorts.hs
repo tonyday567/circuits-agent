@@ -72,6 +72,7 @@ module Circuit.Agent.StdPorts
     -- * The mark machine
     frameAgent,
     frameProcess,
+    runCell,
 
     -- * Ends / seat view (client-facing)
     ProcEnds (..),

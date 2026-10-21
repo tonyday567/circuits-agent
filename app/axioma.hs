@@ -73,6 +73,7 @@ import Circuit.Agent.StdPorts
     lineMarks,
     openNonceStdPorts,
     openStdPorts,
+    runCell,
     scriptedDouble,
     sseMarks,
   )
@@ -80,6 +81,7 @@ import Circuit.Agent.StdPorts qualified as Ports
 import Circuit.Agent.Tensor
   ( AgentShard,
     awaitShard,
+    closeShardIO,
     fanInShard,
     fanOutShard,
     ioShard,
@@ -91,7 +93,6 @@ import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
 import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..), close, polesK, scan)
-import Circuit.Machine qualified as B0
 import Circuit.Mat.Dense (Matrix, fromLists, matPlus, starMatrix, toLists)
 import Circuit.Poly (Eval (..), Mono, evalAsCell, monoDir, monoIn)
 import Circuit.Stream (These (..), Uncons, uncons)
@@ -145,21 +146,11 @@ iterateAgent (Body _ k o) s0 = scan (MooreT (Body (\i -> k (s0, i)) k o))
 finalAgent :: Moore (,) s (->) i o -> s -> [i] -> s
 finalAgent (Body _ k _) s0 is = foldl' (\s i -> k (s, i)) s0 is
 
--- | One body step: the observation of the post-step state, with the state.
-runCell :: Moore (,) s (->) i o -> s -> i -> (o, s)
-runCell (Body _ k o) s i = let s' = k (s, i) in (unConst (o s'), s')
-
 -- | Remove a file if present.
 wipe :: FilePath -> IO ()
 wipe f = do
   e <- doesFileExist f
   when e (removeFile f)
-
--- | Close a same-type agent shard once.
-closeShardIO :: AgentShard [Post Text] [Post Text] -> [Post Text] -> [Post Text] -> IO ([Post Text], [Post Text])
-closeShardIO sh x s0 = do
-  (s', outs) <- runK (B0.run (close sh)) (s0, x)
-  pure (outs, s')
 
 peek :: [Post Text] -> Post Text
 peek [] = error "verify: empty history"

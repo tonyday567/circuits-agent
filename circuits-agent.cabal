@@ -13,13 +13,12 @@ synopsis: Moore agents on a shared log; opaque shards for effects.
 description:
   Core agent model for the circuits ecosystem: a shared append-only log of
   addressed 'Post's.  Agents are Moore machines polymorphic in the base arrow
-  ('Agent' arr s a b = 'System' arr s ('Mono' a b)).  The pure case is
-  @arr = '(->)'@; the effectful case is @arr = 'Kleisli' m@.  Effectful
-  boundaries are opaque shards: 'Shard' m a b = 'Ends' ('Kleisli' m) a b
-  (lists both ways in the common log case; one-post commit via prefixIn (:[])).
-  'LogEnds' is the same shape on the log seat.  Includes process-port plumbing
-  ('Circuit.Agent.StdPorts'), message framing ('Circuit.Agent.Framing'),
-  and turn-boundary runners ('Circuit.Agent.Turn').
+  ('Agent' arr s a b), pure at @arr = '(->)'@ and effectful at @arr = 'K' m@.
+  Effectful boundaries are opaque shards: 'Shard' m a b = 'Poles' () ('K' m) a
+  b, lists both ways in the common log case.  Includes process-port plumbing
+  with exit-as-frame death and nonce correlation ('Circuit.Agent.StdPorts'),
+  message framing ('Circuit.Agent.Framing'), the boundary-mark grammar
+  ('Circuit.Agent.Mark'), and turn-boundary runners ('Circuit.Agent.Turn').
 
 build-type: Simple
 tested-with:

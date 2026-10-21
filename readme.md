@@ -5,38 +5,46 @@
 Design card: `coffee/loom/agent.md`.
 
 ```haskell
-type Agent arr s a b = System arr s (Mono a b)          -- Moore agent, polymorphic arrow
-type Shard m a b     = Ends (Kleisli m) a b             -- effectful ends
-type LogEnds m a b   = Shard m a b                      -- same shape; dual seat on the log
+type Agent arr s a b = Step (,) (,) s s arr (Either Void a) (b, ())
+type Shard m a b     = Poles () (K m) a b        -- effectful ends
 ```
 
-- Pure agents: `Agent (->) s a b`; common addressed-log case `Agent (->) [Post] Post [Post]`.
-- Effectful agents: `Agent (Kleisli m) s a b`.
-- Shard: commit `a`, emit `b`. Common log case `Shard m [Post] [Post]`; one-post keyboard: `prefixIn (:[])`.
+- Pure agents: `Agent (->) s a b`; common addressed-log case
+  `Agent (->) [Post a] (Post a) [Post a]`.
+- Effectful agents: `Agent (K m) s a b` — the same coalgebra, each step in `m`.
+- Shard: commit `a`, emit `b`. Common log case `Shard m [Post a] [Post a]`;
+  a single post commits as a one-element list.
 - Opacity: commit/emit only; no interior.
 
 ## What is here
 
-- `Circuit.Agent` — `Post`, `Log`, `Agent`, `Inbox`, `AgentState`, `Shard`, `LogEnds`,
-  `watch`, `post`, `turn`, `hasPending`, `loop`, `session`, `tape`, `selfrec`,
-  `shard`, `logEnds`, `prefixIn`, plus shard combinators `prefixShard`, `suffixShard`,
-  `codecShard`, `composeShard`, `>:>`.
+- `Circuit.Agent` — `Post`, `Log`, `Agent`, `Inbox`, `AgentState`, `Shard`,
+  `watch`, `post`, `turn`, `hasPending`, `loop`, `meetingLoop`, `tape`,
+  `selfrec`, `shard`, plus shard combinators `prefixShard`, `suffixShard`,
+  `codecShard`, `composeShard`.
 - Agent as Shard — `AgentSeat`, `feedAgent`, `agentShard`, `runAgentShard`
-  (change of base: pure Moore → `Ends (Kleisli m) [Post] [Post]`).
-- Token seat — `Port`, `batchEnds` / `unbatchEnds` / `portShard` (parser
-  stream coalgebra around a list shard → `Ends Post Post`); queue ends
-  re-exported (`Queue`, `openSTM`, `openIO`).
-- Process / Framing / Turn — process dual seats (`ProcessSeat`: shared `In`,
-  stdout + stderr `Ends`); framing; turn runners.
-- `Circuit.Agent.Cli` — live CLI agents as `Shard IO [Post] [Post]`: the
-  invocation recipe is data (`Cli`), session ids are scraped and resumed
-  with stale fallback, prompts travel via argv/stdin (no shell quoting,
-  multi-line bodies survive); `hermesCli`, `kimiCli`, `grokCli` presets;
-  `echoShard` is the exact mock oracle.
+  (change of base: pure Moore to `K m` ends).
+- Token seat — `Port`, `batchEnds` / `unbatchEnds` / `portShard`; queue ends
+  (`Queue`, `ChannelPolicy`, `openSTM`, `openIO`).
+- `Circuit.Agent.StdPorts` — child-process ports: stdin/stdout/stderr as
+  blocking frame poles; a dead child delivers its exit as one terminal
+  `Exited` frame; `NoncePorts` split streams on an in-band `⟜<n>` stamp for
+  children that cannot carry ids (ghci).
+- `Circuit.Agent.Turn` — turn runners: thread-correlated `turn` /
+  `turnTimeout`, nonce-correlated `noncePipeline` (pipelining-safe).
+- `Circuit.Agent.Framing` — `Stamped` posts, JSONL log framing, cursors.
+- `Circuit.Agent.Mark` — the boundary-mark grammar: 🟡 ✓ ↩ 🔴 🟢 🔵 ⌛.
+- `Circuit.Agent.Query` — generic query-to-shard adapters (`queryShard`,
+  `replyPosts`, `sessionPrompt`); `echoShard` is the exact mock.
+- `Circuit.Agent.Graph` — wiring graphs (`runGraph`): bus/star/chain topologies.
+- `Circuit.Agent.Delivery` — addressed-delivery relations (FinRel matrices).
+- `Circuit.Agent.Machina.Mark` — `spinMark` / `markLoop`: halt decided by
+  content, never inferred from quiet.
+- `Cursor` — in-memory cursor polling.
 
 ## What is not here
 
-HTTP API hosts, STM logs, timing → `circuits-agent-observe`.
+Operational seats, bus plumbing, CLI adapters → `free-agent`.
 
 ## Status
 
