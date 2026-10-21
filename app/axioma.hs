@@ -61,13 +61,17 @@ import Circuit.Agent.Query
 import Circuit.Agent.StdPorts
   ( DoubleStep (..),
     Frame (..),
+    NonceEvent (..),
+    NoncePorts (..),
     ProcConfig (..),
     ProcMarks (..),
     StdPorts (..),
+    defaultProcConfig,
     frameAgent,
     ghciMarks,
     hermesMarks,
     lineMarks,
+    openNonceStdPorts,
     openStdPorts,
     scriptedDouble,
     sseMarks,
@@ -112,6 +116,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Text.IO qualified as TIO
 import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode (..), exitFailure)
@@ -1157,7 +1162,7 @@ main = do
 
   -- S2: death is content — a dead child delivers its exit code.
   do
-    pp <- runK (eval (openStdPorts id id (ProcConfig "sh" ["-c", "exit 3"] "." lineMarks))) ()
+    pp <- runK (eval (openStdPorts id id (defaultProcConfig {procCommand = "sh", procArgs = ["-c", "exit 3"], procMarks = lineMarks}))) ()
     m <- timeout 5_000_000 (runK (emit (stdOut pp)) ())
     assert "S2 a dead child delivers the terminal frame with exit 3" $
       m == Just (Exited (ExitFailure 3))
@@ -1165,7 +1170,7 @@ main = do
 
   -- S3: close reaps — terminate, wait, no zombie.
   do
-    pp <- runK (eval (openStdPorts id id (ProcConfig "sh" ["-c", "sleep 30"] "." lineMarks))) ()
+    pp <- runK (eval (openStdPorts id id (defaultProcConfig {procCommand = "sh", procArgs = ["-c", "sleep 30"], procMarks = lineMarks}))) ()
     mClose <- timeout 5_000_000 (void (stdClose pp))
     assert "S3 stdClose terminates and reaps within the bound" $ isJust mClose
     case stdProcess pp of
@@ -1183,7 +1188,7 @@ main = do
             ( openStdPorts
                 id
                 id
-                (ProcConfig "sh" ["-c", "printf 'par'; sleep 0.2; printf 'tial\\n'; exec sleep 5"] "." lineMarks)
+                (defaultProcConfig {procCommand = "sh", procArgs = ["-c", "printf 'par'; sleep 0.2; printf 'tial\\n'; exec sleep 5"], procMarks = lineMarks})
             )
         )
         ()
@@ -1242,6 +1247,105 @@ main = do
         let (pOut, _) = runState (runK (close quietPort) qIn) seed
         T.length (body (pOut :: Post Text)) `seq` pure ()
     assert "S6 unbatchEnds on a quiet stream blocks (no undefined)" $ mQuiet == Nothing
+
+  -------------------------------------------------------------------------
+  -- Merged stdio (S4): one pipe for both streams.
+  --
+  -- With two pipes, stdout's first frame here is always "a" — stderr
+  -- rides a different pipe and the pumps race.  With one pipe the
+  -- kernel preserves the child's write order: stderr's "b" lands first.
+  -- Counterexample: the two-pump shape returns "a".
+  -------------------------------------------------------------------------
+  putStrLn "merged stdio (S4)"
+  do
+    pp <-
+      runK
+        ( eval
+            ( openStdPorts
+                id
+                id
+                ( defaultProcConfig
+                    { procCommand = "sh",
+                      procArgs = ["-c", "printf 'b\\n' >&2; printf 'a\\n'; sleep 1"],
+                      procMarks = lineMarks,
+                      procMergeStderr = True
+                    }
+                )
+            )
+        )
+        ()
+    f1 <- timeout 5_000_000 (runK (emit (stdOut pp)) ())
+    assert "S4 merged: stderr rides the same pipe, ordered before stdout" $
+      f1 == Just (Payload "b")
+    f2 <- timeout 5_000_000 (runK (emit (stdOut pp)) ())
+    assert "S4 merged: the stdout follow-up arrives second" $
+      f2 == Just (Payload "a")
+    mErr <- timeout 200_000 (runK (emit (stdErr pp)) ())
+    assert "S4 merged: the stderr pole has nothing of its own" $ mErr == Nothing
+    stdClose pp
+
+  -------------------------------------------------------------------------
+  -- Nonce correlation (T1): the child cannot stamp ids, so the turn is
+  -- correlated in-band — each command is followed by a nonce echo, and
+  -- the response is everything before ⟜<n>.  The pending cap is lifted:
+  -- pipelined commands each hold a slot, and out-of-order answers route
+  -- by nonce id.
+  -------------------------------------------------------------------------
+  putStrLn "nonce correlation (T1)"
+
+  -- The calculus half: the mediator is multi-pending.  Counterexample
+  -- (the old single-pending state): respB finds no match and is dropped,
+  -- so only the last pair correlates.
+  do
+    let sys =
+          TurnPort.turnProcess ::
+            Moore
+              (,)
+              (TurnPort.TurnState Text, Maybe (TurnPort.TurnToken Text, TurnPort.TurnToken Text))
+              (->)
+              (TurnPort.TurnToken Text)
+              (Maybe (TurnPort.TurnToken Text, TurnPort.TurnToken Text))
+        cmdA = TurnPort.TurnToken "a" []
+        cmdB = TurnPort.TurnToken "b" []
+        respB = TurnPort.TurnToken "rb" [1]
+        respA = TurnPort.TurnToken "ra" [0]
+        outs = iterateAgent sys (TurnPort.emptyTurnState, Nothing) [cmdA, cmdB, respB, respA]
+        expected =
+          [ Nothing,
+            Nothing,
+            Just (TurnPort.TurnToken "b" [1], respB),
+            Just (TurnPort.TurnToken "a" [0], respA)
+          ]
+    assert "T1 the pending cap is lifted: out-of-order responses both correlate" $
+      outs == expected
+
+  -- The runner half: a real nonce-speaking child (an eval loop), two
+  -- commands in flight before either response is read.
+  do
+    let evalCfg =
+          defaultProcConfig
+            { procCommand = "sh",
+              procArgs = ["-c", "while IFS= read -r line; do eval \"$line\"; done"]
+            }
+    ports <- openNonceStdPorts encodeUtf8 decodeUtf8 evalCfg
+    -- The echo prints the nonce with no trailing newline — the payload is
+    -- the bytes between nonces, and a stray newline would pollute the
+    -- next turn (ghci side: @putStr "⟜<n>"@, not putStrLn).
+    pipe <- TurnPort.noncePipeline (\n -> "printf '\x27DC" <> T.pack (show n) <> "'") ports
+    a <- TurnPort.tpSend pipe "echo alpha"
+    b <- TurnPort.tpSend pipe "echo beta"
+    ra <- timeout 5_000_000 (TurnPort.tpRecv pipe a)
+    rb <- timeout 5_000_000 (TurnPort.tpRecv pipe b)
+    assert "T1 pipelined commands correlate by nonce, in order" $
+      ra == Just "alpha\n" && rb == Just "beta\n"
+    z <- TurnPort.tpSend pipe "true"
+    rz <- timeout 5_000_000 (TurnPort.tpRecv pipe z)
+    assert "T1 a zero-frame turn is detectable (empty payload)" $ rz == Just ""
+    t2 <- TurnPort.tpSend pipe "echo one; echo two"
+    rt2 <- timeout 5_000_000 (TurnPort.tpRecv pipe t2)
+    assert "T1 a two-frame turn is detectable in the payload" $
+      fmap (filter (not . T.null) . T.splitOn "\n") rt2 == Just ["one", "two"]
+    npClose ports
 
   -------------------------------------------------------------------------
   -- Tool call: for an Agent, a tool call is a Post (to = [tool], body = args).

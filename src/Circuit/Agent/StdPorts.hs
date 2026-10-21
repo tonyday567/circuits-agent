@@ -62,6 +62,13 @@ module Circuit.Agent.StdPorts
     StdPorts (..),
     openStdPorts,
 
+    -- * Nonce framing
+    nonceGlyph,
+    splitNonceFrame,
+    NonceEvent (..),
+    NoncePorts (..),
+    openNonceStdPorts,
+
     -- * The mark machine
     frameAgent,
     frameProcess,
@@ -80,6 +87,7 @@ module Circuit.Agent.StdPorts
   )
 where
 
+import Circuit.Agent (PostId)
 import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
 import Circuit.Category (K (..), (.>))
 import Circuit.Machine (Body (Body), Moore, Poles (..))
@@ -126,7 +134,11 @@ data ProcConfig = ProcConfig
     procWorkingDir :: FilePath,
     -- | Boundary grammar of the stdout stream.  Stderr is line-framed
     -- ('lineMarks'); stderr is diagnostics, not dialogue.
-    procMarks :: ProcMarks
+    procMarks :: ProcMarks,
+    -- | Merge stderr into the stdout pipe: one pipe for both streams, so
+    -- diagnostics are ordered against the dialogue by the child itself.
+    -- The stderr pole has nothing of its own in this mode.
+    procMergeStderr :: Bool
   }
   deriving (Show, Eq)
 
@@ -136,7 +148,8 @@ defaultProcConfig =
     { procCommand = "cabal",
       procArgs = ["repl"],
       procWorkingDir = ".",
-      procMarks = ghciMarks
+      procMarks = ghciMarks,
+      procMergeStderr = False
     }
 
 -- ---------------------------------------------------------------------------
@@ -251,46 +264,86 @@ openStdPorts encode decode cfg = yank (Lift (K step))
       let procSpec =
             (proc (procCommand cfg) (procArgs cfg))
               { cwd = Just (procWorkingDir cfg),
-                std_in = CreatePipe,
-                std_out = CreatePipe,
-                std_err = CreatePipe
+                std_in = CreatePipe
               }
-      (Just stdinH, Just stdoutH, Just stderrH, ph) <- createProcess procSpec
-      flip onException (terminateProcess ph >> void (waitForProcess ph)) $ do
-        hSetBuffering stdinH NoBuffering
-        hSetBuffering stdoutH NoBuffering
-        hSetBuffering stderrH NoBuffering
-
-        -- Mark-carrying stdout uses the linear (empty-residual) mediator so
-        -- halt marks are preserved in order — now over 'Frame', so the
-        -- terminal frame cannot be dropped either.  Diagnostic stderr uses a
-        -- bounded weakening mediator: old diagnostics may be dropped when
-        -- the reader falls behind, but the process dialogue must never lose
-        -- a halt.
-        qOut <- openChannel Linear :: IO (Poles () (K IO) (Frame a) (Frame a))
-        qErr <- openChannel (NewestN 100) :: IO (Poles () (K IO) (Frame a) (Frame a))
-        outTid <- forkIO (pumpFrames (procMarks cfg) decode stdoutH ph (sink qOut))
-        errTid <- forkIO (pumpFrames lineMarks decode stderrH ph (sink qErr))
-
-        let writeIn =
-              K $ \a -> do
-                BS.hPutStr stdinH (encode a <> "\n")
-                hFlush stdinH
-            noWrite = K $ \_ -> pure ()
-            ports =
-              StdPorts
-                { stdIn = Poles writeIn writeIn noWrite,
-                  stdOut = Poles noWrite noWrite (emit qOut),
-                  stdErr = Poles noWrite noWrite (emit qErr),
-                  stdClose = do
-                    void $ try @IOException (hClose stdinH)
-                    terminateProcess ph
-                    _ <- waitForProcess ph
-                    killThread outTid
-                    killThread errTid,
-                  stdProcess = Just ph
+      if procMergeStderr cfg
+        then do
+          -- One pipe for both streams: the kernel preserves the child's
+          -- write order, so diagnostics are ordered against the dialogue.
+          (readEnd, writeEnd) <- createPipe
+          (Just stdinH, _, _, ph) <-
+            createProcess
+              procSpec
+                { std_out = UseHandle writeEnd,
+                  std_err = UseHandle writeEnd
                 }
-        pure (Left ports)
+          flip onException (terminateProcess ph >> void (waitForProcess ph)) $ do
+            hClose writeEnd
+            hSetBuffering stdinH NoBuffering
+            hSetBuffering readEnd NoBuffering
+            qOut <- openChannel Linear :: IO (Poles () (K IO) (Frame a) (Frame a))
+            outTid <- forkIO (pumpFrames (procMarks cfg) decode readEnd ph (sink qOut))
+            let writeIn =
+                  K $ \a -> do
+                    BS.hPutStr stdinH (encode a <> "\n")
+                    hFlush stdinH
+                noWrite = K $ \_ -> pure ()
+                blockForever = K $ \_ -> forever (threadDelay maxBound)
+                ports =
+                  StdPorts
+                    { stdIn = Poles writeIn writeIn noWrite,
+                      stdOut = Poles noWrite noWrite (emit qOut),
+                      stdErr = Poles noWrite noWrite blockForever,
+                      stdClose = do
+                        void $ try @IOException (hClose stdinH)
+                        terminateProcess ph
+                        _ <- waitForProcess ph
+                        killThread outTid,
+                      stdProcess = Just ph
+                    }
+            pure (Left ports)
+        else do
+          (Just stdinH, Just stdoutH, Just stderrH, ph) <-
+            createProcess
+              procSpec
+                { std_out = CreatePipe,
+                  std_err = CreatePipe
+                }
+          flip onException (terminateProcess ph >> void (waitForProcess ph)) $ do
+            hSetBuffering stdinH NoBuffering
+            hSetBuffering stdoutH NoBuffering
+            hSetBuffering stderrH NoBuffering
+
+            -- Mark-carrying stdout uses the linear (empty-residual) mediator so
+            -- halt marks are preserved in order — now over 'Frame', so the
+            -- terminal frame cannot be dropped either.  Diagnostic stderr uses a
+            -- bounded weakening mediator: old diagnostics may be dropped when
+            -- the reader falls behind, but the process dialogue must never lose
+            -- a halt.
+            qOut <- openChannel Linear :: IO (Poles () (K IO) (Frame a) (Frame a))
+            qErr <- openChannel (NewestN 100) :: IO (Poles () (K IO) (Frame a) (Frame a))
+            outTid <- forkIO (pumpFrames (procMarks cfg) decode stdoutH ph (sink qOut))
+            errTid <- forkIO (pumpFrames lineMarks decode stderrH ph (sink qErr))
+
+            let writeIn =
+                  K $ \a -> do
+                    BS.hPutStr stdinH (encode a <> "\n")
+                    hFlush stdinH
+                noWrite = K $ \_ -> pure ()
+                ports =
+                  StdPorts
+                    { stdIn = Poles writeIn writeIn noWrite,
+                      stdOut = Poles noWrite noWrite (emit qOut),
+                      stdErr = Poles noWrite noWrite (emit qErr),
+                      stdClose = do
+                        void $ try @IOException (hClose stdinH)
+                        terminateProcess ph
+                        _ <- waitForProcess ph
+                        killThread outTid
+                        killThread errTid,
+                      stdProcess = Just ph
+                    }
+            pure (Left ports)
     step (Left ports) =
       pure (Right ports)
 
@@ -356,6 +409,114 @@ pumpFrames marks decode h ph snk = go (BS.empty, [])
         Nothing -> do
           code <- waitForProcess ph
           snk (Exited code)
+
+-- ---------------------------------------------------------------------------
+-- Nonce framing
+-- ---------------------------------------------------------------------------
+
+-- | The nonce glyph: the in-band turn stamp.  A nonce is the glyph
+-- followed by one or more decimal digits — @⟜7@ ends turn 7's response.
+-- Children that cannot stamp 'Circuit.Agent.Turn' ids (ghci) answer a
+-- nonce echo instead; the runner correlates by it.
+nonceGlyph :: Text
+nonceGlyph = "\x27DC"
+
+-- | The nonce family split: the earliest @⟜<digits>@ in the buffer,
+-- giving @(payload, turn id, rest)@ — payload before the nonce (nonce
+-- stripped), rest after it.  'Nothing' when no complete nonce has
+-- arrived; a bare glyph without digits is not a nonce and is skipped.
+splitNonceFrame :: BS.ByteString -> Maybe (BS.ByteString, PostId, BS.ByteString)
+splitNonceFrame buf = search 0
+  where
+    glyph = encodeUtf8 nonceGlyph
+    glen = BS.length glyph
+    search off =
+      let (skid, hit) = BS.breakSubstring glyph (BS.drop off buf)
+          pos = off + BS.length skid
+       in if BS.null hit
+            then Nothing
+            else
+              let (digits, rest) = BS.span isDigitByte (BS.drop glen hit)
+               in if BS.null digits
+                    then search (pos + glen)
+                    else Just (BS.take pos buf, BS.foldl' (\acc w -> acc * 10 + fromIntegral (w - 0x30)) 0 digits, rest)
+    isDigitByte w = w >= 0x30 && w <= 0x39
+
+-- | One event on a nonce-framed process stream.
+data NonceEvent a
+  = -- | Everything the child printed before answering the nonce @⟜<n>@.
+    Answered PostId a
+  | -- | The stream ended before the nonce: the turn in flight answered
+    -- nothing — a zero-frame witness.
+    Unterminated a
+  | -- | The terminal exit.
+    ChildExited ExitCode
+  deriving (Eq, Show)
+
+-- | A nonce-framed process: stdin is a free commit; both streams ride one
+-- pipe, split on the @⟜<n>@ family, so the nonce orders diagnostics
+-- against the dialogue.  Death is an event, not a silence.
+data NoncePorts a = NoncePorts
+  { npCommit :: a -> IO (),
+    npEvent :: IO (NonceEvent a),
+    npClose :: IO (),
+    npProcess :: Maybe ProcessHandle
+  }
+
+-- | Open a nonce-framed process: one pipe for both streams (the kernel
+-- preserves the child's write order), a pump splitting on the nonce
+-- family.  'Unterminated' and 'ChildExited' events close out the stream
+-- by content.
+openNonceStdPorts :: (a -> BS.ByteString) -> (BS.ByteString -> a) -> ProcConfig -> IO (NoncePorts a)
+openNonceStdPorts encode decode cfg = do
+  (readEnd, writeEnd) <- createPipe
+  let procSpec =
+        (proc (procCommand cfg) (procArgs cfg))
+          { cwd = Just (procWorkingDir cfg),
+            std_in = CreatePipe,
+            std_out = UseHandle writeEnd,
+            std_err = UseHandle writeEnd
+          }
+  (Just stdinH, _, _, ph) <- createProcess procSpec
+  flip onException (terminateProcess ph >> void (waitForProcess ph)) $ do
+    hClose writeEnd
+    hSetBuffering stdinH NoBuffering
+    hSetBuffering readEnd NoBuffering
+    q <- newTQueueIO
+    _ <- forkIO (pumpNonceFrames decode readEnd ph (atomically . writeTQueue q))
+    let commit a = do
+          BS.hPutStr stdinH (encode a <> "\n")
+          hFlush stdinH
+        close = do
+          void $ try @IOException (hClose stdinH)
+          terminateProcess ph
+          _ <- waitForProcess ph
+          pure ()
+    pure (NoncePorts commit (atomically (readTQueue q)) close (Just ph))
+
+-- | The nonce pumper: the IO interpretation of 'splitNonceFrame' at a
+-- 'Handle'.  Payloads are sunk as 'Answered' events; an EOF mid-turn
+-- sinks the partial tail as 'Unterminated'; the exit code is collected
+-- and sunk as exactly one 'ChildExited'.
+pumpNonceFrames :: (BS.ByteString -> a) -> Handle -> ProcessHandle -> (NonceEvent a -> IO ()) -> IO ()
+pumpNonceFrames decode h ph snk = go BS.empty
+  where
+    go buf = do
+      r <- try @IOException (BS.hGetSome h 4096)
+      case r of
+        Right bs | not (BS.null bs) -> do
+          let (frames, buf') = peel (buf <> bs)
+          traverse_ (\(n, p) -> snk (Answered n (decode p))) frames
+          go buf'
+        _ -> do
+          unless (BS.null buf) $ snk (Unterminated (decode buf))
+          code <- waitForProcess ph
+          snk (ChildExited code)
+    peel buf = case splitNonceFrame buf of
+      Nothing -> ([], buf)
+      Just (p, n, rest) ->
+        let (ps, buf') = peel rest
+         in ((n, p) : ps, buf')
 
 -- ---------------------------------------------------------------------------
 -- Ends / seat view

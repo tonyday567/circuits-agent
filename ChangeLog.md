@@ -2,6 +2,17 @@
 
 ## unreleased
 
+- **Conversation honesty (S-b).** Nonce correlation for children that
+  cannot stamp ids (ghci): a nonce echo (`⟜<n>`, no trailing newline)
+  after each command, streams split on the nonce family (`NoncePorts`),
+  zero-frame (`Unterminated` / empty payload) and two-frame (multi-frame
+  payload) both visible in-band. Merged stdio behind
+  `procMergeStderr`: one pipe for both streams, so diagnostics are
+  kernel-ordered against the dialogue. The Turn pending cap is lifted —
+  `TurnState` holds every pending command, responses route by id, the
+  runners stash wire responses for the turn they belong to, and
+  `noncePipeline` pipelines safely (children execute stdin in order).
+  Pinned by the S4/T1 oracles in `circuits-agent-axioma`.
 - **Death honesty (S-a).** Process reads now end by content: the pumper
   collects the child's exit code and sinks exactly one terminal `Exited`
   frame after the flushed payloads, so a blocked read on a dead child
