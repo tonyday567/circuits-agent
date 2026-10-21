@@ -5,16 +5,16 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+
 -- | process ports: death honesty (S1-S3/S5/S6), merged stdio (S4), nonce turns (T1).
 module Axioma.Ports
   ( portsTopic,
   )
 where
 
-import Axioma.Common
 import Algebra.Graph.Labelled qualified as LG
+import Axioma.Common
 import Circuit.Agent
-import Circuit.Category (K (..))
 import Circuit.Agent.StdPorts
 import Circuit.Agent.StdPorts qualified as Ports
 import Circuit.Agent.Turn qualified as TurnPort
@@ -33,7 +33,6 @@ import System.Process (getProcessExitCode)
 import System.Timeout (timeout)
 
 default (Text)
-
 
 portsTopic :: IO ()
 portsTopic = do
@@ -320,7 +319,3 @@ portsTopic = do
         && "hi j" `elem` map body (asState seatAll)
     assert "full commit produces a reply to the secret too" $
       length outsAll == 2
-
--- 1792568198N
--- 1792568203N
--- 1792568338N

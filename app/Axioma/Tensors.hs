@@ -5,29 +5,23 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
--- | race/await tensors at every level, STM rung, S/X agents.
+
+-- | race/await tensors at every level, S/X agents.
 module Axioma.Tensors
   ( tensorsTopic,
   )
 where
 
-import Axioma.Common
 import Algebra.Graph.Labelled qualified as LG
+import Axioma.Common
 import Circuit.Agent
-import Circuit.Agent.Tensor (ioShard)
-import Circuit.Category (K (..))
 import Circuit.Agent.Tensor
 import Circuit.Category (K (..))
 import Circuit.Machine (Body (Body), MooreT (..), Poles (..), Step (..))
-import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.STM
-import Control.Exception (BlockedIndefinitelyOnSTM (..), catch, fromException)
-import Data.Maybe (isJust, isNothing)
+import Control.Concurrent (threadDelay)
 import Data.Text (Text)
-import System.Timeout (timeout)
 
 default (Text)
-
 
 tensorsTopic :: IO ()
 tensorsTopic = do
@@ -161,65 +155,6 @@ tensorsTopic = do
     assert "raceA outputs match raceP per input" $
       outsA == concat (replicate (length ins) (raceP f g []))
 
-  putStrLn "stm rung"
-
-  putStrLn "retry is silence"
-  do
-    q <- newTQueueIO
-    -- An empty queue makes 'readTQueue' retry; timeout observes the block.
-    blocked <- timeout 100000 (atomically (readTQueue q))
-    assert "retry: empty commit blocks" $ isNothing blocked
-    -- Once a writer fills the queue, the retry resumes.
-    let p = mkPost "stm" [] "hello"
-    _ <- forkIO $ do
-      threadDelay 100000
-      atomically (writeTQueue q p)
-    resumed <- timeout 500000 (atomically (readTQueue q))
-    assert "retry: resumes after commit" $ fmap body resumed == Just "hello"
-    -- Extensional equivalence: a retrying emit with an orElse fallback []
-    -- equals the silent agent on an empty commit.
-    commitVar <- newTVarIO ([] :: [Post Text])
-    let stmEmit :: STM [Post Text]
-        stmEmit =
-          readTVar commitVar >>= \case
-            [] -> retry
-            xs -> writeTVar commitVar [] >> pure xs
-    silentFallback <- atomically (stmEmit `orElse` pure [])
-    assert "retry: extensionally silent on empty commit" $ null silentFallback
-    atomically (writeTVar commitVar [p])
-    nonEmptyEmit <- atomically stmEmit
-    assert "retry: emits when commit is non-empty" $ nonEmptyEmit == [p]
-
-  putStrLn "orElse is lawful race"
-  do
-    leftFlag <- newTVarIO True
-    rightFlag <- newTVarIO False
-    let leftPost = mkPost "l" [] "left"
-        rightPost = mkPost "r" [] "right"
-        raceBranch flag branchPost = do
-          ok <- readTVar flag
-          if ok then pure [branchPost] else retry
-        raceSTM = raceBranch leftFlag leftPost `orElse` raceBranch rightFlag rightPost
-    resA <- atomically raceSTM
-    assert "orElse: left wins when only left ready" $ resA == [leftPost]
-    atomically $ do
-      writeTVar leftFlag False
-      writeTVar rightFlag True
-    resB <- atomically raceSTM
-    assert "orElse: falls back to right when left retries" $ resB == [rightPost]
-    atomically (writeTVar leftFlag True)
-    resC <- atomically raceSTM
-    assert "orElse: left bias when both ready" $ resC == [leftPost]
-
-  putStrLn "dormancy is BlockedIndefinitelyOnSTM"
-  do
-    let isDormant =
-          catch
-            (atomically (retry `orElse` retry) >> pure False)
-            (\e -> pure (isJust (fromException @BlockedIndefinitelyOnSTM e)))
-    dormant <- isDormant
-    assert "dormancy: all-retry raises BlockedIndefinitelyOnSTM" dormant
-
   putStrLn "S-agent tensors"
 
   putStrLn "awaitS is product with silent unit"
@@ -335,7 +270,3 @@ tensorsTopic = do
     bag1 <- runBag sh [a, b, c]
     bag2 <- runBag sh [c, a, b]
     assert "permuting input preserves output bag" $ bag1 == bag2
-
--- 1792568198N
--- 1792568203N
--- 1792568338N

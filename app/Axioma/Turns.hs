@@ -5,21 +5,21 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+
 -- | turn and meeting laws: turn integrity, loop quiescence, multi-seat cards.
 module Axioma.Turns
   ( turnsTopic,
   )
 where
 
-import Axioma.Common
 import Algebra.Graph.Labelled qualified as LG
+import Axioma.Common
 import Circuit.Agent
 import Circuit.Syntax (eval)
 import Data.List (find, sort, sortOn)
 import Data.Text (Text)
 
 default (Text)
-
 
 turnsTopic :: IO ()
 turnsTopic = do
@@ -177,7 +177,3 @@ turnsTopic = do
         && any ((== "nudge") . from) dialogue
     assert "multi-round: nudge bodies constant" $
       all (\p -> from p /= "nudge" || body p == "tell me more.") tF
-
--- 1792568198N
--- 1792568203N
--- 1792568338N

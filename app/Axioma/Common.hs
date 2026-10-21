@@ -5,6 +5,7 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+
 -- | Shared helpers for the circuits-agent axioma topic modules.
 module Axioma.Common
   ( assert,
@@ -207,7 +208,6 @@ cardEcho name hist =
   let p = peek hist
    in [mkPost name ["xyzzy"] ("🟢 echo: " <> body p) | from p == "human"]
 
-
 -- Shared shard factories for the tensor topics (a main-do-level let in the
 -- monolith, hoisted here so every topic sees them).
 constShard :: [Post Text] -> AgentShard [Post Text] [Post Text]
@@ -217,4 +217,3 @@ tagShard :: Text -> AgentShard [Post Text] [Post Text]
 tagShard suffix = ioShard (pure . map addSuffix)
   where
     addSuffix x = x {body = body x <> suffix}
--- 1792568338N

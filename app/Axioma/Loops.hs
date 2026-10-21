@@ -5,16 +5,16 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+
 -- | self-loops: S-agent, spikes, Loop Either citizen.
 module Axioma.Loops
   ( loopsTopic,
   )
 where
 
-import Axioma.Common
 import Algebra.Graph.Labelled qualified as LG
+import Axioma.Common
 import Circuit.Agent
-import Circuit.Category (K (..))
 import Circuit.Category (K (..))
 import Circuit.Category qualified as C
 import Control.Concurrent.STM
@@ -25,7 +25,6 @@ import Data.Text (Text)
 import Data.Text qualified as T
 
 default (Text)
-
 
 loopsTopic :: IO ()
 loopsTopic = do
@@ -161,7 +160,3 @@ loopsTopic = do
       atomically $ writeEndSTM endsRef seed
       atomically $ selfLoopS selfEcho [] endsRef
     assert "Loop self-loop agrees with selfLoopS" $ sLoop == sRef
-
--- 1792568198N
--- 1792568203N
--- 1792568338N

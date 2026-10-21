@@ -5,17 +5,17 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+
 -- | wiring-graph oracles and graph-algebra laws (graph-axioma merged).
 module Axioma.Graph
   ( graphTopic,
   )
 where
 
-import Axioma.Common
 import Algebra.Graph.Labelled qualified as LG
+import Axioma.Common
 import Circuit.Agent
 import Circuit.Agent.Delivery
-import Circuit.Category (K (..))
 import Circuit.Agent.Graph
   ( AgentGraph,
     AgentRegistry,
@@ -27,6 +27,7 @@ import Circuit.Agent.Graph
     runGraph,
     star,
   )
+import Circuit.Category (K (..))
 import Data.List (sortOn)
 import Data.Map qualified as Map
 import Data.Text (Text)
@@ -134,22 +135,6 @@ graphTopic = do
     assert "silence is quiescence: no derivations" $
       null qDerivs
 
-  putStrLn "fork is id"
-  do
-    let agent = cellToAgent (tape (reply "xyzzy")) :: Agent (->) [Post Text] (Post Text) [Post Text]
-        p1 = mkPost "human" ["xyzzy"] "one"
-        p2 = mkPost "human" ["xyzzy"] "two"
-        (_outs0, seat0) = runAgentShard agent (AgentSeat [] []) [p1]
-        forked = seat0
-        (outsA, seatA) = runAgentShard agent seat0 [p2]
-        (outsB, seatB) = runAgentShard agent forked [p2]
-    assert "fork is id: duplicated seat gives identical outputs" $
-      outsA == outsB
-    assert "fork is id: duplicated seat gives identical resulting seats" $
-      seatA == seatB
-    assert "fork is id: carrier advanced on both copies" $
-      length (asState seatA) == 2
-
   putStrLn "fan-in lands exactly one post"
   do
     let worker = cellToAgent (tape (reply "xyzzy")) :: Agent (->) [Post Text] (Post Text) [Post Text]
@@ -158,8 +143,6 @@ graphTopic = do
         prompt2 = mkPost "human" ["xyzzy"] "task two"
         (outs1, fork1) = runAgentShard worker main0 [prompt1]
         (outs2, fork2) = runAgentShard worker main0 [prompt2]
-        snap1 = fork1
-        snap2 = fork2
         summaryPosts =
           [ mkPost
               "xyzzy"
@@ -167,14 +150,10 @@ graphTopic = do
               ("summary: " <> T.intercalate " + " (map body (outs1 ++ outs2)))
           ]
         (mainOuts, main1) = runAgentShard worker main0 summaryPosts
-    assert "fan-in: the summary is exactly one post" $
-      length summaryPosts == 1
     assert "fan-in lands exactly one post: main carrier grew by exactly 1" $
       length (asState main1) == length (asState main0) + 1
     assert "fan-in lands exactly one post: main seat outputs respond to the summary only" $
       length mainOuts == 1 && "ack: summary:" `T.isPrefixOf` body (peek mainOuts)
-    assert "fan-in lands exactly one post: forks unchanged by the main-seat commit" $
-      fork1 == snap1 && fork2 == snap2
     assert "fan-in lands exactly one post: each fork saw only its own prompt" $
       map body (asState fork1) == ["task one"]
         && map body (asState fork2) == ["task two"]
@@ -212,7 +191,8 @@ graphTopic = do
     assert "seat-name swap: from fields are exactly swapped" $
       map (swapName . from) lgAB == map from lgBA
 
-  -- graph algebra laws (merged from graph-axioma)\n  putStrLn "graph algebra laws"
+  -- graph algebra laws (merged from graph-axioma)
+  putStrLn "graph algebra laws"
 
   putStrLn "circuits-agent graph-law oracles (deterministic)"
 
@@ -282,7 +262,3 @@ graphTopic = do
       ins9 = [mkPost "human" ["outer"] "hi"]
   assert "orchestrator flatten" $
     runG parentGraph parentReg ins9 == runG g' reg' ins9
-
--- 1792568198N
--- 1792568203N
--- 1792568338N

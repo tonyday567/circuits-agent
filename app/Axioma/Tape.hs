@@ -5,14 +5,15 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+
 -- | tape/behaviour laws: A0/A1, O1/O2/S3, compaction, run1 monologue (M3).
 module Axioma.Tape
   ( tapeTopic,
   )
 where
 
-import Axioma.Common
 import Algebra.Graph.Labelled qualified as LG
+import Axioma.Common
 import Circuit.Agent
 import Circuit.Agent.StdPorts
 import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..))
@@ -21,7 +22,6 @@ import Circuit.Tensor (Const (..))
 import Data.Text (Text)
 
 default (Text)
-
 
 tapeTopic :: IO ()
 tapeTopic = do
@@ -117,7 +117,3 @@ tapeTopic = do
     let (_, t2) = runCell b t1 2
     let (p3, _) = runCell b [sum t2] 3
     assert "length notices wholesale compaction" $ p3 == 2
-
--- 1792568198N
--- 1792568203N
--- 1792568338N

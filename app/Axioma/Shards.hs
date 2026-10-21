@@ -5,16 +5,16 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+
 -- | shard combinators, agent-as-shard, branch agent, token ports.
 module Axioma.Shards
   ( shardsTopic,
   )
 where
 
-import Axioma.Common
 import Algebra.Graph.Labelled qualified as LG
+import Axioma.Common
 import Circuit.Agent
-import Circuit.Category (K (..))
 import Circuit.Category (K (..))
 import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..))
 import Circuit.Poly (Eval (..), monoDir)
@@ -29,7 +29,6 @@ import Data.Text qualified as T
 import System.Timeout (timeout)
 
 default (Text)
-
 
 shardsTopic :: IO ()
 shardsTopic = do
@@ -197,7 +196,3 @@ shardsTopic = do
        in u [] == That []
             && u [1] == This 1
             && u [1, 2, 3] == These 1 [2, 3]
-
--- 1792568198N
--- 1792568203N
--- 1792568338N

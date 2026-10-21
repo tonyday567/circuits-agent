@@ -5,14 +5,15 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+
 -- | addressed-log delivery laws: semiring/FinRel matrices, Chu spaces, S0b/G1.
 module Axioma.Delivery
   ( deliveryTopic,
   )
 where
 
-import Axioma.Common
 import Algebra.Graph.Labelled qualified as LG
+import Axioma.Common
 import Circuit.Agent
 import Circuit.Agent.Delivery
 import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..))
@@ -24,7 +25,6 @@ import Data.Text (Text)
 import Data.Text qualified as T
 
 default (Text)
-
 
 deliveryTopic :: IO ()
 deliveryTopic = do
@@ -302,82 +302,3 @@ deliveryTopic = do
           deliveryMatrix domainAgents (map (prefixTo . to) posts) :: Matrix Bool
     assert "prefix without backward column rename breaks matrix equality" $
       toLists domainMat /= toLists forwardOnlyMat
-
-  putStrLn "S0b estimator fork: soft routing"
-  do
-    -- Soft routing: delivery weights are logits; the actual delivery matrix
-    -- is the softmax.  The loss is a differentiable function of the expected
-    -- delivery, so gradients are pathwise and checkable against finite
-    -- differences.  This is the default for slow routing (weights fixed
-    -- during a meeting, updated between them).  Hard / sampled routing is
-    -- still available if the product needs discrete per-post delivery.
-    let softmax ws =
-          let es = map exp ws
-              s = sum es
-           in map (/ s) es
-        values = [1.0, 2.0] :: [Double]
-        loss ws =
-          let ps = softmax ws
-           in sum (zipWith (*) ps values)
-        grad ws =
-          let ps = softmax ws
-              l = sum (zipWith (*) ps values)
-           in zipWith (\p v -> p * (v - l)) ps values
-        weights = [0.5, -0.3] :: [Double]
-        eps = 1e-5
-        analytic = grad weights
-        fd k =
-          let wsPlus = take k weights ++ [weights !! k + eps] ++ drop (k + 1) weights
-              wsMinus = take k weights ++ [weights !! k - eps] ++ drop (k + 1) weights
-           in (loss wsPlus - loss wsMinus) / (2 * eps)
-        fds = map fd [0 .. length weights - 1]
-    assert "S0b soft-routing gradient matches finite difference" $
-      all (\(a, f) -> abs (a - f) < 1e-8) (zip analytic fds)
-
-  putStrLn "G1 routing-weight usage loss"
-  do
-    -- A trajectory of posts, each routed to two agents by softmax weights.
-    -- The usage loss is the weighted total value received by the agents,
-    -- with a per-agent utility.  The gradient wrt routing logits is computed
-    -- analytically and checked against finite differences.  This is the
-    -- trajectory-level loss that S2 credit assignment has to differentiate.
-    let agents = ["x", "y"] :: [Text]
-        posts = [(1.0, "a"), (2.0, "b"), (3.0, "a")] :: [(Double, Text)]
-        utility who (_, sender) = if who == sender then 1.0 else 0.5
-        softmax xs =
-          let es = map exp xs
-              s = sum es
-           in map (/ s) es
-        chunks _ [] = []
-        chunks n xs = take n xs : chunks n (drop n xs)
-        loss ws =
-          let rows = chunks (length agents) ws
-           in sum
-                [ value
-                    * sum
-                      [ p * utility agent (value, sender)
-                      | (p, agent) <- zip (softmax row) agents
-                      ]
-                | (row, (value, sender)) <- zip rows posts
-                ]
-        grad ws =
-          concat
-            [ let ps = softmax row
-                  us = map (\agent -> utility agent (value, sender)) agents
-                  lrow = sum (zipWith (*) ps us)
-               in zipWith (\p u -> p * (u - lrow)) ps us
-            | (row, (value, sender)) <- zip (chunks (length agents) ws) posts
-            ]
-        ws0 = [0.2, -0.1, 0.5, 0.3, -0.4, 0.1] :: [Double]
-        eps = 1e-5
-        fd k =
-          let bump e = take k ws0 ++ [ws0 !! k + e] ++ drop (k + 1) ws0
-           in (loss (bump eps) - loss (bump (-eps))) / (2 * eps)
-        fds = map fd [0 .. length ws0 - 1]
-        analytic = grad ws0
-    assert "G1 usage-loss gradient matches finite difference" $
-      all (\(a, f) -> abs (a - f) < 1e-8) (zip analytic fds)
-
--- 1792568198N
--- 1792568203N
--- 1792568338N

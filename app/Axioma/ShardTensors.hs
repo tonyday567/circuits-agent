@@ -5,21 +5,21 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+
 -- | shard-level tensor laws.
 module Axioma.ShardTensors
   ( shardTensorsTopic,
   )
 where
 
-import Axioma.Common
 import Algebra.Graph.Labelled qualified as LG
+import Axioma.Common
 import Circuit.Agent
 import Circuit.Agent.Tensor
 import Data.Text (Text)
 import Data.Text qualified as T
 
 default (Text)
-
 
 shardTensorsTopic :: IO ()
 shardTensorsTopic = do
@@ -139,7 +139,3 @@ shardTensorsTopic = do
         _ -> False
     assert "honest fan-in: empty body is quiet" $
       null (synthesisSummary "sum" [] [0] (const "") [[mkPost "a" [] "x"]])
-
--- 1792568198N
--- 1792568203N
--- 1792568338N

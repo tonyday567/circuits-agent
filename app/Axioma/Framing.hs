@@ -5,14 +5,15 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+
 -- | framing, query adapters, ancestry oracles, cursors.
 module Axioma.Framing
   ( framingTopic,
   )
 where
 
-import Axioma.Common
 import Algebra.Graph.Labelled qualified as LG
+import Axioma.Common
 import Circuit.Agent
 import Circuit.Agent.Framing
 import Circuit.Agent.Framing qualified as Framing
@@ -29,7 +30,6 @@ import System.Directory (getTemporaryDirectory)
 import System.FilePath ((</>))
 
 default (Text)
-
 
 framingTopic :: IO ()
 framingTopic = do
@@ -277,7 +277,6 @@ framingTopic = do
     TIO.writeFile logf "x\n"
     r8 <- pollNumberedFile cur logf
     assert "truncation resets to zero" (r8 == [(1, "x")])
-
   where
     -- \| Generic behaviour for Tier A agents (output lists are concatenated).
     behA :: Moore (,) s (->) a [b] -> s -> [a] -> [b]
@@ -339,6 +338,3 @@ framingTopic = do
     cardEcho name hist =
       let p = peek hist
        in [mkPost name ["xyzzy"] ("🟢 echo: " <> body p) | from p == "human"]
--- 1792568198N
--- 1792568203N
--- 1792568338N

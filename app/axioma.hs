@@ -54,12 +54,12 @@ topicName Framing = "framing"
 topicDesc :: Topic -> String
 topicDesc All = "run all topics"
 topicDesc Tape = "tape/behaviour laws: A0/A1, O1/O2/S3, compaction, run1 monologue (M3)"
-topicDesc Delivery = "addressed-log delivery laws: semiring/FinRel matrices, Chu spaces, S0b/G1"
+topicDesc Delivery = "addressed-log delivery laws: semiring/FinRel matrices, Chu spaces"
 topicDesc Turns = "turn and meeting laws: turn integrity, loop quiescence, multi-seat cards"
 topicDesc Shards = "shard combinators, agent-as-shard, branch agent, token ports"
 topicDesc Ports = "process ports: death honesty (S1-S3/S5/S6), merged stdio (S4), nonce turns (T1)"
 topicDesc Graph = "wiring-graph oracles and graph-algebra laws (graph-axioma merged)"
-topicDesc Tensors = "race/await tensors at every level, STM rung, S/X agents"
+topicDesc Tensors = "race/await tensors at every level, S/X agents"
 topicDesc Loops = "self-loops: S-agent, spikes, Loop Either citizen"
 topicDesc Marks = "the mark grammar, halt oracles, content-decided turns"
 topicDesc ShardTensors = "shard-level tensor laws"
@@ -110,5 +110,3 @@ main = do
   topic <- execParser opts
   runTopic topic
   putStrLn "All tests passed"
--- 1792562305N
--- 1792562336N

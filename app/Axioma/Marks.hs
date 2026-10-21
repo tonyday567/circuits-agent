@@ -5,16 +5,16 @@
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
+
 -- | the mark grammar, halt oracles, content-decided turns.
 module Axioma.Marks
   ( marksTopic,
   )
 where
 
-import Axioma.Common
 import Algebra.Graph.Labelled qualified as LG
+import Axioma.Common
 import Circuit.Agent
-import Circuit.Category (K (..))
 import Circuit.Agent.Machina.Mark (markLoop, spinMark)
 import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf, parseMark)
 import Circuit.Agent.Turn qualified as TurnPort
@@ -27,7 +27,6 @@ import Data.Maybe (isNothing)
 import Data.Text (Text)
 
 default (Text)
-
 
 marksTopic :: IO ()
 marksTopic = do
@@ -190,14 +189,3 @@ marksTopic = do
     result <- runK (eval turnLoop) "hello"
     assert "turnTimeout returns Nothing on expiry" $
       isNothing result
-
-  -------------------------------------------------------------------------
-  -- Shard-level tensors (StateT [Post Text] IO)
-  --
-  -- These are the semantic citizens that free-agent 'FreeSeat' terms fold
-  -- into.  Laws are tested directly on shards, independent of any free syntax.
-  -------------------------------------------------------------------------
-
--- 1792568198N
--- 1792568203N
--- 1792568338N
