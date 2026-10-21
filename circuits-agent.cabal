@@ -35,7 +35,6 @@ source-repository head
 common ghc-options-stanza
   ghc-options:
     -Wall
-    -Wno-unused-imports
     -Wcompat
     -Widentities
     -Wincomplete-record-updates
@@ -94,7 +93,22 @@ executable circuits-agent-axioma
   import: ghc2024-stanza
   hs-source-dirs: app
   main-is: axioma.hs
+  other-modules:
+    Axioma.Common
+    Axioma.Delivery
+    Axioma.Framing
+    Axioma.Graph
+    Axioma.Loops
+    Axioma.Marks
+    Axioma.Ports
+    Axioma.Shards
+    Axioma.ShardTensors
+    Axioma.Tape
+    Axioma.Tensors
+    Axioma.Turns
+
   build-depends:
+    optparse-applicative >=0.17 && <0.20,
     algebraic-graphs >=0.7 && <0.9,
     async >=2.2 && <2.3,
     base >=4.20 && <5,
@@ -122,19 +136,5 @@ executable circuits-agent-tape-axioma
     circuits-agent,
     circuits-diff >=0.1 && <0.2,
     containers >=0.6 && <0.9,
-
-  default-language: GHC2024
-
-executable circuits-agent-graph-axioma
-  import: ghc-options-stanza
-  import: ghc2024-stanza
-  hs-source-dirs: app
-  main-is: graph-axioma.hs
-  build-depends:
-    algebraic-graphs >=0.7 && <0.9,
-    base >=4.20 && <5,
-    circuits-agent,
-    containers >=0.6 && <0.9,
-    text >=1.2 && <3,
 
   default-language: GHC2024
