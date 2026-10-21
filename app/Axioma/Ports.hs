@@ -1,7 +1,5 @@
 {-# LANGUAGE ExtendedDefaultRules #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
@@ -12,17 +10,16 @@ module Axioma.Ports
   )
 where
 
-import Algebra.Graph.Labelled qualified as LG
 import Axioma.Common
 import Circuit.Agent
 import Circuit.Agent.StdPorts
 import Circuit.Agent.StdPorts qualified as Ports
 import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..))
+import Circuit.Machine (Moore)
 import Circuit.Syntax (eval)
 import Control.Monad (void)
-import Control.Monad.State (State, gets, modify, runState, runStateT)
+import Control.Monad.State (State, gets, modify, runState)
 import Data.ByteString qualified as BS
 import Data.Maybe (isJust)
 import Data.Text (Text)

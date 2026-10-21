@@ -1,7 +1,5 @@
 {-# LANGUAGE ExtendedDefaultRules #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
@@ -12,11 +10,10 @@ module Axioma.Tape
   )
 where
 
-import Algebra.Graph.Labelled qualified as LG
 import Axioma.Common
 import Circuit.Agent
 import Circuit.Agent.StdPorts
-import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..))
+import Circuit.Machine (Body (Body), Moore)
 import Circuit.Poly (Eval (..), evalAsCell)
 import Circuit.Tensor (Const (..))
 import Data.Text (Text)

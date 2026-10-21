@@ -188,21 +188,18 @@ import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
 import Circuit.Machine (Body (Body), Moore, Poles (..), Step (..), close, compose, iomap, polesK)
-import Circuit.Poly (Eval (..), Mono, monoDir, monoIn)
+import Circuit.Poly (monoDir, monoIn)
 import Circuit.Syntax (Syntax (Lift), eval)
 import Circuit.Tensor (Const (..), unConst)
 import Circuit.Trace (Trace)
 import Circuit.Traced (yank)
-import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, race, wait)
 import Control.Concurrent.STM (STM, atomically, orElse)
 import Data.Foldable (traverse_)
-import Data.List (find, foldl', genericIndex, genericTake, nub, sort)
+import Data.List (nub, sort)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
-import Data.Sequence (Seq)
-import Data.Sequence qualified as Seq
 import Data.Text (Text, empty)
 import Data.Void (Void, absurd)
 import Numeric.Natural (Natural)

@@ -1,7 +1,5 @@
 {-# LANGUAGE ExtendedDefaultRules #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
@@ -12,7 +10,6 @@ module Axioma.Marks
   )
 where
 
-import Algebra.Graph.Labelled qualified as LG
 import Axioma.Common
 import Circuit.Agent
 import Circuit.Agent.Machina.Mark (markLoop, spinMark)

@@ -24,8 +24,7 @@ where
 
 import Circuit.Agent.Ends (unitEndsSTM)
 import Circuit.Category (K (..))
-import Circuit.Category qualified as Cat
-import Circuit.Machine (Poles (..), close, polesK)
+import Circuit.Machine (Poles (..), close)
 import Circuit.Syntax (Syntax (Lift))
 import Circuit.Trace (Trace)
 import Circuit.Traced (yank)

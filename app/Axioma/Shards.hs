@@ -1,7 +1,5 @@
 {-# LANGUAGE ExtendedDefaultRules #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
@@ -12,16 +10,15 @@ module Axioma.Shards
   )
 where
 
-import Algebra.Graph.Labelled qualified as LG
 import Axioma.Common
 import Circuit.Agent
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..))
-import Circuit.Poly (Eval (..), monoDir)
+import Circuit.Machine (Body (Body), Moore, Step (..))
+import Circuit.Poly (monoDir)
 import Circuit.Stream (These (..), uncons)
-import Circuit.Tensor (Const (..), unConst)
+import Circuit.Tensor (unConst)
 import Control.Concurrent.STM
-import Control.Monad.State (State, get, gets, modify, put, runState, runStateT)
+import Control.Monad.State (State, get, gets, modify, put, runState)
 import Data.Functor.Identity (Identity (..))
 import Data.Maybe (isNothing)
 import Data.Text (Text)

@@ -1,6 +1,5 @@
 {-# LANGUAGE ExtendedDefaultRules #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
@@ -15,7 +14,6 @@ where
 import Algebra.Graph.Labelled qualified as LG
 import Axioma.Common
 import Circuit.Agent
-import Circuit.Agent.Delivery
 import Circuit.Agent.Graph
   ( AgentGraph,
     AgentRegistry,
@@ -27,7 +25,6 @@ import Circuit.Agent.Graph
     runGraph,
     star,
   )
-import Circuit.Category (K (..))
 import Data.List (sortOn)
 import Data.Map qualified as Map
 import Data.Text (Text)
@@ -199,25 +196,25 @@ graphTopic = do
   let va = LG.vertex "a"
       vb = LG.vertex "b"
       vc = LG.vertex "c"
-      bus = channel "bus"
+      busCh = channel "bus"
       leaf = channel "leaf"
       ins = [mkPost "human" ["bus"] "hi"]
       reg = ackReg ["a", "b", "c"]
 
   -- Pin the mechanism: connect a -> b on "bus"; posts must actually flow.
   assert "wiring produces output (non-vacuous)" $
-    not (null (runG (LG.connect bus va vb) (ackReg ["a", "b"]) ins))
+    not (null (runG (LG.connect busCh va vb) (ackReg ["a", "b"]) ins))
 
   -- overlay commutativity
-  let g = LG.connect bus va vb
+  let g = LG.connect busCh va vb
       h = LG.connect leaf vb vc
   assert "overlay commutativity" $
     runG (LG.overlay g h) reg ins == runG (LG.overlay h g) reg ins
 
   -- overlay associativity (DAG: a->b, b->c, a->c)
-  let x = LG.connect bus va vb
+  let x = LG.connect busCh va vb
       y = LG.connect leaf vb vc
-      z = LG.connect bus va vc
+      z = LG.connect busCh va vc
   assert "overlay associativity" $
     runG (LG.overlay (LG.overlay x y) z) reg ins == runG (LG.overlay x (LG.overlay y z)) reg ins
 
@@ -227,27 +224,27 @@ graphTopic = do
 
   -- connect identities
   assert "connect left identity" $
-    runG (LG.connect bus LG.empty g) reg ins == runG g reg ins
+    runG (LG.connect busCh LG.empty g) reg ins == runG g reg ins
   assert "connect right identity" $
-    runG (LG.connect bus g LG.empty) reg ins == runG g reg ins
+    runG (LG.connect busCh g LG.empty) reg ins == runG g reg ins
 
   -- distributivity
   assert "left distributivity" $
-    runG (LG.connect bus va (LG.overlay vb vc)) reg ins
-      == runG (LG.overlay (LG.connect bus va vb) (LG.connect bus va vc)) reg ins
+    runG (LG.connect busCh va (LG.overlay vb vc)) reg ins
+      == runG (LG.overlay (LG.connect busCh va vb) (LG.connect busCh va vc)) reg ins
   assert "right distributivity" $
-    runG (LG.connect bus (LG.overlay va vb) vc) reg ins
-      == runG (LG.overlay (LG.connect bus va vc) (LG.connect bus vb vc)) reg ins
+    runG (LG.connect busCh (LG.overlay va vb) vc) reg ins
+      == runG (LG.overlay (LG.connect busCh va vc) (LG.connect busCh vb vc)) reg ins
 
   -- decomposition: the left-hand (x->y)->z creates a relay vertex (y both
   -- subscribes and posts on the same channel), so behavioural comparison under
   -- 'runGraph's quiescence loop diverges. State the law structurally on the
   -- graph algebra itself.
   assert "decomposition (structural)" $
-    LG.connect bus (LG.connect bus va vb) vc
+    LG.connect busCh (LG.connect busCh va vb) vc
       == LG.overlay
-        (LG.connect bus va vb)
-        (LG.overlay (LG.connect bus va vc) (LG.connect bus vb vc))
+        (LG.connect busCh va vb)
+        (LG.overlay (LG.connect busCh va vc) (LG.connect busCh vb vc))
 
   -- orchestrator flatten: a nested vertex expands to the same behaviour
   let innerGraph = LG.vertex "x"

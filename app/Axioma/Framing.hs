@@ -1,6 +1,5 @@
 {-# LANGUAGE ExtendedDefaultRules #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
@@ -12,16 +11,11 @@ module Axioma.Framing
   )
 where
 
-import Algebra.Graph.Labelled qualified as LG
 import Axioma.Common
 import Circuit.Agent
 import Circuit.Agent.Framing
 import Circuit.Agent.Framing qualified as Framing
-import Circuit.Agent.Mark (Mark (..), markOf)
 import Circuit.Agent.Query
-import Circuit.Agent.StdPorts
-import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..))
-import Circuit.Stream (These (..), uncons)
 import Cursor (newMem, pollNumberedFile)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -277,64 +271,3 @@ framingTopic = do
     TIO.writeFile logf "x\n"
     r8 <- pollNumberedFile cur logf
     assert "truncation resets to zero" (r8 == [(1, "x")])
-  where
-    -- \| Generic behaviour for Tier A agents (output lists are concatenated).
-    behA :: Moore (,) s (->) a [b] -> s -> [a] -> [b]
-    behA _sys _s0 [] = []
-    behA sys s0 (i : ins) =
-      let (os, s') = runCell sys s0 i
-       in os ++ behA sys s' ins
-
-    -- \| Tool call as data: from = caller, to = [tool], body = args.
-    toolCall :: Text -> Text -> Text -> Post Text
-    toolCall from tool = mkPost from [tool]
-
-    -- \| Agent policy: on a "please sum …" human, emit a calc tool call.
-    callCalc :: [Post Text] -> [Post Text]
-    callCalc hist =
-      let p = peek hist
-          args =
-            if "please sum " `T.isPrefixOf` body p
-              then T.drop (T.length "please sum ") (body p)
-              else body p
-       in [toolCall "j" "calc" args]
-
-    llmJ :: [Post Text] -> [Post Text]
-    llmJ hist =
-      let p = peek hist
-       in [ if "calc:" `T.isPrefixOf` body p
-              then mkPost "j" ["calc"] (T.drop 5 (body p))
-              else
-                mkPost
-                  "j"
-                  [from (peek (dropWhile ((== "calc") . from) hist))]
-                  ("final: " <> body p)
-          ]
-
-    calc :: [Post Text] -> [Post Text]
-    calc hist =
-      let p = peek hist
-       in [ mkPost
-              "calc"
-              [from p]
-              (T.pack (show (sum [Prelude.read (T.unpack w) :: Int | w <- T.words (body p)])))
-          ]
-
-    -- \| Self-loop policy: echo card posts back to the same card; after k
-    -- rounds emit the halt mark; silence once the mark is on the card.
-    selfLoopPolicy :: Text -> Int -> [Post Text] -> [Post Text]
-    selfLoopPolicy name k hist =
-      let p = peek hist
-       in if markOf p == Just Landed
-            then []
-            else
-              if length hist > k
-                then [mkPost name ["xyzzy"] "🟢 landed"]
-                else [mkPost name ["xyzzy"] ("echo: " <> body p)]
-
-    -- \| Neutral card policy: answer human posts once with a halt-marked
-    -- echo back to the card; silence on anything else (including the marks).
-    cardEcho :: Text -> [Post Text] -> [Post Text]
-    cardEcho name hist =
-      let p = peek hist
-       in [mkPost name ["xyzzy"] ("🟢 echo: " <> body p) | from p == "human"]

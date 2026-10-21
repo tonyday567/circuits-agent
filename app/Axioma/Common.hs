@@ -1,6 +1,5 @@
 {-# LANGUAGE ExtendedDefaultRules #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
@@ -39,18 +38,17 @@ module Axioma.Common
   )
 where
 
-import Algebra.Graph.Labelled qualified as LG
 import Circuit.Agent
 import Circuit.Agent.Mark (Mark (..), markOf)
 import Circuit.Agent.StdPorts
 import Circuit.Agent.Tensor
-import Circuit.Machine (Body (Body), Moore, MooreT (..), Poles (..), Step (..), scan)
+import Circuit.Machine (Body (Body), Moore, MooreT (..), scan)
 import Control.Monad (when)
 import Data.List (nub)
 import Data.Text (Text)
 import Data.Text qualified as T
 import System.Directory (doesFileExist, removeFile)
-import System.Exit (ExitCode (..), exitFailure)
+import System.Exit (exitFailure)
 import Prelude hiding (read)
 import Prelude qualified
 

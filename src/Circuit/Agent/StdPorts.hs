@@ -89,11 +89,11 @@ module Circuit.Agent.StdPorts
 where
 
 import Circuit.Agent (PostId)
-import Circuit.Agent.Ends (ChannelPolicy (..), Queue (..), openChannel, openIO)
+import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
 import Circuit.Category (K (..), (.>))
 import Circuit.Machine (Body (Body), Moore, Poles (..))
 import Circuit.Syntax (Syntax (Lift))
-import Circuit.Tensor (Const (..), SemiTensor (..), Tensor, unConst)
+import Circuit.Tensor (Const (..), SemiTensor (..), unConst)
 import Circuit.Trace (Trace)
 import Circuit.Traced (yank)
 import Control.Concurrent (forkIO, killThread, threadDelay)

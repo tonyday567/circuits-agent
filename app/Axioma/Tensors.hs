@@ -1,7 +1,5 @@
 {-# LANGUAGE ExtendedDefaultRules #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
@@ -12,12 +10,11 @@ module Axioma.Tensors
   )
 where
 
-import Algebra.Graph.Labelled qualified as LG
 import Axioma.Common
 import Circuit.Agent
 import Circuit.Agent.Tensor
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body), MooreT (..), Poles (..), Step (..))
+import Circuit.Machine (Step (..))
 import Control.Concurrent (threadDelay)
 import Data.Text (Text)
 
