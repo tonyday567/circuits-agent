@@ -1209,11 +1209,12 @@ batchEnds getBuf putBuf =
     )
 
 -- | @Ends f s@: commit appends a stream; emit peels one token
--- (parser @next@ \/ 'uncons'). Empty stream is quiet — the buffer is left
--- empty and the returned token is 'undefined' because the polymorphic token
--- type has no empty value.  In practice the list 'Shard' layer ensures quiet
--- periods are represented by an empty stream, so this case should not be
--- reached.
+-- (parser @next@ \/ 'uncons'). An empty stream blocks: the buffer is
+-- re-read until a token is available — quiet is not an opinion, matching
+-- the blocking read poles of the process ports. In practice the list
+-- 'Shard' layer ensures quiet periods are represented by an empty stream,
+-- so a composed port only blocks when its upstream genuinely has nothing
+-- to say.
 --
 -- @get@ \/ @put@ hold the stream buffer.
 unbatchEnds ::
@@ -1228,18 +1229,17 @@ unbatchEnds getBuf putBuf =
         xs <- getBuf
         putBuf (xs <> ys)
     )
-    ( do
-        xs <- getBuf
-        case uncons xs of
-          That _ -> do
-            putBuf (nil @f @s)
-            pure (undefined :: s)
-          This x -> do
-            putBuf (nil @f @s)
-            pure x
-          These x rest -> do
-            putBuf rest
-            pure x
+    ( let await = do
+            xs <- getBuf
+            case uncons xs of
+              That _ -> await
+              This x -> do
+                putBuf (nil @f @s)
+                pure x
+              These x rest -> do
+                putBuf rest
+                pure x
+       in await
     )
 
 -- | Token seat around a list 'Shard': buffer on both ends via stream coalgebra.

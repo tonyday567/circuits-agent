@@ -2,6 +2,18 @@
 
 ## unreleased
 
+- **Death honesty (S-a).** Process reads now end by content: the pumper
+  collects the child's exit code and sinks exactly one terminal `Exited`
+  frame after the flushed payloads, so a blocked read on a dead child
+  returns instead of hanging (`Frame a = Payload a | Exited ExitCode` on
+  the read poles). `stdClose` terminates, waits, and reaps (no zombies;
+  `stdProcess` exposes the handle); a setup exception after the spawn
+  terminates and reaps the child (no orphans). The doubles model reality —
+  `echo` blocks instead of throwing, `scriptedDouble` scripts block /
+  die / zero frames / two frames, `unbatchEnds` blocks on a quiet stream
+  instead of returning `undefined`. Shipped mark grammars have no
+  proper-prefix collisions (chunking invariance needs none). Pinned by the
+  S1-S6 oracles in `circuits-agent-axioma`.
 - **M3: `run1` steps once; the monologue is honest.** `run1` no longer
   steps the coalgebra twice per input: the output it reports is the output
   the step produced (verified trace of the old shape:

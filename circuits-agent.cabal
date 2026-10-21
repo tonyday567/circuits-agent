@@ -99,6 +99,7 @@ executable circuits-agent-axioma
     algebraic-graphs >=0.7 && <0.9,
     async >=2.2 && <2.3,
     base >=4.20 && <5,
+    bytestring >=0.11 && <0.13,
     circuits >=0.3 && <0.4,
     circuits-agent,
     circuits-mat,
@@ -106,6 +107,7 @@ executable circuits-agent-axioma
     directory >=1.3 && <1.4,
     filepath >=1.4 && <1.6,
     mtl >=2.2.2 && <2.4,
+    process >=1.6 && <1.7,
     stm >=2.5 && <2.6,
     text >=1.2 && <3,
 

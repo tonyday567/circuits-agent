@@ -58,6 +58,21 @@ import Circuit.Agent.Query
     sessionPrompt,
     synthesisPosts,
   )
+import Circuit.Agent.StdPorts
+  ( DoubleStep (..),
+    Frame (..),
+    ProcConfig (..),
+    ProcMarks (..),
+    StdPorts (..),
+    frameAgent,
+    ghciMarks,
+    hermesMarks,
+    lineMarks,
+    openStdPorts,
+    scriptedDouble,
+    sseMarks,
+  )
+import Circuit.Agent.StdPorts qualified as Ports
 import Circuit.Agent.Tensor
   ( AgentShard,
     awaitShard,
@@ -82,9 +97,10 @@ import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (async, cancel, race)
 import Control.Concurrent.STM
 import Control.Exception (BlockedIndefinitelyOnSTM (..), SomeException, catch, fromException)
-import Control.Monad (replicateM, replicateM_, unless, when)
+import Control.Monad (replicateM, replicateM_, unless, void, when)
 import Control.Monad.State (State, StateT, get, gets, modify, put, runState, runStateT)
 import Cursor (newMem, pollNumberedFile)
+import Data.ByteString qualified as BS
 import Data.Foldable (traverse_)
 import Data.Function (fix)
 import Data.Functor.Identity (Identity (..))
@@ -98,8 +114,9 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
-import System.Exit (exitFailure)
+import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath ((</>))
+import System.Process (getProcessExitCode)
 import System.Timeout (timeout)
 import Prelude hiding (read)
 import Prelude qualified
@@ -1086,6 +1103,145 @@ main = do
        in u [] == That []
             && u [1] == This 1
             && u [1, 2, 3] == These 1 [2, 3]
+
+  -------------------------------------------------------------------------
+  -- Death honesty (S1-S6): exit-as-frame, reap-on-close, honest doubles.
+  --
+  -- A dead child used to go quiet forever: the pump swallowed EOF, the
+  -- queue went silent, and a blocked read hung.  Now the pumper collects
+  -- the exit code and sinks exactly one terminal 'Exited' frame after the
+  -- flushed payloads — a blocked read ends by content.
+  -------------------------------------------------------------------------
+  putStrLn "death honesty"
+
+  -- S1: frame extraction is invariant under byte-chunk boundaries.
+  do
+    let runFrames :: ProcMarks -> [Maybe BS.ByteString] -> [BS.ByteString]
+        runFrames marks inputs = concat (go (BS.empty, []) inputs)
+          where
+            sys = frameAgent marks id
+            go _ [] = []
+            go st (i : is) =
+              let (o, st') = runCell sys st i
+               in o : go st' is
+        whole marks s = runFrames marks [Just s, Nothing]
+        cuts2 s = [[BS.take i s, BS.drop i s] | i <- [0 .. BS.length s]]
+        cuts3 s =
+          [ [a, b, c]
+          | i <- [0 .. BS.length s],
+            let (a, bc) = BS.splitAt i s,
+            j <- [i .. BS.length s],
+            let (b, c) = BS.splitAt (j - i) bc
+          ]
+        samples =
+          [ (lineMarks, "a\nb\n"),
+            (ghciMarks, "x ghci> y \955> z"),
+            (hermesMarks, "output\n❯ rest"),
+            (sseMarks, "event: e\ndata: d\n\nevent: e2\n")
+          ]
+        properPrefixes (ProcMarks ms) =
+          [(m1, m2) | m1 <- ms, m2 <- ms, m1 /= m2, m1 `T.isPrefixOf` m2]
+        colliding = ProcMarks ["\n\n", "\n"]
+    assert "S1 shipped grammars have no proper-prefix mark pairs" $
+      all ((null . properPrefixes) . fst) samples
+    assert "S1 frames are invariant under every 2- and 3-cut" $
+      all
+        (\(marks, s) -> all (\cs -> runFrames marks (map Just cs ++ [Nothing]) == whole marks s) (cuts2 s ++ cuts3 s))
+        samples
+    -- claude's counterexample, pinned so the guard above is not vacuous:
+    -- with a prefix collision, the cut a\n | \nb emits ["a","","b"],
+    -- not ["a","b"].
+    assert "S1 the prefix collision breaks the cut (the guard is load-bearing)" $
+      runFrames colliding [Just "a\n", Just "\nb", Nothing]
+        /= runFrames colliding [Just "a\n\nb", Nothing]
+
+  -- S2: death is content — a dead child delivers its exit code.
+  do
+    pp <- runK (eval (openStdPorts id id (ProcConfig "sh" ["-c", "exit 3"] "." lineMarks))) ()
+    m <- timeout 5_000_000 (runK (emit (stdOut pp)) ())
+    assert "S2 a dead child delivers the terminal frame with exit 3" $
+      m == Just (Exited (ExitFailure 3))
+    stdClose pp
+
+  -- S3: close reaps — terminate, wait, no zombie.
+  do
+    pp <- runK (eval (openStdPorts id id (ProcConfig "sh" ["-c", "sleep 30"] "." lineMarks))) ()
+    mClose <- timeout 5_000_000 (void (stdClose pp))
+    assert "S3 stdClose terminates and reaps within the bound" $ isJust mClose
+    case stdProcess pp of
+      Just ph -> do
+        mc <- getProcessExitCode ph
+        assert "S3 the child is reaped: getProcessExitCode returns Just" $ isJust mc
+      Nothing -> assert "S3 openStdPorts carries the process handle" False
+
+  -- S5: a dribbled frame — partial bytes, a pause, then the mark — still
+  -- arrives whole, exactly once.
+  do
+    pp <-
+      runK
+        ( eval
+            ( openStdPorts
+                id
+                id
+                (ProcConfig "sh" ["-c", "printf 'par'; sleep 0.2; printf 'tial\\n'; exec sleep 5"] "." lineMarks)
+            )
+        )
+        ()
+    f1 <- timeout 5_000_000 (runK (emit (stdOut pp)) ())
+    assert "S5 a dribbled frame arrives whole, exactly once" $
+      f1 == Just (Payload "partial")
+    stdClose pp
+
+  -- S6: honest doubles — block, die, zero frames, two frames.
+  do
+    pp <- Ports.echo pure :: IO (StdPorts String String ())
+    mBlocked <- timeout 200_000 (runK (emit (stdOut pp)) ())
+    assert "S6 a read before any write blocks" $ mBlocked == Nothing
+    runK (commit (stdIn pp)) "hi"
+    f <- runK (emit (stdOut pp)) ()
+    assert "S6 the echo replies after the write" $ f == Payload "hi"
+
+    sp <- scriptedDouble [Quiet, Reply2 (++ "1") (++ "2"), Die (ExitFailure 7)]
+    runK (commit (stdIn sp)) "a"
+    mq <- timeout 200_000 (runK (emit (stdOut sp)) ())
+    assert "S6 Quiet answers nothing (the read blocks)" $ mq == Nothing
+    runK (commit (stdIn sp)) "b"
+    g1 <- runK (emit (stdOut sp)) ()
+    g2 <- runK (emit (stdOut sp)) ()
+    assert "S6 Reply2 emits two frames for one token" $
+      [g1, g2] == [Payload "b1", Payload "b2"]
+    runK (commit (stdIn sp)) "c"
+    g3 <- runK (emit (stdOut sp)) ()
+    assert "S6 Die delivers the terminal frame once" $ g3 == Exited (ExitFailure 7)
+    runK (commit (stdIn sp)) "d"
+    mAfter <- timeout 200_000 (runK (emit (stdOut sp)) ())
+    assert "S6 reads block after death" $ mAfter == Nothing
+
+    -- unbatchEnds on a quiet stream blocks instead of returning undefined.
+    let quietAgent :: Agent (->) [Post Text] (Post Text) [Post Text]
+        quietAgent = cellToAgent (tape (const []))
+        quietShard :: Shard (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) [Post Text] [Post Text]
+        quietShard =
+          agentShard
+            (gets (\(seat, _, _) -> seat))
+            (\seat -> modify (\(_, i, o) -> (seat, i, o)))
+            quietAgent
+        quietPort :: Port (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) Text
+        quietPort =
+          portShard
+            (gets (\(_, i, _) -> i))
+            (\i -> modify (\(seat, _, o) -> (seat, i, o)))
+            (gets (\(_, _, o) -> o))
+            (\o -> modify (\(seat, i, _) -> (seat, i, o)))
+            quietShard
+        seed :: (AgentSeat [Post Text] Text, [Post Text], [Post Text])
+        seed = (AgentSeat [] [], [], [])
+        qIn = mkPost "human" ["j"] "quiet-ask"
+    mQuiet <-
+      timeout 200_000 $ do
+        let (pOut, _) = runState (runK (close quietPort) qIn) seed
+        T.length (body (pOut :: Post Text)) `seq` pure ()
+    assert "S6 unbatchEnds on a quiet stream blocks (no undefined)" $ mQuiet == Nothing
 
   -------------------------------------------------------------------------
   -- Tool call: for an Agent, a tool call is a Post (to = [tool], body = args).

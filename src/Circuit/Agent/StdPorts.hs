@@ -34,8 +34,16 @@
 -- 'openStdPorts' returns a @'Loop' 'Either'@ where the feedback state is
 -- the process.  'Left' = process alive, 'Right' = ports delivered.  The
 -- 'StdPorts' ends are self-contained — they capture the pipe handles, the
--- queues, and the pump threads.  'stdClose' terminates the process, kills
--- the pumps, and closes the handles.
+-- queues, and the pump threads.  'stdClose' terminates the process, reaps
+-- the exit (no zombies), kills the pumps, and closes the handles.
+--
+-- = Death is content
+--
+-- A dead child goes quiet today-or-never: the pumper turns EOF or
+-- 'IOException' into exactly one terminal frame ('Exited' with the exit
+-- code, after 'waitForProcess'), sunk into the same queue as the
+-- dialogue.  A read blocked while the child lives therefore ends by
+-- content when the child dies — the terminal frame is the last token.
 module Circuit.Agent.StdPorts
   ( -- * Configuration
     ProcConfig (..),
@@ -50,6 +58,7 @@ module Circuit.Agent.StdPorts
     sseMarks,
 
     -- * Process ports
+    Frame (..),
     StdPorts (..),
     openStdPorts,
 
@@ -66,6 +75,8 @@ module Circuit.Agent.StdPorts
 
     -- * In-memory test harness
     echo,
+    DoubleStep (..),
+    scriptedDouble,
   )
 where
 
@@ -76,17 +87,18 @@ import Circuit.Syntax (Syntax (Lift))
 import Circuit.Tensor (Const (..), SemiTensor (..), Tensor, unConst)
 import Circuit.Trace (Trace)
 import Circuit.Traced (yank)
-import Control.Concurrent (forkIO, killThread)
-import Control.Exception (IOException, try)
-import Control.Monad (void)
+import Control.Concurrent (forkIO, killThread, threadDelay)
+import Control.Concurrent.STM (atomically, newTQueueIO, readTQueue, writeTQueue)
+import Control.Exception (IOException, onException, try)
+import Control.Monad (forever, unless, void)
 import Data.ByteString qualified as BS
 import Data.Foldable (traverse_)
 import Data.IORef
 import Data.List (minimumBy)
-import Data.Maybe (fromMaybe)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text.Encoding (encodeUtf8)
+import System.Exit (ExitCode (..))
 import System.IO
   ( BufferMode (NoBuffering),
     Handle,
@@ -167,6 +179,14 @@ sseMarks = ProcMarks ["\n\n"]
 -- a valid multi-byte encoding never occurs inside another character, so a
 -- byte-level mark cannot false-match, and a mark split across read chunks
 -- is found once the buffer accumulates its final byte.
+--
+-- Chunking invariance: the frames of a chunked stream equal the frames of
+-- its concatenation, for every cut, iff no mark is a proper prefix of
+-- another mark.  (Counterexample: marks @[\"\\n\\n\", \"\\n\"]@, input
+-- @"a\\n\\nb"@ cut after @"a\\n"@ yields @[\"a\", \"\", \"b\"]@ instead of
+-- @[\"a\", \"b\"]@ — the short mark fires before the long one can span the
+-- chunk boundary.)  The shipped grammars satisfy the condition — pinned
+-- by the S1 oracles — so no longest-match hold-back is implemented.
 splitFrame :: ProcMarks -> BS.ByteString -> Maybe (BS.ByteString, BS.ByteString)
 splitFrame (ProcMarks marks) buf =
   case hits of
@@ -188,17 +208,28 @@ splitFrame (ProcMarks marks) buf =
 -- Process ports
 -- ---------------------------------------------------------------------------
 
+-- | A frame on a process stream: payload content, or the terminal
+-- exit-as-frame.  The child's death rides the same pole as the dialogue:
+-- exactly one 'Exited' frame, after every flushed payload, so a read
+-- blocked on a dying child ends by content instead of hanging.
+data Frame a = Payload a | Exited ExitCode
+  deriving (Eq, Show, Functor)
+
 -- | A process token with three matched poles: stdin write, stdout read,
 -- and stderr read.
 --
 -- The read poles block: a read returns the next complete frame, waiting on
 -- the queue when the stream has not produced one yet.  There is no
--- empty-read result — quiet is not an opinion here.
+-- empty-read result — quiet is not an opinion, and death is a frame.
 data StdPorts a b c = StdPorts
   { stdIn :: Poles () (K IO) a (),
-    stdOut :: Poles () (K IO) () b,
-    stdErr :: Poles () (K IO) () c,
-    stdClose :: IO ()
+    stdOut :: Poles () (K IO) () (Frame b),
+    stdErr :: Poles () (K IO) () (Frame c),
+    stdClose :: IO (),
+    -- | The child's handle, where there is one — in-memory doubles have
+    -- no process.  After 'stdClose' the exit is reaped, so
+    -- 'System.Process.getProcessExitCode' returns 'Just'.
+    stdProcess :: Maybe ProcessHandle
   }
 
 -- | Spawn a process and open its ports as a 'Trace' 'Either'.
@@ -207,7 +238,8 @@ data StdPorts a b c = StdPorts
 -- @decode@ converts a framed payload's bytes back to a token.
 --
 -- The feedback state is the process.  'Left' = process alive, 'Right' =
--- ports delivered, resources captured by 'stdClose'.
+-- ports delivered, resources captured by 'stdClose'.  If setup fails
+-- after the spawn, the child is terminated and reaped — no orphans.
 openStdPorts ::
   (a -> BS.ByteString) ->
   (BS.ByteString -> a) ->
@@ -224,36 +256,41 @@ openStdPorts encode decode cfg = yank (Lift (K step))
                 std_err = CreatePipe
               }
       (Just stdinH, Just stdoutH, Just stderrH, ph) <- createProcess procSpec
-      hSetBuffering stdinH NoBuffering
-      hSetBuffering stdoutH NoBuffering
-      hSetBuffering stderrH NoBuffering
+      flip onException (terminateProcess ph >> void (waitForProcess ph)) $ do
+        hSetBuffering stdinH NoBuffering
+        hSetBuffering stdoutH NoBuffering
+        hSetBuffering stderrH NoBuffering
 
-      -- Mark-carrying stdout uses the linear (empty-residual) mediator so
-      -- halt marks are preserved in order.  Diagnostic stderr uses a bounded
-      -- weakening mediator: old diagnostics may be dropped when the reader
-      -- falls behind, but the process dialogue must never lose a halt.
-      qOut <- openChannel Linear
-      qErr <- openChannel (NewestN 100)
-      outTid <- forkIO (pumpFrames (procMarks cfg) decode stdoutH (sink qOut))
-      errTid <- forkIO (pumpFrames lineMarks decode stderrH (sink qErr))
+        -- Mark-carrying stdout uses the linear (empty-residual) mediator so
+        -- halt marks are preserved in order — now over 'Frame', so the
+        -- terminal frame cannot be dropped either.  Diagnostic stderr uses a
+        -- bounded weakening mediator: old diagnostics may be dropped when
+        -- the reader falls behind, but the process dialogue must never lose
+        -- a halt.
+        qOut <- openChannel Linear :: IO (Poles () (K IO) (Frame a) (Frame a))
+        qErr <- openChannel (NewestN 100) :: IO (Poles () (K IO) (Frame a) (Frame a))
+        outTid <- forkIO (pumpFrames (procMarks cfg) decode stdoutH ph (sink qOut))
+        errTid <- forkIO (pumpFrames lineMarks decode stderrH ph (sink qErr))
 
-      let writeIn =
-            K $ \a -> do
-              BS.hPutStr stdinH (encode a <> "\n")
-              hFlush stdinH
-          noWrite = K $ \_ -> pure ()
-          ports =
-            StdPorts
-              { stdIn = Poles writeIn writeIn noWrite,
-                stdOut = Poles noWrite noWrite (emit qOut),
-                stdErr = Poles noWrite noWrite (emit qErr),
-                stdClose = do
-                  void $ try @IOException (hClose stdinH)
-                  terminateProcess ph
-                  killThread outTid
-                  killThread errTid
-              }
-      pure (Left ports)
+        let writeIn =
+              K $ \a -> do
+                BS.hPutStr stdinH (encode a <> "\n")
+                hFlush stdinH
+            noWrite = K $ \_ -> pure ()
+            ports =
+              StdPorts
+                { stdIn = Poles writeIn writeIn noWrite,
+                  stdOut = Poles noWrite noWrite (emit qOut),
+                  stdErr = Poles noWrite noWrite (emit qErr),
+                  stdClose = do
+                    void $ try @IOException (hClose stdinH)
+                    terminateProcess ph
+                    _ <- waitForProcess ph
+                    killThread outTid
+                    killThread errTid,
+                  stdProcess = Just ph
+                }
+        pure (Left ports)
     step (Left ports) =
       pure (Right ports)
 
@@ -296,11 +333,13 @@ runCell :: Moore (,) s (->) i o -> s -> i -> (o, s)
 runCell (Body _ k o) s i = let s' = k (s, i) in (unConst (o s'), s')
 
 -- | The pumper: the IO interpretation of 'frameAgent' at a 'Handle'.
--- Blocking reads deliver percepts; payloads are sunk into the queue.
--- A mark split across reads completes in the buffer; end-of-stream is the
--- 'Nothing' percept, flushing a partial frame as the final token.
-pumpFrames :: ProcMarks -> (BS.ByteString -> a) -> Handle -> (a -> IO ()) -> IO ()
-pumpFrames marks decode h snk = go (BS.empty, [])
+-- Blocking reads deliver percepts; payloads are sunk into the queue as
+-- 'Payload' frames.  A mark split across reads completes in the buffer;
+-- end-of-stream is the 'Nothing' percept, flushing a partial frame as
+-- the final payload, after which the exit code is collected and sunk as
+-- exactly one terminal 'Exited' frame.
+pumpFrames :: ProcMarks -> (BS.ByteString -> a) -> Handle -> ProcessHandle -> (Frame a -> IO ()) -> IO ()
+pumpFrames marks decode h ph snk = go (BS.empty, [])
   where
     sys = frameAgent marks decode
     go st = do
@@ -311,28 +350,33 @@ pumpFrames marks decode h snk = go (BS.empty, [])
               | BS.null bs -> Nothing
               | otherwise -> Just bs
           (outs, st') = runCell sys st input
-      traverse_ snk outs
+      traverse_ (snk . Payload) outs
       case input of
-        Nothing -> pure ()
         Just _ -> go st'
+        Nothing -> do
+          code <- waitForProcess ph
+          snk (Exited code)
 
 -- ---------------------------------------------------------------------------
 -- Ends / seat view
 -- ---------------------------------------------------------------------------
 
--- | Client view of a process: two 'Poles' sharing stdin, plus resource close.
+-- | Client view of a process: two 'Poles' sharing stdin, plus resource
+-- close.  The read poles deliver 'Frame's: payload content, or the
+-- terminal 'Exited' frame when the child dies — death ends a blocked read
+-- by content.
 data ProcEnds a b c = ProcEnds
-  { procStdio :: Poles () (K IO) a b,
-    procStderr :: Poles () (K IO) a c,
+  { procStdio :: Poles () (K IO) a (Frame b),
+    procStderr :: Poles () (K IO) a (Frame c),
     procClose :: IO ()
   }
 
 -- | Stdin write + stdout read as matched 'Poles'.
-stdioEnds :: StdPorts a b c -> Poles () (K IO) a b
+stdioEnds :: StdPorts a b c -> Poles () (K IO) a (Frame b)
 stdioEnds pp = Poles (commit (stdIn pp)) (commit (stdIn pp)) (emit (stdOut pp))
 
 -- | Stdin write + stderr read as matched 'Poles'.
-stderrEnds :: StdPorts a b c -> Poles () (K IO) a c
+stderrEnds :: StdPorts a b c -> Poles () (K IO) a (Frame c)
 stderrEnds pp = Poles (commit (stdIn pp)) (commit (stdIn pp)) (emit (stdErr pp))
 
 -- | Open a process and return the dual-seat client view as a 'Trace' 'Either'.
@@ -352,8 +396,9 @@ openProc encode decode cfg =
             procClose = stdClose pp
           }
 
--- | The wire view of 'StdPorts': one nested 'tensor' morphism.
-portsEnds :: StdPorts a b c -> Trace (,) (K IO) (a, ((), ())) ((), (b, c))
+-- | The wire view of 'StdPorts': one nested 'tensor' morphism.  The read
+-- wires carry 'Frame's, terminal exit included.
+portsEnds :: StdPorts a b c -> Trace (,) (K IO) (a, ((), ())) ((), (Frame b, Frame c))
 portsEnds pp = tensor commitM (tensor outM errM)
   where
     commitM = Lift (commit (stdIn pp))
@@ -367,28 +412,85 @@ portsEnds pp = tensor commitM (tensor outM errM)
 -- | An in-memory echo repl: write a token, read the transformed result.
 -- No process, no files.  For fast bus-connector testing.
 --
+-- The double models reality: a read before any write /blocks/ (quiet is
+-- not an error), and 'stdClose' is a no-op — an in-memory double has no
+-- process to reap.  See 'scriptedDouble' for death, silence, and bursts.
+--
 -- >>> pp <- echo pure :: IO (StdPorts String String ())
 -- >>> runK (commit (stdIn pp)) "hi"
 -- >>> runK (emit (stdOut pp)) ()
--- "hi"
+-- Payload "hi"
 echo :: (a -> IO a) -> IO (StdPorts a a ())
 echo f = do
-  ref <- newIORef Nothing
+  q <- newTQueueIO
   let writeIn =
         K $ \a -> do
           result <- f a
-          writeIORef ref (Just result)
+          atomically (writeTQueue q (Payload result))
       noWrite = K $ \_ -> pure ()
-      readOut =
-        K $ \_ -> do
-          m <- readIORef ref
-          writeIORef ref Nothing
-          pure (fromMaybe (error "echo: no input yet") m)
+      readOut = K $ \_ -> atomically (readTQueue q)
+      readErr = K $ \_ -> forever (threadDelay maxBound)
       ports =
         StdPorts
           { stdIn = Poles writeIn writeIn noWrite,
             stdOut = Poles noWrite noWrite readOut,
-            stdErr = Poles noWrite noWrite noWrite,
-            stdClose = pure ()
+            stdErr = Poles noWrite noWrite readErr,
+            stdClose = pure (),
+            stdProcess = Nothing
+          }
+  pure ports
+
+-- | One scripted step of an in-memory double.
+data DoubleStep a
+  = -- | Answer the written token with the transformed token.
+    Reply (a -> a)
+  | -- | Answer nothing: the read blocks, like a quiet child.
+    Quiet
+  | -- | Die: the read gets the terminal 'Exited' frame, once.
+    Die ExitCode
+  | -- | Answer one token with two frames, like a chatty child.
+    Reply2 (a -> a) (a -> a)
+
+-- | A scripted in-memory double on the same pole shapes as a real port:
+-- each written token advances the script by one step.  After 'Die' the
+-- terminal frame is delivered once and further reads block, matching the
+-- real pump.  The script repeats from the start when exhausted.
+--
+-- This is the honest double the harness was missing: block, die, emit
+-- zero frames, emit two frames — everything oracled against the same
+-- 'Frame' vocabulary as a live process.
+scriptedDouble :: [DoubleStep a] -> IO (StdPorts a a ())
+scriptedDouble script = do
+  q <- newTQueueIO
+  cursor <- newIORef 0
+  dead <- newIORef False
+  let step a = do
+        d <- readIORef dead
+        unless d $
+          unless (null script) $ do
+            i <- readIORef cursor
+            writeIORef cursor ((i + 1) `mod` length script)
+            case drop i script of
+              (Reply g : _) -> atomically (writeTQueue q (Payload (g a)))
+              (Quiet : _) -> pure ()
+              (Die code : _) -> do
+                writeIORef dead True
+                atomically (writeTQueue q (Exited code))
+              (Reply2 g1 g2 : _) ->
+                atomically $ do
+                  writeTQueue q (Payload (g1 a))
+                  writeTQueue q (Payload (g2 a))
+              [] -> pure ()
+      writeIn = K step
+      noWrite = K $ \_ -> pure ()
+      readOut = K $ \_ -> atomically (readTQueue q)
+      readErr = K $ \_ -> forever (threadDelay maxBound)
+      ports =
+        StdPorts
+          { stdIn = Poles writeIn writeIn noWrite,
+            stdOut = Poles noWrite noWrite readOut,
+            stdErr = Poles noWrite noWrite readErr,
+            stdClose = pure (),
+            stdProcess = Nothing
           }
   pure ports
