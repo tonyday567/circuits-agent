@@ -23,8 +23,7 @@
 --
 -- Symmetric in the common log case: commit a list of posts, emit a list of
 -- posts.  One-post reality (hit enter) is not another type — lift with @(:[])@
--- on the commit side (@prefixIn@).  'LogEnds' is the same shape (dual seat on
--- the log).  Opacity is commit\/emit only; no interior.
+-- on the commit side.  Opacity is commit\/emit only; no interior.
 --
 -- Change of base (circuits-parser sense): 'agentShard' reinterprets a pure
 -- 'Agent' at @K m@ ends — same Moore citizen, effectful interface.
@@ -84,9 +83,7 @@ module Circuit.Agent
 
     -- * Effectful ends (symmetric streams)
     Shard,
-    LogEnds,
     shard,
-    logEnds,
 
     -- * Agent as Shard (change of base into K)
     AgentSeat (..),
@@ -113,10 +110,6 @@ module Circuit.Agent
     loopSubs,
     loopWith,
     loopWithSubs,
-    loops,
-    loopsSubs,
-    loopHetero,
-    loopHeteroSubs,
     meetingLoop,
     meetingLoopSubs,
     seedAgentState,
@@ -124,9 +117,6 @@ module Circuit.Agent
 
     -- * Derivations
     Derivation (..),
-
-    -- * Session assembly
-    session,
 
     -- * Running one step
     run1,
@@ -154,12 +144,7 @@ module Circuit.Agent
 
     -- * Container dial (Bag / Seq log algebra)
     Bag (..),
-    TurnLog,
-    emptyBag,
-    singletonBag,
-    insertBag,
     toBag,
-    fromBag,
 
     -- * Behaviour (stream semantics)
     Beh,
@@ -199,7 +184,7 @@ module Circuit.Agent
   )
 where
 
-import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, writeHaltChannel)
+import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, unitEndsSTM, writeHaltChannel)
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
 import Circuit.Machine (Body (Body), Moore, Poles (..), Step (..), close, compose, iomap, polesK)
@@ -363,31 +348,16 @@ coneByIndex prior = cone (indexToIdMap prior)
 type Log f = f
 
 -- | A bag: finite multiset.  Order is forgotten; multiplicity is kept.
+-- Used by the fleet's axioma oracles to compare output sets.
 newtype Bag a = Bag (Map a Int)
   deriving (Eq, Show)
-
--- | The empty bag.
-emptyBag :: Bag a
-emptyBag = Bag Map.empty
-
--- | One element.
-singletonBag :: a -> Bag a
-singletonBag a = Bag (Map.singleton a 1)
-
--- | Insert one element.
-insertBag :: (Ord a) => a -> Bag a -> Bag a
-insertBag a (Bag m) = Bag (Map.insertWith (+) a 1 m)
 
 -- | Fold a list into a bag, forgetting order.
 toBag :: (Ord a) => [a] -> Bag a
 toBag = foldr insertBag emptyBag
-
--- | Expand a bag into a list in some deterministic order.
-fromBag :: Bag a -> [a]
-fromBag (Bag m) = concatMap (\(a, n) -> replicate n a) (Map.toList m)
-
--- | Log algebra: a sequence of bags, one bag per turn.
-type TurnLog a = Seq (Bag a)
+  where
+    insertBag x (Bag m) = Bag (Map.insertWith (+) x 1 m)
+    emptyBag = Bag Map.empty
 
 -- | Agent: a monomial body with free carrier, polymorphic in the base arrow.
 --
@@ -422,16 +392,9 @@ cellToAgent (Body _ k o) = Step $ \(s, d) -> case d of
 -- Emit is an onslaught of posts (empty = quiet \/ done for that poll).
 type Shard m a b = Poles () (K m) a b
 
--- | Same ends shape as 'Shard' — dual seat on the log (journal 013).
-type LogEnds m a b = Shard m a b
-
 -- | Build a 'Shard' from monadic commit and emit actions.
 shard :: (a -> m ()) -> m a -> Shard m a a
 shard = polesK
-
--- | Build log ends (same as 'shard'; dual seat).
-logEnds :: (a -> m ()) -> m a -> LogEnds m a a
-logEnds = polesK
 
 -- | Born empty, conses each received input onto its history.
 --
@@ -563,10 +526,6 @@ watch subs t = go t []
 -- | Write end of the log: commit a post.
 post :: (Cons f (Post a)) => Post a -> Log f -> Log f
 post = cons
-
--- | Per-agent session assembly: the bodies an agent actually sees.
-session :: (Uncons f (Post a)) => [Name] -> Log f -> [a]
-session subs = map body . watch subs
 
 -- | One delivery round: peel one addressed post, step the machine, 'post' each output.
 --
@@ -771,94 +730,6 @@ meetingPass roster (states, lg, derivs) = foldl' meetingStep (states, lg, derivs
         )
         states'
 
--- | Transitive unfolding of a meeting.
---
--- Each element is one state of the round-robin schedule.  Divergence becomes
--- observable (the list is infinite) and 'loop' is simply the last quiescent
--- element.  The third component collects one 'Derivation' for every post that
--- was processed by 'turn' across the schedule.
---
--- Backwards-compatible wrapper; for explicit subscriptions use 'loopsSubs'.
-loops ::
-  forall a s f.
-  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
-  [(Name, Agent (->) s (Post a) [Post a])] ->
-  [(Name, AgentState s f)] ->
-  Log f ->
-  [([(Name, AgentState s f)], Log f, [Derivation a])]
-loops roster = loopsSubs [(n, [n], a) | (n, a) <- roster]
-
--- | Multi-seat-card variant of 'loops'.
-loopsSubs ::
-  forall a s f.
-  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
-  [RosterEntry s a] ->
-  [(Name, AgentState s f)] ->
-  Log f ->
-  [([(Name, AgentState s f)], Log f, [Derivation a])]
-loopsSubs roster states0 log0 = (states0, log0, []) : go states0 log0 []
-  where
-    subMap = Map.fromList [(n, subs) | (n, subs, _) <- roster]
-
-    go :: [(Name, AgentState s f)] -> Log f -> [Derivation a] -> [([(Name, AgentState s f)], Log f, [Derivation a])]
-    go states lg derivs
-      | not (any (hasPending @a . snd) states) = []
-      | otherwise =
-          let (states', lg', derivs') = foldl' runStep (states, lg, derivs) roster
-           in (states', lg', derivs') : go states' lg' derivs'
-
-    runStep :: ([(Name, AgentState s f)], Log f, [Derivation a]) -> RosterEntry s a -> ([(Name, AgentState s f)], Log f, [Derivation a])
-    runStep (states, lg, derivs) (name, _subs, agent) =
-      case lookup name states of
-        Nothing -> (states, lg, derivs)
-        Just st
-          | hasPending @a st ->
-              let (st', lg', md) = turnAs name agent st lg
-                  newCount = streamLength @f @(Post a) lg' - streamLength @f @(Post a) lg
-                  newPosts = takeStream @f @(Post a) newCount lg'
-                  states'' = foldl' routePost (updateState name st' states) newPosts
-                  derivs' = maybe derivs (\d -> derivs ++ [d]) md
-               in (states'', lg', derivs')
-          | otherwise -> (states, lg, derivs)
-
-    updateState :: Name -> AgentState s f -> [(Name, AgentState s f)] -> [(Name, AgentState s f)]
-    updateState name st' = map (\(n, s) -> if n == name then (n, st') else (n, s))
-
-    routePost :: [(Name, AgentState s f)] -> Post a -> [(Name, AgentState s f)]
-    routePost states p =
-      map
-        ( \(n, st) ->
-            if deliversTo p (Map.findWithDefault [n] n subMap)
-              then (n, st {asInbox = appendInbox p (asInbox st)})
-              else (n, st)
-        )
-        states
-
--- | Resumable 'loop' with a heterogeneous roster: each agent supplies its own
--- initial carrier, while inboxes are still seeded from the shared log.
---
--- Backwards-compatible wrapper; for explicit subscriptions use 'loopHeteroSubs'.
-loopHetero ::
-  forall a s f.
-  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
-  [(Name, s, Agent (->) s (Post a) [Post a])] ->
-  Log f ->
-  ([(Name, AgentState s f)], Log f, [Derivation a])
-loopHetero roster = loopHeteroSubs [(n, s, [n], a) | (n, s, a) <- roster]
-
--- | Multi-seat-card variant of 'loopHetero'.
-loopHeteroSubs ::
-  forall a s f.
-  (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
-  [(Name, s, [Name], Agent (->) s (Post a) [Post a])] ->
-  Log f ->
-  ([(Name, AgentState s f)], Log f, [Derivation a])
-loopHeteroSubs roster log0 =
-  loopWithSubs
-    [(n, subs, a) | (n, _, subs, a) <- roster]
-    [(n, AgentState s (seedInbox @a subs log0)) | (n, s, subs, _) <- roster]
-    log0
-
 -- | Run a monomial system for one step.
 --
 -- One coalgebra step: the coalgebra's own output, paired with its
@@ -965,10 +836,6 @@ stepsS sys = go
 -- | Run an STM agent over a list of inputs, crossing into IO at the boundary.
 runAgentS :: AgentS s a -> s -> [a] -> IO ([a], s)
 runAgentS sys s0 ins = (\(s, os) -> (os, s)) <$> atomically (stepsS sys s0 ins)
-
--- | Unit poles for lifting single-token reads/writes out of a 'Poles' value.
-unitEndsSTM :: Poles () (K STM) () ()
-unitEndsSTM = polesK (const (pure ())) (pure ())
 
 -- | Read one token from an STM pole.
 readEndSTM :: Poles () (K STM) a a -> STM a

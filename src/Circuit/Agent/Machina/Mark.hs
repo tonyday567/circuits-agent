@@ -22,6 +22,7 @@ module Circuit.Agent.Machina.Mark
   )
 where
 
+import Circuit.Agent.Ends (unitEndsSTM)
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
 import Circuit.Machine (Poles (..), close, polesK)
@@ -31,10 +32,6 @@ import Circuit.Traced (yank)
 import Control.Concurrent.STM (STM)
 import Data.Function (fix)
 import Prelude hiding (read)
-
--- | Unit poles for plugging the unused slot when reading or writing one end.
-endsU :: Poles () (K STM) () ()
-endsU = polesK (const (pure ())) (pure ())
 
 -- | Spin until the mark is /read/: the builder posts its silence as a token,
 -- and the runner halts on that read.  No 'orElse' — absence is not an opinion
@@ -46,7 +43,7 @@ endsU = polesK (const (pure ())) (pure ())
 -- the mark are never consumed.
 spinMark :: (a -> Bool) -> (s -> a -> s) -> Poles () (K STM) a a -> K STM s s
 spinMark isMark step e = fix $ \go -> K $ \s -> do
-  a <- runK (close (Poles (commit endsU) (commit endsU) (emit e))) ()
+  a <- runK (close (Poles (commit unitEndsSTM) (commit unitEndsSTM) (emit e))) ()
   if isMark a
     then pure s
     else runK go (step s a)
@@ -57,7 +54,7 @@ spinMark isMark step e = fix $ \go -> K $ \s -> do
 markFrame :: (a -> Bool) -> (s -> a -> s) -> Poles () (K STM) a a -> K STM (Either s s) (Either s s)
 markFrame isMark step e = K $ \es -> do
   let s = either id id es
-  a <- runK (close (Poles (commit endsU) (commit endsU) (emit e))) ()
+  a <- runK (close (Poles (commit unitEndsSTM) (commit unitEndsSTM) (emit e))) ()
   pure
     ( if isMark a
         then Right s

@@ -33,6 +33,7 @@ module Circuit.Agent.Ends
 
     -- * STM @Ends@
     openSTM,
+    unitEndsSTM,
 
     -- * IO @Ends@
     openIO,
