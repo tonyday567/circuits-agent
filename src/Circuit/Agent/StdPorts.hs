@@ -621,7 +621,7 @@ data DoubleStep a
 -- This is the honest double the harness was missing: block, die, emit
 -- zero frames, emit two frames — everything oracled against the same
 -- 'Frame' vocabulary as a live process.
-scriptedDouble :: [DoubleStep a] -> IO (StdPorts a a ())
+scriptedDouble :: [DoubleStep a] -> IO (StdPorts a a c)
 scriptedDouble script = do
   q <- newTQueueIO
   cursor <- newIORef 0
