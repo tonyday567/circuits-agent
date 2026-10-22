@@ -102,9 +102,7 @@ executable circuits-agent-axioma
     Axioma.Marks
     Axioma.Ports
     Axioma.Shards
-    Axioma.ShardTensors
     Axioma.Tape
-    Axioma.Tensors
     Axioma.Turns
 
   build-depends:

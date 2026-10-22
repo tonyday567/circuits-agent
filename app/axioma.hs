@@ -14,10 +14,8 @@ import Axioma.Graph (graphTopic)
 import Axioma.Loops (loopsTopic)
 import Axioma.Marks (marksTopic)
 import Axioma.Ports (portsTopic)
-import Axioma.ShardTensors (shardTensorsTopic)
 import Axioma.Shards (shardsTopic)
 import Axioma.Tape (tapeTopic)
-import Axioma.Tensors (tensorsTopic)
 import Axioma.Turns (turnsTopic)
 import Options.Applicative
 import Prelude hiding (id, (.))
@@ -30,10 +28,8 @@ data Topic
   | Shards
   | Ports
   | Graph
-  | Tensors
   | Loops
   | Marks
-  | ShardTensors
   | Framing
   deriving (Show, Eq, Bounded, Enum)
 
@@ -45,10 +41,8 @@ topicName Turns = "turns"
 topicName Shards = "shards"
 topicName Ports = "ports"
 topicName Graph = "graph"
-topicName Tensors = "tensors"
 topicName Loops = "loops"
 topicName Marks = "marks"
-topicName ShardTensors = "shardtensors"
 topicName Framing = "framing"
 
 topicDesc :: Topic -> String
@@ -59,10 +53,8 @@ topicDesc Turns = "turn and meeting laws: turn integrity, loop quiescence, multi
 topicDesc Shards = "shard combinators, agent-as-shard, branch agent, token ports"
 topicDesc Ports = "process ports: death honesty (S1-S3/S5/S6), merged stdio (S4), nonce turns (T1)"
 topicDesc Graph = "wiring-graph oracles and graph-algebra laws (graph-axioma merged)"
-topicDesc Tensors = "race/await tensors at every level, S/X agents"
 topicDesc Loops = "self-loops: S-agent, spikes, Loop Either citizen"
 topicDesc Marks = "the mark grammar, halt oracles, content-decided turns"
-topicDesc ShardTensors = "shard-level tensor laws"
 topicDesc Framing = "framing, query adapters, ancestry oracles, cursors"
 
 topicParser :: Parser Topic
@@ -98,10 +90,8 @@ runTopic Turns = turnsTopic
 runTopic Shards = shardsTopic
 runTopic Ports = portsTopic
 runTopic Graph = graphTopic
-runTopic Tensors = tensorsTopic
 runTopic Loops = loopsTopic
 runTopic Marks = marksTopic
-runTopic ShardTensors = shardTensorsTopic
 runTopic Framing = framingTopic
 
 main :: IO ()
