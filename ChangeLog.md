@@ -2,6 +2,20 @@
 
 ## unreleased
 
+- **Wave X: the seat-fold tensor layer is gone.** `Circuit.Agent.Tensor`
+  pinned the shard combinators (`silentShard`, `awaitShard`, `raceShard`,
+  `fanOutShard`, `fanInShard`) that free-agent's `FreeSeat` terms folded
+  into — every production seat was a bare host shard, so the term language
+  and its combinators were axioma-only. The survivors (`AgentShard`,
+  `ioShard`, `closeShardIO`) are the IO seat boundary and move into
+  `Circuit.Agent` proper (`closeShardIO` used to live in Tensor only by
+  accretion); the module is deleted. `Axioma.Tensors` and
+  `Axioma.ShardTensors` are binned with it — they existed to oracle the
+  dead combinators. The one surviving probe (ioShard bag invariance under
+  input permutation, the "container dial") moves to `Axioma.Shards`.
+  Suite: 265 → 215 PASS (the 50 dead tensor oracles; +1 surviving probe
+  kept).
+
 - **Conversation honesty (S-b).** Nonce correlation for children that
   cannot stamp ids (ghci): a nonce echo (`⟜<n>`, no trailing newline)
   after each command, streams split on the nonce family (`NoncePorts`),

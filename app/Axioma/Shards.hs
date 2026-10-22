@@ -193,3 +193,17 @@ shardsTopic = do
        in u [] == That []
             && u [1] == This 1
             && u [1, 2, 3] == These 1 [2, 3]
+
+  putStrLn "ioShard container dial"
+  do
+    let a = mkPost "alice" [] "a"
+        b = mkPost "bob" [] "b"
+        c = mkPost "carol" [] "c"
+        outPost x = x {body = "out:" <> body x}
+        sh = ioShard (pure . map outPost)
+        runBag sh' ins = do
+          (outs, _) <- closeShardIO sh' ins []
+          pure (toBag outs)
+    bag1 <- runBag sh [a, b, c]
+    bag2 <- runBag sh [c, a, b]
+    assert "permuting input preserves output bag" $ bag1 == bag2

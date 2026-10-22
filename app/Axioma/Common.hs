@@ -41,7 +41,6 @@ where
 import Circuit.Agent
 import Circuit.Agent.Mark (Mark (..), markOf)
 import Circuit.Agent.StdPorts
-import Circuit.Agent.Tensor
 import Circuit.Machine (Body (Body), Moore, MooreT (..), scan)
 import Control.Monad (when)
 import Data.List (nub)

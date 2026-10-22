@@ -65,7 +65,6 @@ library
     Circuit.Agent.Mark
     Circuit.Agent.Query
     Circuit.Agent.StdPorts
-    Circuit.Agent.Tensor
     Circuit.Agent.Turn
     Cursor
 

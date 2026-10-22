@@ -181,6 +181,11 @@ module Circuit.Agent
     suffixShard,
     codecShard,
     composeShard,
+
+    -- * IO shards (the seat boundary)
+    AgentShard,
+    closeShardIO,
+    ioShard,
   )
 where
 
@@ -1158,3 +1163,30 @@ codecShard f g = iomap (K $ pure . f) (K $ pure . g)
 -- the same shape as connecting two effectful agents in series.
 composeShard :: forall m a b c. (Monad m) => Shard m a b -> Shard m b c -> Shard m a c
 composeShard = compose
+
+-- ---------------------------------------------------------------------------
+-- IO shards (the seat boundary)
+-- ---------------------------------------------------------------------------
+
+-- | An effectful agent shard with a @[Post Text]@ buffer threaded through the
+-- arrow: commit stores the batch, emit computes outputs from it in 'IO'.
+-- This is the closed seat shape hosts and bus agents run.
+type AgentShard a b = Poles () (Step (,) (,) [Post Text] [Post Text] (K IO)) a b
+
+-- | Close a same-type shard once, exposing both the output and the residual
+-- state.  Works for any state carrier @s@ and payload @a@.
+closeShardIO :: Poles () (Step (,) (,) s s (K IO)) a a -> a -> s -> IO (a, s)
+closeShardIO sh x s0 = do
+  let thread = close sh
+  (s', y) <- runK (run thread) (s0, x)
+  pure (y, s')
+
+-- | Build an agent shard that stores the input batch, then computes outputs
+-- from that batch in 'IO'.
+ioShard :: ([Post Text] -> IO [Post Text]) -> AgentShard [Post Text] [Post Text]
+ioShard emit = Poles writeBatch writeBatch read'
+  where
+    writeBatch = Step $ K $ \(_, xs) -> pure (xs, ())
+    read' = Step $ K $ \(s, ()) -> do
+      outs <- emit s
+      pure ([], outs)
