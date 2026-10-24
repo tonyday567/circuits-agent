@@ -92,6 +92,10 @@ module Circuit.Agent
     agentShard,
     runAgentShard,
 
+    -- * Pure port turns
+    PortSeat (..),
+    runPort,
+
     -- * Token seat (stream buffers around a Shard)
     Port,
     Snoc (..),
@@ -1034,6 +1038,42 @@ runAgentShard sys seat ins =
   let seat1 = feedAgent sys ins seat
       (outs, seat2) = flushOutbox seat1
    in (outs, seat2)
+
+-- | Pure carrier for a 'Port' turn: the agent seat plus both stream
+-- buffers of the @batchEnds@ \/ shard \/ @unbatchEnds@ composition.
+data PortSeat s a = PortSeat
+  { psAgent :: AgentSeat s a,
+    -- | Pending commit batch (drained by each 'runPort' turn).
+    psIn :: [Post a],
+    -- | Pending emit queue — replies not yet peeled (drained oldest first).
+    psOut :: [Post a]
+  }
+  deriving (Show, Eq)
+
+-- | One closed token turn of a pure port: commit the token, emit the reply
+-- token. The pure form of @close@ on a 'portShard' composition without
+-- choosing a monad:
+--
+-- @
+-- runPort sys (PortSeat seat [] []) p
+-- @
+--
+-- batches the token into the in-buffer, folds the batch through the agent
+-- ('feedAgent'), flushes replies into the out-buffer ('flushOutbox'), and
+-- peels one reply — the same build-stream \/ peel-stream discipline as
+-- 'batchEnds' \/ 'unbatchEnds'. 'Nothing' models a quiet agent: the composed
+-- emit would block, and quiet is observable here as absence instead.
+runPort ::
+  Agent (->) s (Post a) [Post a] ->
+  PortSeat s a ->
+  Post a ->
+  (Maybe (Post a), PortSeat s a)
+runPort sys (PortSeat seat _ _) p =
+  let seat1 = feedAgent sys [p] seat
+      (replies, seat2) = flushOutbox seat1
+   in case replies of
+        [] -> (Nothing, PortSeat seat2 [] [])
+        (r : rest) -> (Just r, PortSeat seat2 [] rest)
 
 -- ---------------------------------------------------------------------------
 -- Token seat — stream coalgebra around a list Shard (parser dual)

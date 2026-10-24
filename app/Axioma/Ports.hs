@@ -19,7 +19,6 @@ import Circuit.Category (K (..))
 import Circuit.Machine (Moore)
 import Circuit.Syntax (eval)
 import Control.Monad (void)
-import Control.Monad.State (State, gets, modify, runState)
 import Data.ByteString qualified as BS
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -138,31 +137,14 @@ portsTopic = do
     mAfter <- timeout 200_000 (runK (emit (stdOut sp)) ())
     assert "S6 reads block after death" $ mAfter == Nothing
 
-    -- unbatchEnds on a quiet stream blocks instead of returning undefined.
+    -- a quiet agent answers nothing: runPort observes the block as absence,
+    -- and the carrier still records the committed input.
     let quietAgent :: Agent (->) [Post Text] (Post Text) [Post Text]
         quietAgent = cellToAgent (tape (const []))
-        quietShard :: Shard (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) [Post Text] [Post Text]
-        quietShard =
-          agentShard
-            (gets (\(seat, _, _) -> seat))
-            (\seat -> modify (\(_, i, o) -> (seat, i, o)))
-            quietAgent
-        quietPort :: Port (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) Text
-        quietPort =
-          portShard
-            (gets (\(_, i, _) -> i))
-            (\i -> modify (\(seat, _, o) -> (seat, i, o)))
-            (gets (\(_, _, o) -> o))
-            (\o -> modify (\(seat, i, _) -> (seat, i, o)))
-            quietShard
-        seed :: (AgentSeat [Post Text] Text, [Post Text], [Post Text])
-        seed = (AgentSeat [] [], [], [])
         qIn = mkPost "human" ["j"] "quiet-ask"
-    mQuiet <-
-      timeout 200_000 $ do
-        let (pOut, _) = runState (runK (close quietPort) qIn) seed
-        T.length (body (pOut :: Post Text)) `seq` pure ()
-    assert "S6 unbatchEnds on a quiet stream blocks (no undefined)" $ mQuiet == Nothing
+        (mOut, seat') = runPort quietAgent (PortSeat (AgentSeat [] []) [] []) qIn
+    assert "S6 a quiet agent answers nothing (the port emit would block)" $
+      mOut == Nothing && asState (psAgent seat') == [qIn]
 
   putStrLn "merged stdio (S4)"
   do
@@ -266,29 +248,12 @@ portsTopic = do
         [p] -> to p == ["calc"] && body p == "1 2 3"
         _ -> False
 
-    -- example: Port (Poles Post Post) — one token in, tool-call token out
-    let sh :: Shard (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) [Post Text] [Post Text]
-        sh =
-          agentShard
-            (gets (\(s, _, _) -> s))
-            (\s -> modify (\(_, i, o) -> (s, i, o)))
-            caller
-        port :: Port (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) Text
-        port =
-          portShard
-            (gets (\(_, i, _) -> i))
-            (\i -> modify (\(s, _, o) -> (s, i, o)))
-            (gets (\(_, _, o) -> o))
-            (\o -> modify (\(s, i, _) -> (s, i, o)))
-            sh
-        (pOut, (seatPort, _, _)) =
-          runState
-            (runK (close port) human)
-            (AgentSeat [] [], [], [])
+    -- example: one token in, tool-call token out — the pure port turn
+    let (pOut, seatPort) = runPort caller (PortSeat (AgentSeat [] []) [] []) human
     assert "port example: human Post in → tool-call Post out" $
-      from pOut == "j" && to pOut == ["calc"] && body pOut == "1 2 3"
+      pOut == Just call
     assert "port carrier saw the human input" $
-      length (asState seatPort) == 1
+      length (asState (psAgent seatPort)) == 1
 
   putStrLn "withhold"
   do

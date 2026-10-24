@@ -18,8 +18,8 @@ import Circuit.Poly (monoDir)
 import Circuit.Stream (These (..), uncons)
 import Circuit.Tensor (unConst)
 import Control.Concurrent.STM
-import Control.Monad.State (State, get, gets, modify, put, runState)
 import Data.Functor.Identity (Identity (..))
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -40,12 +40,15 @@ shardsTopic = do
     assert "codec transforms commit and emit" $
       map body out == ["ack:out"]
 
-    let accumShard :: Shard (State [Post Text]) [Post Text] [Post Text]
-        accumShard = polesK (\ps -> modify (ps ++)) get
-        composed = composeShard accumShard (suffixShard (map (\p -> p {body = body p <> "!"})) accumShard)
-        (out2, st) = runState (runK (close composed) [p1]) []
-    assert "compose chains shards through the monad" $
-      map body out2 == ["hi!", "hi!"] && length st == 2
+    do
+      ref <- newIORef []
+      let accumShard :: Shard IO [Post Text] [Post Text]
+          accumShard = polesK (\ps -> modifyIORef' ref (ps ++)) (readIORef ref)
+          composed = composeShard accumShard (suffixShard (map (\p -> p {body = body p <> "!"})) accumShard)
+      out2 <- runK (close composed) [p1]
+      st <- readIORef ref
+      assert "compose chains shards through the carrier" $
+        map body out2 == ["hi!", "hi!"] && length st == 2
 
     -- Degeneracy warning: composePoles over allocated channels splays through
     -- the unit and serialises the intermediate wire.  An honest pipeline with
@@ -84,15 +87,16 @@ shardsTopic = do
     assert "runAgentShard one ack" $
       map body outs == ["ack: hi"] && length (asState seat) == 1
 
-    -- same citizen as Poles (K State) — commit/emit only at the boundary
-    let sh :: Shard (State (AgentSeat [Post Text] Text)) [Post Text] [Post Text]
-        sh = agentShard get put ack
-        (outs2, seat2) =
-          runState
-            (runK (close sh) [pIn])
-            (AgentSeat [] [])
-    assert "agentShard close matches runAgentShard" $
-      outs2 == outs && asState seat2 == asState seat
+    -- same citizen through a real carrier (IORef) — commit/emit only at the
+    -- boundary, matching the pure runner
+    do
+      ref <- newIORef (AgentSeat [] [] :: AgentSeat [Post Text] Text)
+      let sh :: Shard IO [Post Text] [Post Text]
+          sh = agentShard (readIORef ref) (\seat -> writeIORef ref seat) ack
+      outs2 <- runK (close sh) [pIn]
+      seat2 <- readIORef ref
+      assert "agentShard close matches runAgentShard" $
+        outs2 == outs && asState seat2 == asState seat
 
     let pIn2 = mkPost "human" ["j"] "again"
         (outs3, seat3) = runAgentShard ack seat [pIn2]
@@ -155,37 +159,18 @@ shardsTopic = do
     let ack :: Agent (->) [Post Text] (Post Text) [Post Text]
         ack = cellToAgent (tape (reply "j"))
         pIn = mkPost "human" ["j"] "hi"
-        -- agent as list shard, then token seat via stream buffers
-        sh :: Shard (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) [Post Text] [Post Text]
-        sh =
-          agentShard
-            (gets (\(seat, _, _) -> seat))
-            (\seat -> modify (\(_, i, o) -> (seat, i, o)))
-            ack
-        port :: Port (State (AgentSeat [Post Text] Text, [Post Text], [Post Text])) Text
-        port =
-          portShard
-            (gets (\(_, i, _) -> i))
-            (\i -> modify (\(seat, _, o) -> (seat, i, o)))
-            (gets (\(_, _, o) -> o))
-            (\o -> modify (\(seat, i, _) -> (seat, i, o)))
-            sh
-        (pOut, (seat', inB, outB)) =
-          runState
-            (runK (close port) pIn)
-            (AgentSeat [] [], [], [])
+        (pOut, ps1) = runPort ack (PortSeat (AgentSeat [] []) [] []) pIn
     assert "port close: one Post in, one Post out" $
-      body pOut == "ack: hi"
+      fmap body pOut == Just "ack: hi"
     assert "port drains stream buffers on close" $
-      null inB && null outB && length (asState seat') == 1
+      null (psIn ps1) && null (psOut ps1)
+    assert "port carrier holds the input" $
+      length (asState (psAgent ps1)) == 1
 
     let pIn2 = mkPost "human" ["j"] "again"
-        (pOut2, (seat2, _, _)) =
-          runState
-            (runK (close port) pIn2)
-            (seat', [], [])
+        (pOut2, ps2) = runPort ack ps1 pIn2
     assert "port keeps agent carrier across token turns" $
-      body pOut2 == "ack: again" && length (asState seat2) == 2
+      fmap body pOut2 == Just "ack: again" && length (asState (psAgent ps2)) == 2
 
     assert "uncons matches Uncons on lists" $
       let u :: [Int] -> These Int [Int]
