@@ -46,7 +46,7 @@ module Circuit.Agent.Turn
   )
 where
 
-import Circuit (Syntax (Lift), Trace)
+import Circuit (FreeTrace, Syntax (Lift))
 import Circuit.Agent (PostId)
 import Circuit.Agent.StdPorts (NonceEvent (..), NoncePorts (..))
 import Circuit.Category (K (..))
@@ -117,7 +117,7 @@ turnProcess = Body (\tok -> step ((emptyTurnState, Nothing), tok)) step (Const .
 -- the turn they belong to — concurrent turns on one handle are safe.
 turn ::
   Poles () (K IO) (TurnToken Text) (TurnToken Text) ->
-  IO (Trace (,) (K IO) Text Text)
+  IO (FreeTrace (,) (K IO) Text Text)
 turn e = do
   ref <- newIORef emptyTurnState
   stash <- newIORef Map.empty
@@ -144,7 +144,7 @@ turn e = do
 turnTimeout ::
   Int ->
   Poles () (K IO) (TurnToken Text) (TurnToken Text) ->
-  IO (Trace (,) (K IO) Text (Maybe Text))
+  IO (FreeTrace (,) (K IO) Text (Maybe Text))
 turnTimeout us e = do
   ref <- newIORef emptyTurnState
   stash <- newIORef Map.empty

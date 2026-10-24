@@ -33,11 +33,11 @@
 -- Token seat around a list shard (parser dual): stream @f = [Post]@, token
 -- @s = Post@.  'batchEnds' snocs tokens into a stream (build @f@); 'unbatchEnds'
 -- peels with the same coalgebra as 'Uncons' on lists.  Compose with the
--- shard via @'compose'@:
+-- shard via @'pipe'@:
 --
 -- @
--- portShard = batchEnds … `compose` shard `compose` unbatchEnds …
---   :: Shard m Post [Post] `compose` Shard m [Post] [Post] `compose` Shard m [Post] Post
+-- portShard = batchEnds … `pipe` shard `pipe` unbatchEnds …
+--   :: Shard m Post [Post] `pipe` Shard m [Post] [Post] `pipe` Shard m [Post] Post
 --   :: Port m
 -- @
 --
@@ -192,12 +192,12 @@ where
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, unitEndsSTM, writeHaltChannel)
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.Machine (Body (Body), Moore, Poles (..), Step (..), close, compose, iomap, polesK)
+import Circuit.Machine (Body (Body), Moore, Poles (..), Step (..), close, iomap, pipe, polesK)
 import Circuit.Poly (monoDir, monoIn)
 import Circuit.Syntax (Syntax (Lift), eval)
 import Circuit.Tensor (Const (..), unConst)
-import Circuit.Trace (Trace)
-import Circuit.Traced (yank)
+import Circuit.Trace (FreeTrace)
+import Circuit.Traced (trace)
 import Control.Concurrent.Async (async, cancel, race, wait)
 import Control.Concurrent.STM (STM, atomically, orElse)
 import Data.Foldable (traverse_)
@@ -651,7 +651,7 @@ loopWithSubs ::
   [(Name, AgentState s f)] ->
   Log f ->
   ([(Name, AgentState s f)], Log f, [Derivation a])
-loopWithSubs roster states0 log0 = yank body ()
+loopWithSubs roster states0 log0 = trace body ()
   where
     bundle0 = (states0, log0, []) :: ([(Name, AgentState s f)], Log f, [Derivation a])
     body (Right ()) =
@@ -665,7 +665,7 @@ loopWithSubs roster states0 log0 = yank body ()
             else Right bundle'
     fst3 (x, _, _) = x
 
--- | The same meeting as a 'Trace' value: 'yank' body over the 'Either'
+-- | The same meeting as a 'FreeTrace' value: 'trace' body over the 'Either'
 -- tensor, quiescence returned as a 'Right' payload.
 --
 -- Backwards-compatible wrapper; for explicit subscriptions use 'meetingLoopSubs'.
@@ -673,7 +673,7 @@ meetingLoop ::
   forall a s f.
   (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
   [(Name, Agent (->) s (Post a) [Post a])] ->
-  Trace Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
+  FreeTrace Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
 meetingLoop roster = meetingLoopSubs [(n, [n], a) | (n, a) <- roster]
 
 -- | Multi-seat-card variant of 'meetingLoop'.
@@ -681,8 +681,8 @@ meetingLoopSubs ::
   forall a s f.
   (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
   [RosterEntry s a] ->
-  Trace Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
-meetingLoopSubs roster = yank (Lift body)
+  FreeTrace Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
+meetingLoopSubs roster = trace (Lift body)
   where
     body (Right bundle@(states, _, _)) =
       if any (hasPending @a . snd) states
@@ -741,7 +741,7 @@ meetingPass roster (states, lg, derivs) = foldl' meetingStep (states, lg, derivs
 -- than the one the world heard.
 run1 :: Agent (->) s i o -> s -> i -> (o, s)
 run1 sys s i =
-  let (s', (o, ())) = run sys (s, monoIn i)
+  let (s', (o, ())) = step sys (s, monoIn i)
    in (o, s')
 
 -- | Lift a pure agent into the 'K' arrow of any functor.
@@ -749,12 +749,12 @@ run1 sys s i =
 -- This is the change of base from @(->)@ to @K m@ on the agent itself:
 -- the same Moore coalgebra, but each step now lives in @m@.
 agentM :: (Applicative m) => Agent (->) s a b -> Agent (K m) s a b
-agentM sys = Step (K (pure . run sys))
+agentM sys = Step (K (pure . step sys))
 
 -- | Run one step of a monadic agent.
 runAgentM :: (Monad m) => Agent (K m) s a b -> s -> a -> m (b, s)
 runAgentM sys s a =
-  runK (run sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
+  runK (step sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
 
 -- | STM agent: state is handled transparently inside an STM transaction.
 type AgentS s a = Agent (K STM) s a [a]
@@ -765,22 +765,22 @@ type AgentX s a = Agent (K IO) s a [a]
 
 -- | Cross from the transparent STM world into the IO boundary.
 agentX :: AgentS s a -> AgentX s a
-agentX sys = Step (K (\(s, d) -> atomically (runK (run sys) (s, d))))
+agentX sys = Step (K (\(s, d) -> atomically (runK (step sys) (s, d))))
 
 -- | Seat-level product / await in STM.
 awaitS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 awaitS sys1 sys2 =
   Step $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (run sys1) (s1, d)
-    (s2', (o2, ())) <- runK (run sys2) (s2, d)
+    (s1', (o1, ())) <- runK (step sys1) (s1, d)
+    (s2', (o2, ())) <- runK (step sys2) (s2, d)
     pure ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race in STM.
 raceS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
 raceS sys1 sys2 =
   Step $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (run sys1) (s1, d)
-    (s2', (o2, ())) <- runK (run sys2) (s2, d)
+    (s1', (o1, ())) <- runK (step sys1) (s1, d)
+    (s2', (o2, ())) <- runK (step sys2) (s2, d)
     let o = if null o1 then o2 else o1
     pure ((s1', s2'), (o, ()))
 
@@ -794,7 +794,7 @@ raceS sys1 sys2 =
 raceIO :: AgentX s1 a -> AgentX s2 a -> AgentX (s1, s2) a
 raceIO sys1 sys2 =
   Step $ K $ \((s1, s2), d) ->
-    raceFirst (runK (run sys1) (s1, d)) (runK (run sys2) (s2, d)) >>= \case
+    raceFirst (runK (step sys1) (s1, d)) (runK (step sys2) (s2, d)) >>= \case
       Left (s1', outs) -> pure ((s1', s2), (outs, ()))
       Right (s2', outs) -> pure ((s1, s2'), (outs, ()))
   where
@@ -818,7 +818,7 @@ raceIO sys1 sys2 =
 -- | Run one step of an STM agent.
 stepS :: AgentS s a -> s -> a -> STM (s, [a])
 stepS sys s i = do
-  (s', (outs, ())) <- runK (run sys) (s, monoIn i)
+  (s', (outs, ())) <- runK (step sys) (s, monoIn i)
   pure (s', outs)
 
 -- | Fold an STM agent over a bundle of inputs within one transaction.
@@ -890,15 +890,15 @@ selfLoopFrame agent inbox outbox = K $ \case
               pure (Left s')
 
 -- | Wire an STM agent between an inbox and an outbox, running until
--- quiescence, expressed as a 'Trace Either' value.
+-- quiescence, expressed as a 'FreeTrace Either' value.
 agentLoopL ::
   AgentS s a ->
   Poles () (K STM) [a] [a] ->
   Poles () (K STM) [a] [a] ->
-  Trace Either (K STM) s s
-agentLoopL agent inbox outbox = yank (Lift (selfLoopFrame agent inbox outbox))
+  FreeTrace Either (K STM) s s
+agentLoopL agent inbox outbox = trace (Lift (selfLoopFrame agent inbox outbox))
 
--- | Self-loop as a 'Trace Either' citizen.
+-- | Self-loop as a 'FreeTrace Either' citizen.
 selfLoopL ::
   AgentS s a ->
   s ->
@@ -930,7 +930,7 @@ beh sys s0 (i : ins) =
 branchAgent :: (s -> Bool) -> Agent (->) s a b -> Agent (->) s a b -> Agent (->) s a b
 branchAgent cond sys1 sys2 =
   Step $ \(state, d) ->
-    if cond state then run sys1 (state, d) else run sys2 (state, d)
+    if cond state then step sys1 (state, d) else step sys2 (state, d)
 
 -- | Seat-level product / await: both agents run on the same input; states are
 -- paired; emits are concatenated left-to-right.
@@ -939,8 +939,8 @@ awaitA ::
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
 awaitA sys1 sys2 = Step $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = run sys1 (s1, d)
-      (s2', (o2, ())) = run sys2 (s2, d)
+  let (s1', (o1, ())) = step sys1 (s1, d)
+      (s2', (o2, ())) = step sys2 (s2, d)
    in ((s1', s2'), (o1 <> o2, ()))
 
 -- | Seat-level coproduct / race: both agents run on the same input; states are
@@ -950,8 +950,8 @@ raceA ::
   Agent (->) s2 (Post a) [Post a] ->
   Agent (->) (s1, s2) (Post a) [Post a]
 raceA sys1 sys2 = Step $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = run sys1 (s1, d)
-      (s2', (o2, ())) = run sys2 (s2, d)
+  let (s1', (o1, ())) = step sys1 (s1, d)
+      (s2', (o2, ())) = step sys2 (s2, d)
       o = if null o1 then o2 else o1
    in ((s1', s2'), (o, ()))
 
@@ -1115,7 +1115,7 @@ unbatchEnds getBuf putBuf =
 --
 -- @
 -- portShard getIn putIn getOut putOut sh
---   = batchEnds getIn putIn `compose` sh `compose` unbatchEnds getOut putOut
+--   = batchEnds getIn putIn `pipe` sh `pipe` unbatchEnds getOut putOut
 -- @
 --
 -- Flush\/drain is not a separate policy knob — it /is/ build-stream ('snoc')
@@ -1162,7 +1162,7 @@ codecShard f g = iomap (K $ pure . f) (K $ pure . g)
 -- The output of the first shard feeds the input of the second.  This is
 -- the same shape as connecting two effectful agents in series.
 composeShard :: forall m a b c. (Monad m) => Shard m a b -> Shard m b c -> Shard m a c
-composeShard = compose
+composeShard = pipe
 
 -- ---------------------------------------------------------------------------
 -- IO shards (the seat boundary)
@@ -1178,7 +1178,7 @@ type AgentShard a b = Poles () (Step (,) (,) [Post Text] [Post Text] (K IO)) a b
 closeShardIO :: Poles () (Step (,) (,) s s (K IO)) a a -> a -> s -> IO (a, s)
 closeShardIO sh x s0 = do
   let thread = close sh
-  (s', y) <- runK (run thread) (s0, x)
+  (s', y) <- runK (step thread) (s0, x)
   pure (y, s')
 
 -- | Build an agent shard that stores the input batch, then computes outputs

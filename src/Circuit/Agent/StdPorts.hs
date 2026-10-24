@@ -94,8 +94,8 @@ import Circuit.Category (K (..), (.>))
 import Circuit.Machine (Body (Body), Moore, Poles (..))
 import Circuit.Syntax (Syntax (Lift))
 import Circuit.Tensor (Const (..), SemiTensor (..), unConst)
-import Circuit.Trace (Trace)
-import Circuit.Traced (yank)
+import Circuit.Trace (FreeTrace)
+import Circuit.Traced (trace)
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.STM (atomically, newTQueueIO, readTQueue, writeTQueue)
 import Control.Exception (IOException, onException, try)
@@ -246,7 +246,7 @@ data StdPorts a b c = StdPorts
     stdProcess :: Maybe ProcessHandle
   }
 
--- | Spawn a process and open its ports as a 'Trace' 'Either'.
+-- | Spawn a process and open its ports as a 'FreeTrace' 'Either'.
 --
 -- @encode@ converts a token to bytes written to stdin (+ newline).
 -- @decode@ converts a framed payload's bytes back to a token.
@@ -258,8 +258,8 @@ openStdPorts ::
   (a -> BS.ByteString) ->
   (BS.ByteString -> a) ->
   ProcConfig ->
-  Trace Either (K IO) () (StdPorts a a a)
-openStdPorts encode decode cfg = yank (Lift (K step))
+  FreeTrace Either (K IO) () (StdPorts a a a)
+openStdPorts encode decode cfg = trace (Lift (K step))
   where
     step (Right ()) = do
       let procSpec =
@@ -541,12 +541,12 @@ stdioEnds pp = Poles (commit (stdIn pp)) (commit (stdIn pp)) (emit (stdOut pp))
 stderrEnds :: StdPorts a b c -> Poles () (K IO) a (Frame c)
 stderrEnds pp = Poles (commit (stdIn pp)) (commit (stdIn pp)) (emit (stdErr pp))
 
--- | Open a process and return the dual-seat client view as a 'Trace' 'Either'.
+-- | Open a process and return the dual-seat client view as a 'FreeTrace' 'Either'.
 openProc ::
   (a -> BS.ByteString) ->
   (BS.ByteString -> a) ->
   ProcConfig ->
-  Trace Either (K IO) () (ProcEnds a a a)
+  FreeTrace Either (K IO) () (ProcEnds a a a)
 openProc encode decode cfg =
   openStdPorts encode decode cfg .> Lift portsToProcEnds
   where
@@ -560,7 +560,7 @@ openProc encode decode cfg =
 
 -- | The wire view of 'StdPorts': one nested 'tensor' morphism.  The read
 -- wires carry 'Frame's, terminal exit included.
-portsEnds :: StdPorts a b c -> Trace (,) (K IO) (a, ((), ())) ((), (Frame b, Frame c))
+portsEnds :: StdPorts a b c -> FreeTrace (,) (K IO) (a, ((), ())) ((), (Frame b, Frame c))
 portsEnds pp = tensor commitM (tensor outM errM)
   where
     commitM = Lift (commit (stdIn pp))

@@ -9,7 +9,7 @@
 -- absence is not an opinion here.  If the mark never arrives, the runner
 -- blocks; the halt is decided by content, not inferred from quiet.
 --
--- The 'Loop Either' form pushes the same halt to the surface of a composition:
+-- The 'FreeTrace Either' form pushes the same halt to the surface of a composition:
 -- 'Left' = continue, 'Right' = halt.  This makes the mark-halt a trace citizen,
 -- with the continuation folded away by 'trace'.
 --
@@ -26,8 +26,8 @@ import Circuit.Agent.Ends (unitEndsSTM)
 import Circuit.Category (K (..))
 import Circuit.Machine (Poles (..), close)
 import Circuit.Syntax (Syntax (Lift))
-import Circuit.Trace (Trace)
-import Circuit.Traced (yank)
+import Circuit.Trace (FreeTrace)
+import Circuit.Traced (trace)
 import Control.Concurrent.STM (STM)
 import Data.Function (fix)
 import Prelude hiding (read)
@@ -60,9 +60,9 @@ markFrame isMark step e = K $ \es -> do
         else Left (step s a)
     )
 
--- | The mark-halt pushed to the surface of a composition: a @Trace Either@
+-- | The mark-halt pushed to the surface of a composition: a @FreeTrace Either@
 -- citizen.  The halt decision travels as data through the channel and the
 -- 'trace' folds the continuation away — the runner is a value, not a loop
 -- spelled in 'fix'.
-markLoop :: (a -> Bool) -> (s -> a -> s) -> Poles () (K STM) a a -> Trace Either (K STM) s s
-markLoop isMark step e = yank (Lift (markFrame isMark step e))
+markLoop :: (a -> Bool) -> (s -> a -> s) -> Poles () (K STM) a a -> FreeTrace Either (K STM) s s
+markLoop isMark step e = trace (Lift (markFrame isMark step e))

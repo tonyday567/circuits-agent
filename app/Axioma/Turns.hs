@@ -77,7 +77,7 @@ turnsTopic = do
     assert "loop on empty log is identity" $ null tEmpty
     assert "loop on empty log records no derivations" $ null emptyDerivs
 
-    -- S0a: the meeting is a 'Loop Either (->)' value; 'run' agrees with 'loopWith'.
+    -- S0a: the meeting is a 'FreeTrace Either (->)' value; 'trace' agrees with 'loopWith'.
     let states0 = [(n, feedState (watch @Text [n] t0) (emptyAgentState @Text [n])) | (n, _) <- roster]
         bundle0 = (states0, t0, [])
     assert "meetingLoop run agrees with loopWith" $
