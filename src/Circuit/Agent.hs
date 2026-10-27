@@ -50,6 +50,7 @@ module Circuit.Agent
     Post (..),
     PostId,
     mkPost,
+    mkChannelPost,
     replyTo,
     synthesis,
     sortNub,
@@ -239,23 +240,31 @@ type PostId = Natural
 -- order — the smart constructors keep it so.
 data Post a = Post
   { from :: Name,
+    channel :: Maybe Name,
     to :: [Name],
     thread :: [PostId],
     body :: a
   }
   deriving (Show, Eq, Ord, Functor)
 
--- | A fresh root post (no parents).
+-- | A fresh root post (no parents). No channel: address by the 'to' list.
 mkPost :: Name -> [Name] -> a -> Post a
-mkPost f t = Post f t []
+mkPost f t = Post f Nothing t []
+
+-- | A fresh root post in a named channel. The channel is the address; the
+-- 'to' list is the resolved membership at post time.
+mkChannelPost :: Name -> Name -> [Name] -> a -> Post a
+mkChannelPost f c t = Post f (Just c) t []
 
 -- | A reply: the audience is the parent's sender plus the rest of the
 -- parent's audience (minus self); the sole thread edge cites the parent's
--- 'PostId'.
+-- 'PostId'. The reply inherits the parent's channel: a reply lands in the
+-- channel it answers.
 replyTo :: Name -> PostId -> Post a -> b -> Post b
 replyTo who parentId p b =
   Post
     { from = who,
+      channel = channel p,
       to = from p : filter (/= who) (to p),
       thread = [parentId],
       body = b
@@ -263,11 +272,13 @@ replyTo who parentId p b =
 
 -- | A synthesis: one descendant of several parents — the object-level
 -- wire-merge dual to merging agents.  The ancestry cites every parent id as
--- a normalised set (sorted, duplicates discarded).
+-- a normalised set (sorted, duplicates discarded). The channel is inherited
+-- from the first parent when all parents share it; otherwise no channel.
 synthesis :: Name -> [Name] -> [PostId] -> b -> Post b
 synthesis who audience parentIds b =
   Post
     { from = who,
+      channel = Nothing,
       to = audience,
       thread = sortNub parentIds,
       body = b
@@ -451,18 +462,23 @@ appendInbox p (Inbox (subs, f)) = Inbox (subs, snoc f p)
 
 -- | Lightweight delivery predicate.
 --
--- A post delivers when any of the subscribed names appears in the post's 'to'
--- list.  Multi-cast is direct: a post addressed to several names reaches each
--- subscriber.  A post with @to = ["all"]@ broadcasts to every subscriber;
--- @to = []@ and @to = [""]@ deliver to no one (discard).  This predicate is a
+-- A post delivers when its channel names one of the seat's subscriptions; a
+-- post with no channel delivers when any of the subscribed names appears in
+-- the post's 'to' list.  Multi-cast is direct: a post addressed to several
+-- names reaches each subscriber.  There is no broadcast sentinel — a
+-- broadcast is a channel whose resolved membership names every member, and
+-- @to = []@ or @to = [""]@ delivers to no one (discard).  This predicate is a
 -- small stepping stone toward a relational copy/discard delivery model
 -- ('FinRel'); the full wiring is future work.
 deliversTo :: Post a -> [Name] -> Bool
 deliversTo p subs =
-  case to p of
-    [] -> False
-    [t] | t == empty -> False
-    ts -> ("all" :: Text) `elem` ts || any (`elem` ts) subs
+  case channel p of
+    Just c -> c `elem` subs
+    Nothing ->
+      case to p of
+        [] -> False
+        [t] | t == empty -> False
+        ts -> any (`elem` ts) subs
 
 -- | Peel the oldest addressed post from the inbox, returning the rest.
 --

@@ -19,7 +19,7 @@ import Circuit.Agent.Graph
     AgentRegistry,
     atomic,
     bus,
-    channel,
+    edgeChannel,
     flatten,
     nested,
     runGraph,
@@ -196,8 +196,8 @@ graphTopic = do
   let va = LG.vertex "a"
       vb = LG.vertex "b"
       vc = LG.vertex "c"
-      busCh = channel "bus"
-      leaf = channel "leaf"
+      busCh = edgeChannel "bus"
+      leaf = edgeChannel "leaf"
       ins = [mkPost "human" ["bus"] "hi"]
       reg = ackReg ["a", "b", "c"]
 
@@ -249,7 +249,7 @@ graphTopic = do
   -- orchestrator flatten: a nested vertex expands to the same behaviour
   let innerGraph = LG.vertex "x"
       innerReg = Map.fromList [("x", atomic (ack "x"))]
-      parentGraph = LG.connect (channel "outer") (LG.vertex "nested") (LG.vertex "a")
+      parentGraph = LG.connect (edgeChannel "outer") (LG.vertex "nested") (LG.vertex "a")
       parentReg =
         Map.fromList
           [ ("nested", nested innerGraph innerReg),

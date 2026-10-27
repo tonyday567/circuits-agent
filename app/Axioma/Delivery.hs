@@ -77,9 +77,12 @@ deliveryTopic = do
     assert "post not addressed to agent does not deliver" $
       deliversTo (mkPost "human" ["j"] "hi") ["j"]
         && not (deliversTo (mkPost "human" ["j"] "hi") ["k"])
-    assert "to=all broadcasts to every subscriber" $
-      deliversTo (mkPost "human" ["all"] "hi") ["j"]
-        && deliversTo (mkPost "human" ["all"] "hi") ["k"]
+    assert "the 'all' token is not a broadcast sentinel" $
+      not (deliversTo (mkPost "human" ["all"] "hi") ["j"])
+        && not (deliversTo (mkPost "human" ["all"] "hi") ["k"])
+    assert "a channel post delivers to the channel's subscribers" $
+      deliversTo (mkChannelPost "human" "commons" ["j", "k"] "hi") ["commons"]
+        && not (deliversTo (mkChannelPost "human" "commons" ["j", "k"] "hi") ["other"])
     assert "to=[] delivers to no one" $
       not (deliversTo (mkPost "human" [] "hi") ["j"])
         && not (deliversTo (mkPost "human" [] "hi") ["k"])
@@ -100,7 +103,7 @@ deliveryTopic = do
           [ ["j"], -- unicast to j
             ["j", "k"], -- multi-cast to both
             ["k"], -- unicast to k
-            ["all"], -- broadcast
+            ["all"], -- a plain name, not a sentinel
             [], -- discard
             [""] -- discard sentinel
           ] ::
@@ -110,7 +113,7 @@ deliveryTopic = do
           [ [True, False],
             [True, True],
             [False, True],
-            [True, True],
+            [False, False],
             [False, False],
             [False, False]
           ]
@@ -174,8 +177,8 @@ deliveryTopic = do
       Set.map (\(a, ()) -> ((), a)) (discardRel agents)
         == broadcastRel agents
 
-    assert "F1 deliveryRel [all] equals broadcast" $
-      deliveryRel agents ["all"] == broadcastRel agents
+    assert "F1 deliveryRel over the full roster equals broadcast" $
+      deliveryRel agents (Set.toList agents) == broadcastRel agents
 
     assert "F1 deliveryRel [] equals emptyRel" $
       deliveryRel agents [] == (emptyRel :: DelRel Text)
@@ -193,8 +196,11 @@ deliveryTopic = do
     assert "F1 FinRel agrees with deliversTo: multicast" $
       expect ["j", "k"] ["j"] True && expect ["j", "k"] ["k"] True
 
-    assert "F1 FinRel agrees with deliversTo: broadcast" $
-      expect ["all"] ["j"] True && expect ["all"] ["k"] True
+    assert "F1 FinRel agrees with deliversTo: broadcast by membership" $
+      expect ["j", "k"] ["j"] True && expect ["j", "k"] ["k"] True
+
+    assert "F1 the 'all' token is a plain name, not a sentinel" $
+      expect ["all"] ["j"] False && expect ["all"] ["k"] False
 
     assert "F1 FinRel agrees with deliversTo: discard" $
       expect [] ["j"] False && expect [""] ["j"] False

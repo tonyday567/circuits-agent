@@ -140,13 +140,14 @@ parseTimeText = parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S" . T.unpack
 
 -- | Encode a 'Stamped a' as a single canonical JSON Lines object.
 frameStored :: (PostBody a) => Stamped a -> Text
-frameStored (Stamped (ts, i) (Post from' to' thread' body')) =
+frameStored (Stamped (ts, i) (Post from' channel' to' thread' body')) =
   decodeUtf8 $
     encodeJson $
       JObject
         [ ("id", JNumber (fromIntegral i)),
           ("ts", JString (T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" ts))),
           ("from", JString from'),
+          ("channel", maybe JNull JString channel'),
           ("to", JArray (V.fromList (map JString to'))),
           ("thread", JArray (V.fromList (map (JNumber . fromIntegral) thread'))),
           ("body", encodePostBody body')
@@ -175,11 +176,12 @@ unframeStored line =
       JString tsStr <- lookup "ts" o
       ts <- parseTimeText tsStr
       JString from' <- lookup "from" o
+      channel' <- lookupOptionalString "channel" (JObject o)
       to' <- lookupStrings "to" (JObject o)
       thread' <- lookupPostIds "thread" (JObject o)
       bodyVal <- lookup "body" o
       body' <- decodePostBody bodyVal
-      pure (Stamped (ts, pid) (Post from' to' thread' body'))
+      pure (Stamped (ts, pid) (Post from' channel' to' thread' body'))
     _ -> Nothing
 
 -- | Parse a bare 'Post a' line (no stamp).
@@ -188,11 +190,12 @@ parsePost line =
   case decodeJson (encodeUtf8 line) of
     Right (JObject o) -> do
       JString from' <- lookup "from" o
+      channel' <- lookupOptionalString "channel" (JObject o)
       to' <- lookupStrings "to" (JObject o)
       thread' <- lookupPostIds "thread" (JObject o)
       bodyVal <- lookup "body" o
       body' <- decodePostBody bodyVal
-      pure (Post from' to' thread' body')
+      pure (Post from' channel' to' thread' body')
     _ -> Nothing
 
 -- | Like 'unframeStored', but also accepts the legacy flat triple and bracket
@@ -218,7 +221,7 @@ parseMessageTs line = do
 
 -- | Render a 'Stamped a' for human display as @[id@ts] from: body@.
 renderStored :: (PostBody a) => Stamped a -> Text
-renderStored (Stamped (ts, i) (Post from' _to' _thread' body')) =
+renderStored (Stamped (ts, i) (Post from' _channel' _to' _thread' body')) =
   T.concat ["[", T.pack (show i), "@", T.pack (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" ts), "] ", from', ": ", renderBody body']
   where
     renderBody b = case decodeUtf8 (encodeJson (encodePostBody b)) of
@@ -260,6 +263,14 @@ lookupStrings k (JObject o) = case lookup k o of
   _ -> Nothing
 lookupStrings _ _ = Nothing
 
+lookupOptionalString :: Text -> Json -> Maybe (Maybe Text)
+lookupOptionalString k (JObject o) = case lookup k o of
+  Just (JString s) -> Just (Just s)
+  Just JNull -> Just Nothing
+  Nothing -> Just Nothing
+  _ -> Nothing
+lookupOptionalString _ _ = Nothing
+
 lookupPostIds :: Text -> Json -> Maybe [PostId]
 lookupPostIds k (JObject o) = case lookup k o of
   Just (JArray vs) -> Just [i | JNumber s <- V.toList vs, Just i <- [naturalFromScientific s]]
@@ -279,7 +290,7 @@ parseLegacyTriple idx line =
       ts <- parseTimeText tsStr
       JString sender' <- lookup "sender" o
       JString body' <- lookup "body" o
-      pure (Stamped (ts, fromIntegral idx) (Post sender' [] [] body'))
+      pure (Stamped (ts, fromIntegral idx) (Post sender' Nothing [] [] body'))
     _ -> Nothing
 
 -- | Legacy bracket format: @[timestamp] sender: body@.
@@ -292,5 +303,5 @@ parseLegacyBracket idx line =
           ts <- parseTimeText tsStr
           let (sender', body') = T.breakOn ":" (T.strip rest)
           guard (not (T.null sender'))
-          pure (Stamped (ts, fromIntegral idx) (Post (T.strip sender') [] [] (T.strip (T.drop 1 body'))))
+          pure (Stamped (ts, fromIntegral idx) (Post (T.strip sender') Nothing [] [] (T.strip (T.drop 1 body'))))
     _ -> Nothing

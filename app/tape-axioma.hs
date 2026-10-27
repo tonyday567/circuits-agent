@@ -61,7 +61,7 @@ jAgent = cellToAgent $ tape $ \hist ->
         2 -> 4 -- first k reply
         3 -> 6 -- second k reply
         _ -> error "jAgent: unexpected input"
-   in [Post {from = "j", to = ["k"], thread = [parentId], body = fj (body p)}]
+   in [Post {from = "j", channel = Nothing, to = ["k"], thread = [parentId], body = fj (body p)}]
 
 -- | k chains back to j on its first percept, forwards to m on its second.
 kAgent :: Agent (->) [Post Double] (Post Double) [Post Double]
@@ -72,7 +72,7 @@ kAgent = cellToAgent $ tape $ \hist ->
         1 -> 3 -- first j reply
         2 -> 5 -- second j reply
         _ -> error "kAgent: unexpected input"
-   in [Post {from = "k", to = dest, thread = [parentId], body = fk (body p)}]
+   in [Post {from = "k", channel = Nothing, to = dest, thread = [parentId], body = fk (body p)}]
 
 -- | m stays silent until it has seen both parents, then synthesises.
 -- The seed-b seed has id 1 and the final k reply has id 6.

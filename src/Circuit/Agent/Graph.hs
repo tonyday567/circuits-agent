@@ -22,7 +22,7 @@ module Circuit.Agent.Graph
     GraphAgent,
 
     -- * Construction
-    channel,
+    edgeChannel,
     bus,
     star,
     chain,
@@ -90,8 +90,8 @@ nested = NestedAgent
 type GraphAgent = Agent (->) ([Post Text], Maybe [Post Text]) (Post Text) [Post Text]
 
 -- | A single channel as an edge label.
-channel :: Channel -> ChannelSet
-channel = Set.singleton
+edgeChannel :: Channel -> ChannelSet
+edgeChannel = Set.singleton
 
 -- | Every named agent posts to and subscribes to @ch@.
 --
@@ -99,15 +99,15 @@ channel = Set.singleton
 bus :: [Name] -> Channel -> AgentGraph
 bus names ch =
   let vs = LG.vertices names
-   in LG.connect (channel ch) vs vs
+   in LG.connect (edgeChannel ch) vs vs
 
 -- | A hub agent that posts to @hubCh@; leaf agents post to @leafCh@.
 star :: Name -> [Name] -> Channel -> Channel -> AgentGraph
 star hub leaves hubCh leafCh =
   let hubV = LG.vertex hub
       leafV = LG.vertices leaves
-   in LG.connect (channel hubCh) hubV leafV
-        `LG.overlay` LG.connect (channel leafCh) leafV hubV
+   in LG.connect (edgeChannel hubCh) hubV leafV
+        `LG.overlay` LG.connect (edgeChannel leafCh) leafV hubV
 
 -- | Chain agents left-to-right on a single channel.
 chain :: [Name] -> Channel -> AgentGraph
@@ -117,7 +117,7 @@ chain names ch =
     (n : ns) -> go (LG.vertex n) ns
   where
     go g [] = g
-    go g (n : ns) = go (LG.connect (channel ch) g (LG.vertex n)) ns
+    go g (n : ns) = go (LG.connect (edgeChannel ch) g (LG.vertex n)) ns
 
 -- | Per-vertex incoming and outgoing channel sets.
 data VertexInfo = VertexInfo

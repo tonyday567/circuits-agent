@@ -29,7 +29,7 @@ framingTopic :: IO ()
 framingTopic = do
   putStrLn "Tier F: framing laws"
   do
-    let p = Post "kimi" ["bus"] [3] ("hello \nworld ♪" :: Text)
+    let p = Post "kimi" Nothing ["bus"] [3] ("hello \nworld ♪" :: Text)
         stored = case parseTimeText "2026-08-03T23:10:25" of
           Just ts -> Stamped (ts, 42) p
           Nothing -> error "bad timestamp"
@@ -37,7 +37,7 @@ framingTopic = do
       unframeStored @Text (frameStored stored) == Just stored
 
   do
-    let p = Post "a" ["b"] [2] ("body" :: Text)
+    let p = Post "a" Nothing ["b"] [2] ("body" :: Text)
         stored = case parseTimeText "2026-08-03T23:10:25" of
           Just ts -> Stamped (ts, 7) p
           Nothing -> error "bad timestamp"
@@ -67,7 +67,7 @@ framingTopic = do
         Nothing -> False
 
   do
-    let p = Post "kimi" ["bus"] [] ("hi" :: Text)
+    let p = Post "kimi" Nothing ["bus"] [] ("hi" :: Text)
         stored = case parseTimeText "2026-08-03T23:10:25" of
           Just ts -> Stamped (ts, 1) p
           Nothing -> error "bad timestamp"
@@ -75,7 +75,7 @@ framingTopic = do
       parseMessage (frameStored stored) == Just ("kimi", "hi")
 
   do
-    let p = Post "kimi" ["bus"] [] ("hi" :: Text)
+    let p = Post "kimi" Nothing ["bus"] [] ("hi" :: Text)
         s = case parseTimeText "2026-08-03T23:10:25" of
           Just ts -> Stamped (ts, 9) p
           Nothing -> error "bad timestamp"
@@ -89,8 +89,8 @@ framingTopic = do
     let dummyTS = case parseTimeText "2026-01-01T00:00:00" of
           Just ts -> ts
           Nothing -> error "bad timestamp"
-        a = Stamped (dummyTS, 0) (Post "a" [] [] "A")
-        b = Stamped (dummyTS, 1) (Post "b" [] [] "B")
+        a = Stamped (dummyTS, 0) (Post "a" Nothing [] [] "A")
+        b = Stamped (dummyTS, 1) (Post "b" Nothing [] [] "B")
         j :: Framing.Log Text
         j = snoc (snoc (Log []) a) b
     assert "F7: Snoc then Uncons peels oldest first" $
@@ -107,9 +107,9 @@ framingTopic = do
           Just ts -> ts
           Nothing -> error "bad timestamp"
         posts =
-          [ Stamped (dummyTS, 0) (Post "a" ["x"] [1, 2] "multi\nline ♪"),
-            Stamped (dummyTS, 1) (Post "b" ["y"] [] "body2"),
-            Stamped (dummyTS, 2) (Post "c" [] [] "body3")
+          [ Stamped (dummyTS, 0) (Post "a" Nothing ["x"] [1, 2] "multi\nline ♪"),
+            Stamped (dummyTS, 1) (Post "b" Nothing ["y"] [] "body2"),
+            Stamped (dummyTS, 2) (Post "c" Nothing [] [] "body3")
           ] ::
             [Stamped Text]
         j :: Framing.Log Text

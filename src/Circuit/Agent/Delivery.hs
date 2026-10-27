@@ -51,9 +51,9 @@ import Prelude hiding ((*), (+))
 -- | Semiring-generalised delivery predicate.
 --
 -- A post delivers with the semiring's 'one' when @who@ is in the recipient
--- list, or when the recipient list contains the broadcast sentinel @"all"@;
--- @[]@ and @[""]@ are discard (deliver to no one).  Otherwise it delivers
--- with 'zero'.
+-- list; @[]@ and @"[]"@ are discard (deliver to no one).  Otherwise it
+-- delivers with 'zero'.  There is no broadcast sentinel: a broadcast is a
+-- channel whose resolved membership names every member.
 deliversToSemiring ::
   (Additive r, Multiplicative r) =>
   -- | Recipients on the post.
@@ -64,7 +64,6 @@ deliversToSemiring ::
 deliversToSemiring recipients who
   | null recipients = zero
   | recipients == [empty] = zero
-  | ("all" :: Text) `elem` recipients = one
   | who `elem` recipients = one
   | otherwise = zero
 
@@ -76,9 +75,9 @@ deliversToSemiring recipients who
 --
 -- This is the set-based reading of FinRel: objects are finite sets, morphisms
 -- are relations, and the cartesian comonoid on the agent set gives canonical
--- copy/discard generators.  The @\"all\"@ broadcast sentinel is the dagger
--- (relational converse) of 'discardRel'; the empty / @[\"\"]@ case is the zero
--- morphism 'emptyRel'.
+-- copy/discard generators.  The broadcast relation is the dagger (relational
+-- converse) of 'discardRel'; the empty / @"[]"@ case is the zero morphism
+-- 'emptyRel'.
 type DelRel a = Set ((), a)
 
 -- | Canonical copy comonoid on a finite agent set.
@@ -113,19 +112,19 @@ namedRel a = Set.singleton ((), a)
 
 -- | Delivery relation encoded by a post's @to@ list.
 --
--- * @\"all\"@ selects the broadcast relation ('broadcastRel').
--- * @[]@ and @[\"\"]@ select the zero relation ('emptyRel').
+-- * @[]@ and @"[]"@ select the zero relation ('emptyRel').
 -- * Named recipients select the corresponding singleton injections.
+-- * A broadcast is the relation of a channel whose membership is the whole
+--   roster ('broadcastRel'); it is named, never sentinelled.
 deliveryRel ::
   -- | Roster of agents (the codomain of the relation).
   Set Text ->
   -- | Recipients on the post.
   [Text] ->
   DelRel Text
-deliveryRel agents tos
+deliveryRel _agents tos
   | null tos = emptyRel
   | tos == [empty] = emptyRel
-  | ("all" :: Text) `elem` tos = broadcastRel agents
   | otherwise = Set.fromList [((), a) | a <- tos]
 
 -- | Evaluate a delivery relation against a subscriber set.
