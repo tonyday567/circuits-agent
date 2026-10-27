@@ -114,8 +114,9 @@ namedRel a = Set.singleton ((), a)
 --
 -- * @[]@ and @"[]"@ select the zero relation ('emptyRel').
 -- * Named recipients select the corresponding singleton injections.
--- * A broadcast is the relation of a channel whose membership is the whole
---   roster ('broadcastRel'); it is named, never sentinelled.
+-- * The broadcast relation ('broadcastRel') is the image of a post whose
+--   audience names the whole roster; it is named, never sentinelled, and
+--   'deliveryRel' produces it only because its argument lists every member.
 deliveryRel ::
   -- | Roster of agents (the codomain of the relation).
   Set Text ->
