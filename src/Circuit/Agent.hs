@@ -272,8 +272,10 @@ replyTo who parentId p b =
 
 -- | A synthesis: one descendant of several parents — the object-level
 -- wire-merge dual to merging agents.  The ancestry cites every parent id as
--- a normalised set (sorted, duplicates discarded). The channel is inherited
--- from the first parent when all parents share it; otherwise no channel.
+-- a normalised set (sorted, duplicates discarded).  A synthesis is addressed
+-- by its explicit audience and carries no channel: the constructor receives
+-- the audience and the parent ids, never the parent posts, so there is no
+-- channel to inherit.
 synthesis :: Name -> [Name] -> [PostId] -> b -> Post b
 synthesis who audience parentIds b =
   Post
