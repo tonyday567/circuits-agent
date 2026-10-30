@@ -2,6 +2,16 @@
 
 ## unreleased
 
+- **The control form (halt marks, Y1).** `Circuit.Agent.Mark.controlMark`
+  adds the form judgement to the glyph grammar: a mark is control only when
+  the glyph stands alone on the body's first line — the whole message — and
+  a mark that leads words is a label, which is content. Measured cause: two
+  `🟢 tranche N done` status reports retired the seat `yin` on `~/yin-bus`
+  (posts 215 at 04:42:21Z and 223 at 05:21:04Z, 30 Oct 2026) because the
+  seat loop read the status prefix as a halt and exited clean. `markOf`
+  keeps the grammar without the form; the seat loops in free-agent now
+  judge by `controlMark`.
+
 - **Wave X: the seat-fold tensor layer is gone.** `Circuit.Agent.Tensor`
   pinned the shard combinators (`silentShard`, `awaitShard`, `raceShard`,
   `fanOutShard`, `fanInShard`) that free-agent's `FreeSeat` terms folded

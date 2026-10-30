@@ -9,6 +9,11 @@
 -- machine (@spinMark@). Anything stateful (round counters, roles) lives
 -- above this layer.
 --
+-- A mark is control only in the control form — alone on the body's first
+-- line, where the glyph is the whole message. A mark that leads words is a
+-- label, and the words are the message; 'controlMark' is that judgement and
+-- 'markOf' is the grammar without it.
+--
 -- The glyphs:
 --
 --   * 🟡 'Motion' — a claim: "I pick this up".
@@ -32,6 +37,7 @@ module Circuit.Agent.Mark
     markGlyph,
     parseMark,
     markOf,
+    controlMark,
     isHalt,
     isEscalate,
   )
@@ -87,6 +93,33 @@ parseMark t = go [minBound .. maxBound]
 -- | The mark carried by a post's body, if any.
 markOf :: Post Text -> Maybe Mark
 markOf = parseMark . body
+
+-- | The mark a post is controlled by, if it is written in the control form.
+--
+-- The glyphs do two jobs, and the body's first line says which. A mark
+-- alone on that line is the whole message — a command: halt, escalate, the
+-- envelope itself. A mark that leads words on that line is a label — the
+-- status prefix the runner's cards and reports use (@🟢 tranche 1 done@,
+-- @🟡 open header@) — and is content. Reading the label as a command retires
+-- a seat that was only reporting: measured 30 Oct 2026, two
+-- @🟢 tranche N done@ posts halted the seat @yin@ twice.
+--
+-- The reason for a command rides below the glyph, on later lines, where it
+-- costs the command nothing.
+--
+-- > 🟢                              -- control: Landed, the exchange is over
+-- > 🟢
+-- > retire after the verdict lands  -- control: Landed, with its reason
+-- > 🔵                              -- control: StandDown
+-- > 🟢 tranche 1 done · rev 580087  -- content: a report, handed to the agent
+controlMark :: Post Text -> Maybe Mark
+controlMark p =
+  case parseMark line of
+    Just m
+      | line == markGlyph m || line == markGlyph m <> "\xFE0F" -> Just m
+    _ -> Nothing
+  where
+    line = T.strip (T.takeWhile (/= '\n') (body p))
 
 -- | Halt marks: the exchange is over. 'Landed' and 'StandDown'.
 -- 'Timeout' is deliberately not one — a timeout decides nothing.
