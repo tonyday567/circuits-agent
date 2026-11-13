@@ -57,6 +57,7 @@ library
   default-extensions: PackageImports
   exposed-modules:
     Circuit.Agent
+    Circuit.Agent.Conch
     Circuit.Agent.Delivery
     Circuit.Agent.Ends
     Circuit.Agent.Framing
@@ -94,6 +95,7 @@ executable circuits-agent-axioma
   main-is: axioma.hs
   other-modules:
     Axioma.Common
+    Axioma.Conch
     Axioma.Delivery
     Axioma.Framing
     Axioma.Graph

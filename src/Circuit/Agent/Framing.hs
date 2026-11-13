@@ -93,6 +93,13 @@ instance PostBody Text where
   decodePostBody (JString t) = Just t
   decodePostBody _ = Nothing
 
+instance (PostBody a, PostBody b) => PostBody (a, b) where
+  encodePostBody (a, b) = JArray (V.fromList [encodePostBody a, encodePostBody b])
+  decodePostBody (JArray vs) = case V.toList vs of
+    [a, b] -> (,) <$> decodePostBody a <*> decodePostBody b
+    _ -> Nothing
+  decodePostBody _ = Nothing
+
 -- | Storage boundary: a post with its assigned id and timestamp.
 --
 -- This is the agent-side specialisation of 'Circuit.Shared.Stamped' from
@@ -161,6 +168,7 @@ framePost p =
     encodeJson $
       JObject
         [ ("from", JString (from p)),
+          ("channel", maybe JNull JString (channel p)),
           ("to", JArray (V.fromList (map JString (to p)))),
           ("thread", JArray (V.fromList (map (JNumber . fromIntegral) (thread p)))),
           ("body", encodePostBody (body p))

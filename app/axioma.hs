@@ -8,6 +8,7 @@
 -- kept where wave journals reference them.
 module Main (main) where
 
+import Axioma.Conch (conchTopic)
 import Axioma.Delivery (deliveryTopic)
 import Axioma.Framing (framingTopic)
 import Axioma.Graph (graphTopic)
@@ -22,6 +23,7 @@ import Prelude hiding (id, (.))
 
 data Topic
   = All
+  | Conch
   | Tape
   | Delivery
   | Turns
@@ -35,6 +37,7 @@ data Topic
 
 topicName :: Topic -> String
 topicName All = "all"
+topicName Conch = "conch"
 topicName Tape = "tape"
 topicName Delivery = "delivery"
 topicName Turns = "turns"
@@ -47,6 +50,7 @@ topicName Framing = "framing"
 
 topicDesc :: Topic -> String
 topicDesc All = "run all topics"
+topicDesc Conch = "Conch custody: Claims, binding Handovers, resources, force, and recovery"
 topicDesc Tape = "tape/behaviour laws: A0/A1, O1/O2/S3, compaction, run1 monologue (M3)"
 topicDesc Delivery = "addressed-log delivery laws: semiring/FinRel matrices, Chu spaces"
 topicDesc Turns = "turn and meeting laws: turn integrity, loop quiescence, multi-seat cards"
@@ -84,6 +88,7 @@ opts =
 
 runTopic :: Topic -> IO ()
 runTopic All = mapM_ runTopic (filter (/= All) [minBound .. maxBound])
+runTopic Conch = conchTopic
 runTopic Tape = tapeTopic
 runTopic Delivery = deliveryTopic
 runTopic Turns = turnsTopic

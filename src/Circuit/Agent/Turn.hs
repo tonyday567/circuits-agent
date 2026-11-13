@@ -111,6 +111,34 @@ turnProcess = Body (\tok -> step ((emptyTurnState, Nothing), tok)) step (Const .
         then (fst (injectCommand st (turnBody tok)), Nothing)
         else matchResponse st tok
 
+-- | Read responses until the one citing @wanted@ arrives.  A response that
+-- cites a different pending call is that call's business: it is stashed under
+-- its own thread and left for it, so two outstanding calls cannot trade
+-- answers.  A response citing no pending call is stashed for the same reason.
+awaitResponse ::
+  IORef (TurnState Text) ->
+  IORef (Map.Map [PostId] (TurnToken Text)) ->
+  Poles () (K IO) (TurnToken Text) (TurnToken Text) ->
+  [PostId] ->
+  IO Text
+awaitResponse ref stash e wanted = loop
+  where
+    loop = do
+      hit <- Map.lookup wanted <$> readIORef stash
+      case hit of
+        Just resp -> pure (turnBody resp)
+        Nothing -> do
+          resp <- runK (emit e) ()
+          matched <- atomicModifyIORef' ref (`matchResponse` resp)
+          case matched of
+            Just (cmd, resp')
+              | turnThread cmd == wanted -> pure (turnBody resp')
+              | otherwise -> stashAndRetry (turnThread resp') resp'
+            Nothing -> stashAndRetry (turnThread resp) resp
+    stashAndRetry k r = do
+      atomicModifyIORef' stash (\m -> (Map.insert k r m, ()))
+      loop
+
 -- | Run one turn: commit a body, then block until a matching response
 -- arrives.  The correlation is by 'thread', not by position.  Responses
 -- read while another turn is awaited are stashed by thread and found by
@@ -121,22 +149,10 @@ turn ::
 turn e = do
   ref <- newIORef emptyTurnState
   stash <- newIORef Map.empty
-  let await wanted = do
-        hit <- Map.lookup wanted <$> readIORef stash
-        case hit of
-          Just resp -> pure (turnBody resp)
-          Nothing -> do
-            resp <- runK (emit e) ()
-            matched <- atomicModifyIORef' ref $ \st -> matchResponse st resp
-            case matched of
-              Just (_, resp') -> pure (turnBody resp')
-              Nothing -> do
-                modifyIORef' stash (Map.insert (turnThread resp) resp)
-                await wanted
   pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
     runK (commit e) cmd
-    await (turnThread cmd)
+    awaitResponse ref stash e (turnThread cmd)
 
 -- | 'turn' under a deadline (microseconds).  'Nothing' on expiry; the
 -- unarrived response is not lost — the stash and the wire both still
@@ -148,22 +164,10 @@ turnTimeout ::
 turnTimeout us e = do
   ref <- newIORef emptyTurnState
   stash <- newIORef Map.empty
-  let await wanted = do
-        hit <- Map.lookup wanted <$> readIORef stash
-        case hit of
-          Just resp -> pure (turnBody resp)
-          Nothing -> do
-            resp <- runK (emit e) ()
-            matched <- atomicModifyIORef' ref $ \st -> matchResponse st resp
-            case matched of
-              Just (_, resp') -> pure (turnBody resp')
-              Nothing -> do
-                modifyIORef' stash (Map.insert (turnThread resp) resp)
-                await wanted
   pure . Lift . K $ \body -> do
     cmd <- atomicModifyIORef' ref $ \st -> injectCommand st body
     runK (commit e) cmd
-    timeout us (await (turnThread cmd))
+    timeout us (awaitResponse ref stash e (turnThread cmd))
 
 -- | A nonce-correlated pipeline: 'tpSend' commits a command and returns
 -- its id; 'tpRecv' blocks for that id's response.  Pipelining is safe —

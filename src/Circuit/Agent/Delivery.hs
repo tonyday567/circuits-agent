@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 -- | Semiring delivery matrices for addressed posts.
 --
 -- 'deliversTo' in 'Circuit.Agent' is the boolean predicate that gates delivery.

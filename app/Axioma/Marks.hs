@@ -17,7 +17,7 @@ import Circuit.Agent.Mark (Mark (..), isEscalate, isHalt, markGlyph, markOf, par
 import Circuit.Agent.Turn qualified as TurnPort
 import Circuit.Category (K (..))
 import Circuit.Syntax (eval)
-import Control.Concurrent.Async (async, cancel)
+import Control.Concurrent.Async (async, cancel, wait, waitCatch)
 import Control.Concurrent.STM
 import Control.Monad (replicateM)
 import Data.Maybe (isNothing)
@@ -186,3 +186,100 @@ marksTopic = do
     result <- runK (eval turnLoop) "hello"
     assert "turnTimeout returns Nothing on expiry" $
       isNothing result
+
+  putStrLn "concurrent turn correlation"
+  -- Two calls are outstanding at once and the second is answered first.  The
+  -- witness holds the second call's commit at a gate, so the order is fixed
+  -- by construction: the second call has taken its id but its command has not
+  -- reached the wire, and only the first call is reading.  A response that
+  -- cites the second call's id must therefore be stashed for that call, not
+  -- handed back as the first call's answer.
+  do
+    (runnerPoles, cmdQ, sendResp, gate, heldQ) <- gatedRunner
+    turnLoop <- TurnPort.turn runnerPoles
+    firstA <- async (runK (eval turnLoop) "a")
+    cmdA <- atomically (readTQueue cmdQ)
+    secondA <- async (runK (eval turnLoop) "b")
+    cmdB <- atomically (readTQueue heldQ)
+    sendResp (TurnPort.TurnToken "ack: b" (TurnPort.turnThread cmdB))
+    atomically (writeTQueue gate ())
+    _ <- atomically (readTQueue cmdQ)
+    sendResp (TurnPort.TurnToken "ack: a" (TurnPort.turnThread cmdA))
+    resA <- wait firstA
+    resB <- wait secondA
+    assert "turn hands each of two outstanding calls its own response" $
+      (resA, resB) == ("ack: a", "ack: b")
+
+  do
+    (runnerPoles, cmdQ, sendResp, gate, heldQ) <- gatedRunner
+    turnLoop <- TurnPort.turnTimeout 5000000 runnerPoles
+    firstA <- async (runK (eval turnLoop) "a")
+    cmdA <- atomically (readTQueue cmdQ)
+    secondA <- async (runK (eval turnLoop) "b")
+    cmdB <- atomically (readTQueue heldQ)
+    sendResp (TurnPort.TurnToken "ack: b" (TurnPort.turnThread cmdB))
+    atomically (writeTQueue gate ())
+    _ <- atomically (readTQueue cmdQ)
+    sendResp (TurnPort.TurnToken "ack: a" (TurnPort.turnThread cmdA))
+    resA <- wait firstA
+    resB <- wait secondA
+    assert "turnTimeout hands each of two outstanding calls its own response" $
+      (resA, resB) == (Just "ack: a", Just "ack: b")
+
+  -- A deadline turn must not settle on another call's response: the mismatch
+  -- is stashed, the caller keeps waiting, and the deadline is what ends it.
+  do
+    (runnerPoles, cmdQ, sendResp, _gate, heldQ) <- gatedRunner
+    turnLoop <- TurnPort.turnTimeout 200000 runnerPoles
+    firstA <- async (runK (eval turnLoop) "a")
+    _ <- atomically (readTQueue cmdQ)
+    secondA <- async (runK (eval turnLoop) "b")
+    cmdB <- atomically (readTQueue heldQ)
+    sendResp (TurnPort.TurnToken "ack: b" (TurnPort.turnThread cmdB))
+    resA <- wait firstA
+    cancel secondA
+    _ <- waitCatch secondA
+    assert "a deadline turn expires rather than taking another call's response" $
+      isNothing resA
+
+  -- An unissued thread is stashed, not matched: it belongs to no call here.
+  do
+    cmdQ <- newTQueueIO
+    respQ <- newTQueueIO
+    let runnerPoles :: Poles () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        runnerPoles = polesK (atomically . writeTQueue cmdQ) (atomically $ readTQueue respQ)
+        respPoles :: Poles () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text)
+        respPoles = polesK (atomically . writeTQueue respQ) (atomically $ readTQueue cmdQ)
+    turnLoop <- TurnPort.turn runnerPoles
+    firstA <- async (runK (eval turnLoop) "a")
+    cmdA <- atomically (readTQueue cmdQ)
+    runK (commit respPoles) (TurnPort.TurnToken "unsolicited" [99])
+    runK (commit respPoles) (TurnPort.TurnToken "ack: a" (TurnPort.turnThread cmdA))
+    resA <- wait firstA
+    assert "an unissued thread is stashed rather than matched" $
+      resA == "ack: a"
+
+-- | Runner poles for the concurrent-turn witnesses.  A command whose body is
+-- @b@ takes its id, reports the token on the held queue, and parks at the gate
+-- before its command reaches the wire.  The held queue is therefore proof that
+-- the second call holds an id, and the gate decides when the wire sees it.
+gatedRunner ::
+  IO
+    ( Poles () (K IO) (TurnPort.TurnToken Text) (TurnPort.TurnToken Text),
+      TQueue (TurnPort.TurnToken Text),
+      TurnPort.TurnToken Text -> IO (),
+      TQueue (),
+      TQueue (TurnPort.TurnToken Text)
+    )
+gatedRunner = do
+  cmdQ <- newTQueueIO
+  respQ <- newTQueueIO
+  gate <- newTQueueIO
+  heldQ <- newTQueueIO
+  let commitFn tok
+        | TurnPort.turnBody tok == "b" = do
+            atomically (writeTQueue heldQ tok)
+            atomically (readTQueue gate)
+            atomically (writeTQueue cmdQ tok)
+        | otherwise = atomically (writeTQueue cmdQ tok)
+  pure (polesK commitFn (atomically (readTQueue respQ)), cmdQ, atomically . writeTQueue respQ, gate, heldQ)
