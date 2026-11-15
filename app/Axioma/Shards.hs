@@ -17,6 +17,7 @@ import Circuit.Machine (Body (Body), Moore, iomap, pipe)
 import Circuit.Stream (These (..), uncons)
 import Circuit.Tensor (unConst)
 import Control.Concurrent.STM
+import Control.Exception (IOException, try)
 import Data.Functor.Identity (Identity (..))
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (isNothing)
@@ -113,6 +114,26 @@ shardsTopic = do
     (quiet, quietOuts) <- runK emit' born
     committed1 <- runK commit' (quiet, p2)
     committed2 <- runK commit' (committed1, p3)
+    observedRef <- newIORef []
+    let observe channel = do
+          (channel', outs) <- runK emit' channel
+          modifyIORef' observedRef (<> [map body outs])
+          pure (channel', outs)
+    (continuing1, firstOuts) <- observe committed2
+    assert "one emission is observable while the channel continues" $
+      agentLifecycle continuing1 == Continue && map body firstOuts == ["one"]
+    (continuing2, secondOuts) <- observe continuing1
+    observedMid <- readIORef observedRef
+    assert "incremental output retains emission boundaries and order" $
+      agentLifecycle continuing2 == Continue
+        && map body secondOuts == ["two-a", "two-b"]
+        && observedMid == [["one"], ["two-a", "two-b"]]
+    (finalDirect, finalOuts) <- observe continuing2
+    observedFinal <- readIORef observedRef
+    assert "direct final output arrives beside Done" $
+      agentLifecycle finalDirect == Done
+        && map body finalOuts == ["final"]
+        && observedFinal == [["one"], ["two-a", "two-b"], ["final"]]
     (finalChannel, drained) <- drainAgent (scripted emissions) committed2
     compatible <- runAgent (scripted emissions) [p1, p2, p3]
     empty <- runAgent (scripted emissions) []
@@ -127,9 +148,36 @@ shardsTopic = do
       agentLifecycle finalChannel == Done
         && (let AgentChannel (_, rest, n) _ = finalChannel in null rest && n == 4)
     assert "compatibility init/commit/drain agrees with independent legs" $
-      compatible == drained
+      compatible == drained && map body drained == concat observedFinal
     assert "compatibility requires a first post for init" $
       null empty
+
+  putStrLn "Body failure after observable output"
+  do
+    let p1 = mkPost "human" ["body"] "start"
+        replyPost x = mkPost "body" ["human"] x
+        failing :: Agent Int
+        failing =
+          Body
+            (K $ \_ -> pure (AgentChannel 0 Continue))
+            (K $ \(AgentChannel n _, _) -> pure (AgentChannel n Continue))
+            ( K $ \(AgentChannel n _) ->
+                case n of
+                  0 -> pure (AgentChannel 1 Continue, [replyPost "before-failure"])
+                  _ -> ioError (userError "intentional body emit failure")
+            )
+        Body birth _ emit' = failing
+    born <- runK birth p1
+    (continuing, beforeFailure) <- runK emit' born
+    failure <-
+      try (runK emit' continuing) ::
+        IO (Either IOException (AgentChannel Int, [Post Text]))
+    assert "output before failure is observable beside Continue" $
+      agentLifecycle continuing == Continue && map body beforeFailure == ["before-failure"]
+    assert "an emit failure remains an explicit IO exception" $
+      case failure of
+        Left _ -> True
+        Right _ -> False
 
   putStrLn "agent as buffered Poles"
   do
