@@ -147,34 +147,34 @@ framingTopic = do
       "empty input is quiet"
       (replyPosts "kimi" [] [] "x" == [])
 
-    putStrLn "echoShard (exact mock oracle)"
-    sh <- echoShard "kimi"
-    r1 <- runShardIO sh [p1, p2]
+    putStrLn "echoBody (exact mock oracle)"
+    sh <- echoBody "kimi"
+    r1 <- runAgent sh [p1, p2]
     assert
       "echo reply body is the session prompt"
       ( map body r1 == [sessionPrompt [p1, p2]]
           && all ((== "kimi") . from) r1
           && all ((== ["grok", "tony"]) . to) r1
       )
-    r2 <- runShardIO sh [p1]
+    r2 <- runAgent sh [p1]
     assert
       "outbox drains between closes"
       ( map body r2 == ["hello"]
           && all ((== "kimi") . from) r2
           && all ((== ["tony"]) . to) r2
       )
-    r3 <- runShardIO sh []
+    r3 <- runAgent sh []
     assert "empty commit emits nothing" (null r3)
 
-    putStrLn "shard boundary: id-blind by protocol (M1b)"
-    -- The Shard protocol carries bare Posts; stamped ids live in the log
-    -- it is mounted on. A bare shard reply therefore carries no thread
-    -- edge — the ancestry law is enforced by the runners that hold the
-    -- stamp (runSeatBus, runAgentLoop), one layer up.
-    shB <- echoShard "kimi"
-    rb <- runShardIO shB [p1]
+    putStrLn "bare body boundary: id-blind by protocol (M1b)"
+    -- An 'Agent' carries bare Posts; stamped ids live in the log it is
+    -- mounted on. A bare body reply therefore carries no thread edge — the
+    -- ancestry law is enforced by the runners that hold the stamp
+    -- (runSeatBus, runAgentLoop), one layer up.
+    shB <- echoBody "kimi"
+    rb <- runAgent shB [p1]
     assert
-      "a bare shard reply carries no thread edge (ids live in the stamped log)"
+      "a bare body reply carries no thread edge (ids live in the stamped log)"
       (map thread rb == [[]])
 
     putStrLn "thread (ancestry) oracles"

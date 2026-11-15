@@ -139,7 +139,7 @@ portsTopic = do
 
     -- a quiet agent answers nothing: runPort observes the block as absence,
     -- and the carrier still records the committed input.
-    let quietAgent :: Agent (->) [Post Text] (Post Text) [Post Text]
+    let quietAgent :: PureAgent [Post Text] (Post Text) [Post Text]
         quietAgent = cellToAgent (tape (const []))
         qIn = mkPost "human" ["j"] "quiet-ask"
         (mOut, seat') = runPort quietAgent (PortSeat (AgentSeat [] []) [] []) qIn
@@ -239,10 +239,10 @@ portsTopic = do
     assert "tool call body is the args" $ body call == "1 2 3"
 
     -- code: pure Agent that emits a tool-call Post
-    let caller :: Agent (->) [Post Text] (Post Text) [Post Text]
+    let caller :: PureAgent [Post Text] (Post Text) [Post Text]
         caller = cellToAgent (tape callCalc)
         human = mkPost "human" ["j"] "please sum 1 2 3"
-        (outs, _) = runAgentShard caller (AgentSeat [] []) [human]
+        (outs, _) = runAgentPoles caller (AgentSeat [] []) [human]
     assert "agent emits one tool-call post" $
       case outs of
         [p] -> to p == ["calc"] && body p == "1 2 3"
@@ -260,11 +260,11 @@ portsTopic = do
     let secret = mkPost "ops" ["j"] "bus emergency — do not show yet"
         public = mkPost "human" ["j"] "hi j"
         held = [secret, public] -- store exists; not all of it is delivered
-        agent = cellToAgent (tape (reply "j")) :: Agent (->) [Post Text] (Post Text) [Post Text]
+        agent = cellToAgent (tape (reply "j")) :: PureAgent [Post Text] (Post Text) [Post Text]
 
         -- release only public (withhold secret)
         released = filter ((== "human") . from) held
-        (outs, seat) = runAgentShard agent (AgentSeat [] []) released
+        (outs, seat) = runAgentPoles agent (AgentSeat [] []) released
 
     assert "withhold: only released posts enter the carrier" $
       map body (asState seat) == ["hi j"]
@@ -275,7 +275,7 @@ portsTopic = do
 
     -- stuffing everything is the anti-pattern this avoids
     -- tape carrier is newest-first after fold
-    let (outsAll, seatAll) = runAgentShard agent (AgentSeat [] []) held
+    let (outsAll, seatAll) = runAgentPoles agent (AgentSeat [] []) held
     assert "full commit would expose secret in carrier" $
       "bus emergency — do not show yet" `elem` map body (asState seatAll)
         && "hi j" `elem` map body (asState seatAll)

@@ -40,25 +40,23 @@ where
 
 import Algebra.Graph.Labelled qualified as LG
 import Circuit.Agent
-  ( Agent,
-    AgentSeat (..),
-    AgentState (..),
+  ( AgentState (..),
     Name,
     Post (..),
+    PureAgent,
     appendInbox,
     emptyInbox,
     loopWithSubs,
-    runAgentShard,
     watch,
   )
-import Circuit.Machine (Step (..))
+import Circuit.Machine (Body (..))
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Prelude hiding (lookup)
+import Prelude hiding (init, lookup)
 
 -- | A channel is just a 'Name' that appears in 'Post.to'.
 type Channel = Name
@@ -71,14 +69,14 @@ type AgentGraph = LG.Graph ChannelSet Name
 
 -- | A registry entry is either an atomic pure agent or a nested subgraph.
 data AgentNode
-  = AtomicAgent (Agent (->) [Post Text] (Post Text) [Post Text])
+  = AtomicAgent (PureAgent [Post Text] (Post Text) [Post Text])
   | NestedAgent AgentGraph AgentRegistry
 
 -- | Registry of agents.  Names map to atomic agents or whole subgraphs.
 type AgentRegistry = Map Name AgentNode
 
 -- | Smart constructor for an atomic registry entry.
-atomic :: Agent (->) [Post Text] (Post Text) [Post Text] -> AgentNode
+atomic :: PureAgent [Post Text] (Post Text) [Post Text] -> AgentNode
 atomic = AtomicAgent
 
 -- | Smart constructor for a nested registry entry.
@@ -87,7 +85,7 @@ nested = NestedAgent
 
 -- | An agent after graph routing has been applied: the carrier holds the
 -- original history plus the output associated with the current state.
-type GraphAgent = Agent (->) ([Post Text], Maybe [Post Text]) (Post Text) [Post Text]
+type GraphAgent = PureAgent ([Post Text], Maybe [Post Text]) (Post Text) [Post Text]
 
 -- | A single channel as an edge label.
 edgeChannel :: Channel -> ChannelSet
@@ -150,15 +148,20 @@ channelMap = LG.foldg Map.empty singleton connectInfo
 -- replays the most recent routed output, and the input leg routes this
 -- input's output in the same step that produced it — 'run1' is one honest
 -- step, so the graph and the seat agree on what was said.
-routeAgent :: ChannelSet -> Agent (->) [Post Text] (Post Text) [Post Text] -> GraphAgent
+routeAgent :: ChannelSet -> PureAgent [Post Text] (Post Text) [Post Text] -> GraphAgent
 routeAgent outChs inner =
-  Step $ \((hist, mout), d) ->
-    case d of
-      Left _ -> ((hist, mout), (fromMaybe [] mout, ()))
-      Right inp ->
-        let (outs, seat') = runAgentShard inner (AgentSeat hist []) [inp]
+  Body
+    ( \inp ->
+        let (hist, outs) = emit inner (init inner inp)
             routed = map (\p -> p {to = Set.toList outChs}) outs
-         in ((asState seat', Just routed), (routed, ()))
+         in (hist, Just routed)
+    )
+    ( \((hist, _), inp) ->
+        let (hist', outs) = emit inner (commit inner (hist, inp))
+            routed = map (\p -> p {to = Set.toList outChs}) outs
+         in (hist', Just routed)
+    )
+    (\(hist, mout) -> ((hist, mout), fromMaybe [] mout))
 
 -- | Inject parent-imposed channels into a subgraph.  Every internal vertex
 -- receives the incoming channels and gains the outgoing channels, so that
@@ -170,21 +173,24 @@ injectChannels ins outs g =
 -- | Interpret a graph as a single agent.  The carrier is the input history;
 -- each new post is fed to the graph and the freshly generated posts are
 -- emitted.
-toAgent :: AgentGraph -> AgentRegistry -> Agent (->) [Post Text] (Post Text) [Post Text]
+toAgent :: AgentGraph -> AgentRegistry -> PureAgent [Post Text] (Post Text) [Post Text]
 toAgent graph registry =
-  Step $ \(hist, d) ->
-    case d of
-      Left _ -> (hist, ([], ()))
-      Right inp ->
-        let hist' = hist ++ [inp]
-            logBefore = runGraph graph registry hist
-            logAfter = runGraph graph registry hist'
-            newPosts = drop (length logBefore) logAfter
-         in (hist', (newPosts, ()))
+  Body
+    (: [])
+    (\(hist, inp) -> hist <> [inp])
+    ( \hist ->
+        let newPosts = case hist of
+              [] -> []
+              _ ->
+                let before = runGraph graph registry (take (length hist - 1) hist)
+                    after = runGraph graph registry hist
+                 in drop (length before) after
+         in (hist, newPosts)
+    )
 
 -- | Resolve a registry entry into a pure agent.  Nested agents are
 -- interpreted as agents over their subgraph with parent channels injected.
-resolveNode :: ChannelSet -> ChannelSet -> AgentNode -> Agent (->) [Post Text] (Post Text) [Post Text]
+resolveNode :: ChannelSet -> ChannelSet -> AgentNode -> PureAgent [Post Text] (Post Text) [Post Text]
 resolveNode _ _ (AtomicAgent a) = a
 resolveNode ins outs (NestedAgent g r) = toAgent (injectChannels ins outs g) r
 

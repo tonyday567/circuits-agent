@@ -140,7 +140,7 @@ turnsTopic = do
   putStrLn "multi-round pure (two Moore agents)"
   do
     let rounds = 3 :: Int
-        nudge :: Agent (->) [Post Text] (Post Text) [Post Text]
+        nudge :: PureAgent [Post Text] (Post Text) [Post Text]
         nudge =
           cellToAgent
             ( tape
@@ -148,7 +148,7 @@ turnsTopic = do
                     [mkPost "nudge" ["worker"] "tell me more."]
                 )
             )
-        worker :: Agent (->) [Post Text] (Post Text) [Post Text]
+        worker :: PureAgent [Post Text] (Post Text) [Post Text]
         worker =
           cellToAgent
             ( tape

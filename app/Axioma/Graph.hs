@@ -37,7 +37,7 @@ runG :: AgentGraph -> AgentRegistry -> [Post Text] -> [Post Text]
 runG g reg ins = sortOn (\p -> (from p, body p)) (runGraph g reg ins)
 
 -- | One-shot ack agent: replies to the newest post it did not send itself.
-ack :: Text -> Agent (->) [Post Text] (Post Text) [Post Text]
+ack :: Text -> PureAgent [Post Text] (Post Text) [Post Text]
 ack name = cellToAgent $ tape $ \hist ->
   case filter (\p -> from p /= name) hist of
     (p : _) -> [p {from = name, to = [], body = "ack:" <> body p}]
@@ -134,19 +134,19 @@ graphTopic = do
 
   putStrLn "fan-in lands exactly one post"
   do
-    let worker = cellToAgent (tape (reply "xyzzy")) :: Agent (->) [Post Text] (Post Text) [Post Text]
+    let worker = cellToAgent (tape (reply "xyzzy")) :: PureAgent [Post Text] (Post Text) [Post Text]
         main0 = AgentSeat [] [] :: AgentSeat [Post Text] Text
         prompt1 = mkPost "human" ["xyzzy"] "task one"
         prompt2 = mkPost "human" ["xyzzy"] "task two"
-        (outs1, fork1) = runAgentShard worker main0 [prompt1]
-        (outs2, fork2) = runAgentShard worker main0 [prompt2]
+        (outs1, fork1) = runAgentPoles worker main0 [prompt1]
+        (outs2, fork2) = runAgentPoles worker main0 [prompt2]
         summaryPosts =
           [ mkPost
               "xyzzy"
               ["xyzzy"]
               ("summary: " <> T.intercalate " + " (map body (outs1 ++ outs2)))
           ]
-        (mainOuts, main1) = runAgentShard worker main0 summaryPosts
+        (mainOuts, main1) = runAgentPoles worker main0 summaryPosts
     assert "fan-in lands exactly one post: main carrier grew by exactly 1" $
       length (asState main1) == length (asState main0) + 1
     assert "fan-in lands exactly one post: main seat outputs respond to the summary only" $
@@ -159,8 +159,8 @@ graphTopic = do
   do
     let seed = mkPost "human" ["xyzzy"] "start"
         t0 = [seed]
-        agentA = cellToAgent (tape (cardEcho "a")) :: Agent (->) [Post Text] (Post Text) [Post Text]
-        agentB = cellToAgent (tape (cardEcho "b")) :: Agent (->) [Post Text] (Post Text) [Post Text]
+        agentA = cellToAgent (tape (cardEcho "a")) :: PureAgent [Post Text] (Post Text) [Post Text]
+        agentB = cellToAgent (tape (cardEcho "b")) :: PureAgent [Post Text] (Post Text) [Post Text]
         -- one round: first seat turns, new card posts route to both inboxes
         -- (self-loop: its own reply re-enters), then the second seat turns.
         mkRound first second (stF, stS, lg) =

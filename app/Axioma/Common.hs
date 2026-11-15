@@ -33,8 +33,8 @@ module Axioma.Common
     calc,
     selfLoopPolicy,
     cardEcho,
-    constShard,
-    tagShard,
+    constAgentIO,
+    tagAgentIO,
   )
 where
 
@@ -110,7 +110,7 @@ newFor who lg st = filter (`notElem` asCarrier st) (watch @Text who lg)
 -- | Parallel reduction: every agent runs against the *same* input log, and
 -- all emitted posts are appended to that log.  This is the schedule-independent
 -- baseline that O8 compares against the round-robin 'loop'.
-runParallel :: [(Text, Agent (->) [Post Text] (Post Text) [Post Text])] -> [Post Text] -> [Post Text]
+runParallel :: [(Text, PureAgent [Post Text] (Post Text) [Post Text])] -> [Post Text] -> [Post Text]
 runParallel roster lg = foldl' (flip post) lg outputs
   where
     outputs = concatMap (\(who, agent) -> beh agent [] (watch @Text [who] lg)) roster
@@ -137,7 +137,7 @@ outcomesRace :: ([Post Text] -> [Post Text]) -> ([Post Text] -> [Post Text]) -> 
 outcomesRace f g hist = nub [raceP f g hist, raceP g f hist]
 
 -- | Agent that ignores its history and always emits the same list.
-constAgent :: [Post Text] -> Agent (->) [Post Text] (Post Text) [Post Text]
+constAgent :: [Post Text] -> PureAgent [Post Text] (Post Text) [Post Text]
 constAgent outs = cellToAgent (tape (const outs))
 
 -- | STM agent that ignores its history and always emits the same list.
@@ -205,12 +205,12 @@ cardEcho name hist =
   let p = peek hist
    in [mkPost name ["xyzzy"] ("🟢 echo: " <> body p) | from p == "human"]
 
--- Shared shard factories for the tensor topics (a main-do-level let in the
+-- Shared agent factories for the tensor topics (a main-do-level let in the
 -- monolith, hoisted here so every topic sees them).
-constShard :: [Post Text] -> AgentShard [Post Text] [Post Text]
-constShard outs = ioShard (const (pure outs))
+constAgentIO :: [Post Text] -> Agent [Post Text]
+constAgentIO outs = ioAgent (const (pure outs))
 
-tagShard :: Text -> AgentShard [Post Text] [Post Text]
-tagShard suffix = ioShard (pure . map addSuffix)
+tagAgentIO :: Text -> Agent [Post Text]
+tagAgentIO suffix = ioAgent (pure . map addSuffix)
   where
     addSuffix x = x {body = body x <> suffix}

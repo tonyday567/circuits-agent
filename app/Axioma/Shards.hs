@@ -4,7 +4,7 @@
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
--- | shard combinators, agent-as-shard, branch agent, token ports.
+-- | ends combinators, agent-as-ends, branch agent, token ports.
 module Axioma.Shards
   ( shardsTopic,
   )
@@ -13,8 +13,7 @@ where
 import Axioma.Common
 import Circuit.Agent
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body), Moore, Step (..))
-import Circuit.Poly (monoDir)
+import Circuit.Machine (Body (Body), Moore, iomap, pipe)
 import Circuit.Stream (These (..), uncons)
 import Circuit.Tensor (unConst)
 import Control.Concurrent.STM
@@ -29,44 +28,53 @@ default (Text)
 
 shardsTopic :: IO ()
 shardsTopic = do
-  putStrLn "shard combinators"
+  putStrLn "Poles combinators"
   do
     let p1 = mkPost "human" ["j"] "hi"
         p2 = mkPost "j" ["human"] "ack"
-        fixedShard :: Shard Identity [Post Text] [Post Text]
-        fixedShard = polesK (\_ -> pure ()) (pure [p2])
-        coded = codecShard (map (\p -> p {body = "in:" <> body p})) (map (\p -> p {body = body p <> ":out"})) fixedShard
+        fixedPoles :: Poles () (K Identity) [Post Text] [Post Text]
+        fixedPoles = polesK (\_ -> pure ()) (pure [p2])
+        coded =
+          iomap
+            (K (pure . map (\p -> p {body = "in:" <> body p})))
+            (K (pure . map (\p -> p {body = body p <> ":out"})))
+            fixedPoles
         out = runIdentity (runK (close coded) [p1])
-    assert "codec transforms commit and emit" $
+    assert "iomap transforms commit and emit" $
       map body out == ["ack:out"]
 
     do
       ref <- newIORef []
-      let accumShard :: Shard IO [Post Text] [Post Text]
-          accumShard = polesK (\ps -> modifyIORef' ref (ps ++)) (readIORef ref)
-          composed = composeShard accumShard (suffixShard (map (\p -> p {body = body p <> "!"})) accumShard)
+      let accumPoles :: Poles () (K IO) [Post Text] [Post Text]
+          accumPoles = polesK (\ps -> modifyIORef' ref (ps ++)) (readIORef ref)
+          suffixed =
+            iomap
+              (K pure)
+              (K (pure . map (\p -> p {body = body p <> "!"})))
+              accumPoles
+          composed = pipe accumPoles suffixed
       out2 <- runK (close composed) [p1]
       st <- readIORef ref
-      assert "compose chains shards through the carrier" $
+      assert "pipe chains Poles through the carrier" $
         map body out2 == ["hi!", "hi!"] && length st == 2
 
-    -- Degeneracy warning: composePoles over allocated channels splays through
+    -- Degeneracy warning: pipe over allocated channels splays through
     -- the unit and serialises the intermediate wire.  An honest pipeline with
     -- a separate buffer and pump can feed a multi-read consumer; the composed
     -- end cannot.
     do
-      let pairSumEnd :: TQueue Int -> IO (Shard IO Int Int)
+      let pairSumEnd :: TQueue Int -> IO (Poles () (K IO) Int Int)
           pairSumEnd q =
             pure $ polesK (atomically . writeTQueue q) (atomically $ (+) <$> readTQueue q <*> readTQueue q)
-      e1 <- openIO Unbounded :: IO (Shard IO Int Int)
+      e1 <- openIO Unbounded :: IO (Poles () (K IO) Int Int)
       e2 <- pairSumEnd =<< newTQueueIO
-      let e12 = composeShard e1 e2
+      let e12 = pipe e1 e2
           Poles e1Write _ _ = e1
           Poles _ _ e12Read = e12
       runK e1Write 1
       runK e1Write 2
       serialResult <- timeout 100000 $ runK e12Read ()
-      e1' <- openIO Unbounded :: IO (Shard IO Int Int)
+      e1' <- openIO Unbounded :: IO (Poles () (K IO) Int Int)
       (ePipe, closePipe) <- pipeEnds e1' pairSumEnd
       let Poles e1Write' _ _ = e1'
           Poles _ _ ePipeRead = ePipe
@@ -74,38 +82,84 @@ shardsTopic = do
       runK e1Write' 2
       pipelinedResult <- timeout 1000000 $ runK ePipeRead ()
       closePipe
-      assert "composePoles serialises allocated channels; honest pipeline does not" $
+      assert "pipe serialises allocated channels; honest pipeline does not" $
         isNothing serialResult && pipelinedResult == Just 3
 
-  putStrLn "agent as shard"
+  putStrLn "Body commit/emit independence"
   do
-    let ack :: Agent (->) [Post Text] (Post Text) [Post Text]
+    let p1 = mkPost "human" ["body"] "first"
+        p2 = mkPost "human" ["body"] "second"
+        p3 = mkPost "human" ["body"] "third"
+        replyPost x = mkPost "body" ["human"] x
+        emissions = [[], [replyPost "one"], [replyPost "two-a", replyPost "two-b"], [replyPost "final"]]
+        scripted :: [[Post Text]] -> Agent ([Text], [[Post Text]], Int)
+        scripted script =
+          Body
+            (K $ \first -> pure (AgentChannel ([body first], script, 0) Continue))
+            ( K $ \(AgentChannel (seen, rest, n) _, post_) ->
+                pure (AgentChannel (seen <> [body post_], rest, n) Continue)
+            )
+            ( K $ \(AgentChannel (seen, rest, n) _) ->
+                case rest of
+                  [] -> pure (AgentChannel (seen, [], n) Done, [])
+                  (outs : more) ->
+                    pure
+                      ( AgentChannel (seen, more, n + 1) (if null more then Done else Continue),
+                        outs
+                      )
+            )
+        Body birth commit' emit' = scripted emissions
+    born <- runK birth p1
+    (quiet, quietOuts) <- runK emit' born
+    committed1 <- runK commit' (quiet, p2)
+    committed2 <- runK commit' (committed1, p3)
+    (finalChannel, drained) <- drainAgent (scripted emissions) committed2
+    compatible <- runAgent (scripted emissions) [p1, p2, p3]
+    empty <- runAgent (scripted emissions) []
+    assert "an independent emit can be quiet before later commits" $
+      null quietOuts && agentLifecycle quiet == Continue
+    assert "commits retain independent inputs in order" $
+      let AgentChannel (seen, _, _) _ = finalChannel
+       in seen == ["first", "second", "third"]
+    assert "drain passes quiet, single, repeated, and final Done output in order" $
+      map body drained == ["one", "two-a", "two-b", "final"]
+    assert "final output is retained beside Done after four emits" $
+      agentLifecycle finalChannel == Done
+        && (let AgentChannel (_, rest, n) _ = finalChannel in null rest && n == 4)
+    assert "compatibility init/commit/drain agrees with independent legs" $
+      compatible == drained
+    assert "compatibility requires a first post for init" $
+      null empty
+
+  putStrLn "agent as buffered Poles"
+  do
+    let ack :: PureAgent [Post Text] (Post Text) [Post Text]
         ack = cellToAgent (tape (reply "j"))
         pIn = mkPost "human" ["j"] "hi"
         -- pure closed form
-        (outs, seat) = runAgentShard ack (AgentSeat [] []) [pIn]
-    assert "runAgentShard one ack" $
+        (outs, seat) = runAgentPoles ack (AgentSeat [] []) [pIn]
+    assert "runAgentPoles one ack" $
       map body outs == ["ack: hi"] && length (asState seat) == 1
 
     -- same citizen through a real carrier (IORef) — commit/emit only at the
     -- boundary, matching the pure runner
     do
       ref <- newIORef (AgentSeat [] [] :: AgentSeat [Post Text] Text)
-      let sh :: Shard IO [Post Text] [Post Text]
-          sh = agentShard (readIORef ref) (\seat -> writeIORef ref seat) ack
+      let sh :: Poles () (K IO) [Post Text] [Post Text]
+          sh = agentPoles (readIORef ref) (\st -> writeIORef ref st) ack
       outs2 <- runK (close sh) [pIn]
       seat2 <- readIORef ref
-      assert "agentShard close matches runAgentShard" $
+      assert "agentPoles close matches runAgentPoles" $
         outs2 == outs && asState seat2 == asState seat
 
     let pIn2 = mkPost "human" ["j"] "again"
-        (outs3, seat3) = runAgentShard ack seat [pIn2]
-    assert "agentShard keeps carrier across turns" $
+        (outs3, seat3) = runAgentPoles ack seat [pIn2]
+    assert "agentPoles keeps carrier across turns" $
       map body outs3 == ["ack: again"] && length (asState seat3) == 2
 
   putStrLn "O5: arity change"
   do
-    let arityBreaker :: Agent (->) [Post Text] (Post Text) [Post Text]
+    let arityBreaker :: PureAgent [Post Text] (Post Text) [Post Text]
         arityBreaker =
           cellToAgent
             ( tape
@@ -118,37 +172,36 @@ shardsTopic = do
             )
         pIn = mkPost "human" ["j"] "a"
         pIn2 = mkPost "human" ["j"] "b"
-        (outs, _) = runAgentShard arityBreaker (AgentSeat [] []) [pIn, pIn2]
+        (outs, _) = runAgentPoles arityBreaker (AgentSeat [] []) [pIn, pIn2]
     assert "O5: Agent now emits a list per input, so input length /= output length" $
       length [pIn, pIn2] /= length outs
 
   putStrLn "branch agent"
   do
-    let liftAgent :: Moore (,) [Post Text] (->) (Post Text) [Post Text] -> Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
-        liftAgent sys =
-          Step $ \((tag, hist), d) ->
-            let inp = monoDir d
-                Body _ k o = sys
-                hist' = k (hist, inp)
-             in ((tag, hist'), (unConst (o hist'), ()))
+    let liftAgent :: Bool -> Moore (,) [Post Text] (->) (Post Text) [Post Text] -> PureAgent (Bool, [Post Text]) (Post Text) [Post Text]
+        liftAgent tag (Body _ k o) =
+          Body
+            (\inp -> (tag, k ([], inp)))
+            (\((tg, hist), inp) -> (tg, k (hist, inp)))
+            (\ch@(_, hist) -> (ch, unConst (o hist)))
         calcOnly :: Moore (,) [Post Text] (->) (Post Text) [Post Text]
         calcOnly = tape calc
         echoOnly :: Moore (,) [Post Text] (->) (Post Text) [Post Text]
         echoOnly = tape (reply "j")
-        branchy :: Agent (->) (Bool, [Post Text]) (Post Text) [Post Text]
-        branchy = branchAgent fst (liftAgent calcOnly) (liftAgent echoOnly)
+        branchy :: PureAgent (Bool, [Post Text]) (Post Text) [Post Text]
+        branchy = branchAgent fst (liftAgent True calcOnly) (liftAgent False echoOnly)
         pCalc = mkPost "human" ["j"] "1 2 3"
         pEcho = mkPost "human" ["j"] "hello"
 
     -- Mode True selects the calc branch.
-    let (outsCalc, seatCalc) = runAgentShard branchy (AgentSeat (True, []) []) [pCalc]
+    let (outsCalc, seatCalc) = runAgentPoles branchy (AgentSeat (True, []) []) [pCalc]
     assert "branch agent mode True -> calc output" $
       map body outsCalc == ["6"]
     assert "branch agent mode True preserves tag" $
       fst (asState seatCalc)
 
     -- Mode False selects the echo branch.
-    let (outsEcho, seatEcho) = runAgentShard branchy (AgentSeat (False, []) []) [pEcho]
+    let (outsEcho, seatEcho) = runAgentPoles branchy (AgentSeat (False, []) []) [pEcho]
     assert "branch agent mode False -> echo output" $
       map body outsEcho == ["ack: hello"]
     assert "branch agent mode False preserves tag" $
@@ -156,7 +209,7 @@ shardsTopic = do
 
   putStrLn "port (token seat)"
   do
-    let ack :: Agent (->) [Post Text] (Post Text) [Post Text]
+    let ack :: PureAgent [Post Text] (Post Text) [Post Text]
         ack = cellToAgent (tape (reply "j"))
         pIn = mkPost "human" ["j"] "hi"
         (pOut, ps1) = runPort ack (PortSeat (AgentSeat [] []) [] []) pIn
@@ -179,16 +232,14 @@ shardsTopic = do
             && u [1] == This 1
             && u [1, 2, 3] == These 1 [2, 3]
 
-  putStrLn "ioShard container dial"
+  putStrLn "ioAgent container dial"
   do
     let a = mkPost "alice" [] "a"
         b = mkPost "bob" [] "b"
         c = mkPost "carol" [] "c"
         outPost x = x {body = "out:" <> body x}
-        sh = ioShard (pure . map outPost)
-        runBag sh' ins = do
-          (outs, _) <- closeShardIO sh' ins []
-          pure (toBag outs)
-    bag1 <- runBag sh [a, b, c]
-    bag2 <- runBag sh [c, a, b]
+        sh = ioAgent (pure . map outPost)
+        runBag ins = toBag <$> runAgent sh ins
+    bag1 <- runBag [a, b, c]
+    bag2 <- runBag [c, a, b]
     assert "permuting input preserves output bag" $ bag1 == bag2

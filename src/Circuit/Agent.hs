@@ -2,46 +2,51 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
--- | Moore agents on a shared, addressed log; opaque shards for effects.
+-- | Body-shaped agents on a shared, addressed log.
 --
--- Pure agent shape:
+-- Pure meeting body:
 --
 -- @
--- type Agent arr s a b = Step (,) (,) s s arr (Either Void a) (b, ())
+-- type PureAgent s a b = Body (,) (,) s s (->) a b
 -- @
 --
 -- Free carrier @s@ is required by the pretense (tape vs summary).  The common
--- log case is @Agent (->) [Post] Post [Post]@ — state is the received stream.
+-- log case is @PureAgent [Post] Post [Post]@ — state is the received stream.
 -- That carrier is a parse of the tape: each committed @Post@ is one token.
 --
 -- Effectful boundary (preferred pin):
 --
 -- @
--- type Shard m a b = Ends (K m) a b
+-- type Agent s = Body (,) (,) (AgentChannel s) (AgentChannel s) (K IO) (Post Text) [Post Text]
 -- @
 --
--- Symmetric in the common log case: commit a list of posts, emit a list of
--- posts.  One-post reality (hit enter) is not another type — lift with @(:[])@
--- on the commit side.  Opacity is commit\/emit only; no interior.
+-- Commit and emit are independent legs.  Several posts may be committed before
+-- any output is emitted, and an emit may return zero, one, or many posts,
+-- including a final batch beside 'Done'.  'runAgent' is the ordered
+-- compatibility runner — birth from the first post, commit the rest, drain
+-- emissions through 'Done'.
 --
--- Change of base (circuits-parser sense): 'agentShard' reinterprets a pure
--- 'Agent' at @K m@ ends — same Moore citizen, effectful interface.
--- Direct shards (hermes session, muster-agent) skip the pure coalgebra and
--- inhabit 'Shard' only.
+-- Symmetric in the common log case: commit a post, emit a list of posts.
+-- One-post reality (hit enter) is not another type — lift with @(:[])@ on the
+-- commit side.  Opacity is commit\/emit only; no interior.
 --
--- Token seat around a list shard (parser dual): stream @f = [Post]@, token
+-- Change of base (circuits-parser sense): 'agentPoles' reinterprets a pure
+-- meeting body at @K m@ ends — same Moore citizen, effectful interface.
+-- Direct seats (hermes session, muster-agent) skip the pure coalgebra and
+-- inhabit 'Agent' only.
+--
+-- Token seat around an @Ends@ pair (parser dual): stream @f = [Post]@, token
 -- @s = Post@.  'batchEnds' snocs tokens into a stream (build @f@); 'unbatchEnds'
--- peels with the same coalgebra as 'Uncons' on lists.  Compose with the
--- shard via @'pipe'@:
+-- peels with the same coalgebra as 'Uncons' on lists.  Compose with @'pipe'@:
 --
 -- @
--- portShard = batchEnds … `pipe` shard `pipe` unbatchEnds …
---   :: Shard m Post [Post] `pipe` Shard m [Post] [Post] `pipe` Shard m [Post] Post
+-- batchEnds … `pipe` ends `pipe` unbatchEnds …
+--   :: Poles () (K m) Post [Post] `pipe` Poles () (K m) [Post] [Post] `pipe` Poles () (K m) [Post] Post
 --   :: Port m
 -- @
 --
 -- Queue ends ('openSTM' \/'openIO') are the effectful token wire of the same
--- shape when you need a bare @Post\/@Post@ channel without a shard.
+-- shape when you need a bare @Post\/@Post@ channel without buffering.
 --
 -- Design card: @coffee\/loom\/agent.md@.
 module Circuit.Agent
@@ -62,8 +67,17 @@ module Circuit.Agent
     emptyLog,
     Name,
 
-    -- * Pure agents
+    -- * Effectful post agents
     Agent,
+    AgentChannel (..),
+    Lifecycle (..),
+    ioAgent,
+    drainAgent,
+    runAgent,
+
+    -- * Pure and effect-polymorphic meeting bodies
+    PureAgent,
+    AgentM,
     AgentState (..),
     emptyAgentState,
     tape,
@@ -81,28 +95,23 @@ module Circuit.Agent
     -- * Delivery
     deliversTo,
 
-    -- * Effectful ends (symmetric streams)
-    Shard,
-    shard,
-
-    -- * Agent as Shard (change of base into K)
+    -- * Buffered ends around a meeting body
     AgentSeat (..),
     feedAgent,
     flushOutbox,
-    agentShard,
-    runAgentShard,
+    agentPoles,
+    runAgentPoles,
 
     -- * Pure port turns
     PortSeat (..),
     runPort,
 
-    -- * Token seat (stream buffers around a Shard)
+    -- * Token stream buffers
     Port,
     Snoc (..),
     snocPost,
     batchEnds,
     unbatchEnds,
-    portShard,
 
     -- * Forces
     watch,
@@ -179,38 +188,25 @@ module Circuit.Agent
     openSTM,
     openIO,
     pipeEnds,
-
-    -- * Shard combinators
-    prefixShard,
-    suffixShard,
-    codecShard,
-    composeShard,
-
-    -- * IO shards (the seat boundary)
-    AgentShard,
-    closeShardIO,
-    ioShard,
   )
 where
 
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, unitEndsSTM, writeHaltChannel)
 import Circuit.Category (K (..))
-import Circuit.Category qualified as Cat
-import Circuit.Machine (Body (Body), Moore, Poles (..), Step (..), close, iomap, pipe, polesK)
-import Circuit.Poly (monoDir, monoIn)
+import Circuit.Machine (Body (Body), Moore, Poles (..), close, polesK)
 import Circuit.Syntax (Syntax (Lift), eval)
 import Circuit.Tensor (Const (..), unConst)
 import Circuit.Trace (FreeTrace)
 import Circuit.Traced (trace)
 import Control.Concurrent.Async (async, cancel, race, wait)
 import Control.Concurrent.STM (STM, atomically, orElse)
+import Control.Monad (foldM)
 import Data.Foldable (traverse_)
 import Data.List (nub, sort)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text, empty)
-import Data.Void (Void, absurd)
 import Numeric.Natural (Natural)
 import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import Prelude hiding (read)
@@ -377,42 +373,65 @@ toBag = foldr insertBag emptyBag
     insertBag x (Bag m) = Bag (Map.insertWith (+) x 1 m)
     emptyBag = Bag Map.empty
 
--- | Agent: a monomial body with free carrier, polymorphic in the base arrow.
---
--- @Agent arr s a b ≅ arr (s, a) (s, b)@ after collapsing unit
--- positions.  Common log case: @Agent (->) s (Post a) [Post a]@ (input = one post,
--- output = list of posts).  @Agent (K m) s a b@ is the monadic Moore
--- machine.
-type Agent arr s a b = Step (,) (,) s s arr (Either Void a) (b, ())
+-- | Lifecycle reported by an effectful agent emission.
+data Lifecycle = Continue | Done
+  deriving (Eq, Show)
 
--- | The observation-carrying bridge into the graph's fused world: the
--- body's position leg reads the body's observation of the post-step
--- state, which is what the delivery runners consume — a reply cites the
--- delivery that triggered it, not the history before it.
---
--- Reading the post-step state here (rather than the incoming one) is
--- what lets 'run1' be a single honest step: the output and the state
--- come from the same transition.
-cellToAgent :: Moore (,) s (->) a b -> Agent (->) s a b
-cellToAgent (Body _ k o) = Step $ \(s, d) -> case d of
-  Left v -> absurd v
-  Right i -> let s' = k (s, i) in (s', (unConst (o s'), ()))
+-- | The visible agent channel: client state and lifecycle in the same value.
+data AgentChannel s = AgentChannel
+  { agentState :: s,
+    agentLifecycle :: Lifecycle
+  }
+  deriving (Eq, Show)
 
--- | Opaque effectful ends: commit an @a@, emit a @b@.
---
--- Common log case: @Shard m [Post] [Post]@.  Pipeline speaks a stream on
--- commit and emit.  Keyboard one-shot:
---
--- @
--- prefixIn (:[])  -- Post -> [Post] on the write
--- @
---
--- Emit is an onslaught of posts (empty = quiet \/ done for that poll).
-type Shard m a b = Poles () (K m) a b
+-- | An input-seeded effectful post agent. Emission is independent of commit:
+-- it may return zero, one, or many posts, including a final batch beside
+-- 'Done'. IO exceptions are the failure channel.
+type Agent s = Body (,) (,) (AgentChannel s) (AgentChannel s) (K IO) (Post Text) [Post Text]
 
--- | Build a 'Shard' from monadic commit and emit actions.
-shard :: (a -> m ()) -> m a -> Shard m a a
-shard = polesK
+-- | A pure meeting body with the same commit/emit factorisation.
+type PureAgent s a b = AgentM (->) s a b
+
+-- | A meeting body polymorphic in its base arrow.
+type AgentM arr s a b = Body (,) (,) s s arr a b
+
+-- | Convert a Moore cell into the two-leg meeting body.
+cellToAgent :: Moore (,) s (->) a b -> PureAgent s a b
+cellToAgent (Body j k o) = Body j k (\s -> (s, unConst (o s)))
+
+-- | Drain ordered emissions through the first 'Done'. The final emission is
+-- always performed, even when the incoming channel already reports 'Done',
+-- so final output cannot be lost.
+drainAgent :: Agent s -> AgentChannel s -> IO (AgentChannel s, [Post Text])
+drainAgent (Body _ _ emit') = go
+  where
+    go channel = do
+      (channel', posts) <- runK emit' channel
+      case agentLifecycle channel' of
+        Done -> pure (channel', posts)
+        Continue -> fmap (posts <>) <$> go channel'
+
+-- | Compatibility runner: initialise from the first post, commit every later
+-- post independently, then drain emissions through 'Done'. An empty input
+-- batch has no birth event and therefore no output.
+runAgent :: Agent s -> [Post Text] -> IO [Post Text]
+runAgent _ [] = pure []
+runAgent agent@(Body birth commit' _) (first : rest) = do
+  born <- runK birth first
+  committed <- foldM (\channel post_ -> runK commit' (channel, post_)) born rest
+  snd <$> drainAgent agent committed
+
+-- | A one-delivery agent from a batched IO action. The first emit returns
+-- the action's posts beside 'Done'.
+ioAgent :: ([Post Text] -> IO [Post Text]) -> Agent [Post Text]
+ioAgent action =
+  Body
+    (K (\post_ -> pure (AgentChannel [post_] Continue)))
+    (K (\(AgentChannel pending _, post_) -> pure (AgentChannel (pending <> [post_]) Continue)))
+    ( K $ \(AgentChannel pending _) -> do
+        posts <- action pending
+        pure (AgentChannel [] Done, posts)
+    )
 
 -- | Born empty, conses each received input onto its history.
 --
@@ -429,12 +448,11 @@ tape f = Body (\i -> [i]) (\(hist, i) -> i : hist) (Const . f)
 -- including the current percept, and that response is both what the world
 -- hears and what the monologue conses. Under 'run1' the pair stays honest:
 -- output equals the head of the recorded history.
-selfrec :: ([i] -> i) -> Agent (->) [i] i i
-selfrec f = Step $ \(hist, d) ->
-  let i = monoDir d
-      h' = i : hist
-      r = f h'
-   in (r : h', (r, ()))
+selfrec :: ([i] -> i) -> PureAgent [i] i i
+selfrec f = Body (\i -> step ([], i)) step observe
+  where
+    step (hist, i) = let h' = i : hist in f h' : h'
+    observe hist = (hist, case hist of r : _ -> r; [] -> error "selfrec: uninitialised channel")
 
 -- | Addressed stream of unread posts for one agent.
 --
@@ -565,7 +583,7 @@ turnAs ::
   (Cons f (Post a), Uncons f (Post a)) =>
   -- | Agent identity recorded in the derivation.
   Name ->
-  Agent (->) s (Post a) [Post a] ->
+  PureAgent s (Post a) [Post a] ->
   AgentState s f ->
   Log f ->
   (AgentState s f, Log f, Maybe (Derivation a))
@@ -587,7 +605,7 @@ turnAs who sys st log0 =
 turn ::
   forall a s f.
   (Cons f (Post a), Uncons f (Post a)) =>
-  Agent (->) s (Post a) [Post a] ->
+  PureAgent s (Post a) [Post a] ->
   AgentState s f ->
   Log f ->
   (AgentState s f, Log f, Maybe (Derivation a))
@@ -624,7 +642,7 @@ takeStream n s = go n s []
 -- | A roster entry with explicit subscriptions: agent name, subscription names,
 -- and the agent itself.  The subscription list is the set of names whose posts
 -- the agent's inbox should receive; the agent's own name need not be in it.
-type RosterEntry s a = (Name, [Name], Agent (->) s (Post a) [Post a])
+type RosterEntry s a = (Name, [Name], PureAgent s (Post a) [Post a])
 
 -- | Round-robin turn-loop until no agent has pending deliveries (quiescence).
 --
@@ -634,7 +652,7 @@ type RosterEntry s a = (Name, [Name], Agent (->) s (Post a) [Post a])
 loop ::
   forall a s f.
   (Snoc s (Post a), Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
-  [(Name, Agent (->) s (Post a) [Post a])] ->
+  [(Name, PureAgent s (Post a) [Post a])] ->
   Log f ->
   ([(Name, AgentState s f)], Log f, [Derivation a])
 loop roster = loopSubs [(n, [n], a) | (n, a) <- roster]
@@ -658,7 +676,7 @@ loopSubs roster log0 = loopWithSubs roster [(n, seedAgentState @a @s @f subs log
 loopWith ::
   forall a s f.
   (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
-  [(Name, Agent (->) s (Post a) [Post a])] ->
+  [(Name, PureAgent s (Post a) [Post a])] ->
   [(Name, AgentState s f)] ->
   Log f ->
   ([(Name, AgentState s f)], Log f, [Derivation a])
@@ -693,7 +711,7 @@ loopWithSubs roster states0 log0 = trace body ()
 meetingLoop ::
   forall a s f.
   (Snoc f (Post a), Cons f (Post a), Uncons f (Post a)) =>
-  [(Name, Agent (->) s (Post a) [Post a])] ->
+  [(Name, PureAgent s (Post a) [Post a])] ->
   FreeTrace Either (->) ([(Name, AgentState s f)], Log f, [Derivation a]) ([(Name, AgentState s f)], Log f, [Derivation a])
 meetingLoop roster = meetingLoopSubs [(n, [n], a) | (n, a) <- roster]
 
@@ -760,86 +778,102 @@ meetingPass roster (states, lg, derivs) = foldl' meetingStep (states, lg, derivs
 -- emit /next/ against a state that only took one turn — for a
 -- self-recording agent, the monologue then remembers an utterance other
 -- than the one the world heard.
-run1 :: Agent (->) s i o -> s -> i -> (o, s)
-run1 sys s i =
-  let (s', (o, ())) = step sys (s, monoIn i)
+run1 :: PureAgent s i o -> s -> i -> (o, s)
+run1 (Body _ k e) s i =
+  let (s', o) = e (k (s, i))
    in (o, s')
 
--- | Lift a pure agent into the 'K' arrow of any functor.
---
--- This is the change of base from @(->)@ to @K m@ on the agent itself:
--- the same Moore coalgebra, but each step now lives in @m@.
-agentM :: (Applicative m) => Agent (->) s a b -> Agent (K m) s a b
-agentM sys = Step (K (pure . step sys))
+-- | Lift every leg of a pure meeting body into an applicative base.
+agentM :: (Applicative m) => PureAgent s a b -> AgentM (K m) s a b
+agentM (Body j k e) =
+  Body
+    (K (pure . j))
+    (K (pure . k))
+    (K (pure . e))
 
--- | Run one step of a monadic agent.
-runAgentM :: (Monad m) => Agent (K m) s a b -> s -> a -> m (b, s)
-runAgentM sys s a =
-  runK (step sys) (s, monoIn a) >>= \(s', (b, ())) -> pure (b, s')
+-- | Run one commit and its independent emit.
+runAgentM :: (Monad m) => AgentM (K m) s a b -> s -> a -> m (b, s)
+runAgentM (Body _ k e) s a = do
+  committed <- runK k (s, a)
+  (s', b) <- runK e committed
+  pure (b, s')
 
--- | STM agent: state is handled transparently inside an STM transaction.
-type AgentS s a = Agent (K STM) s a [a]
+-- | STM meeting body: state is handled transparently inside a transaction.
+type AgentS s a = AgentM (K STM) s a [a]
 
--- | IO agent: the STM boundary has been crossed; state is no longer
--- transparently handled.
-type AgentX s a = Agent (K IO) s a [a]
+-- | IO meeting body: the STM boundary has been crossed.
+type AgentX s a = AgentM (K IO) s a [a]
 
 -- | Cross from the transparent STM world into the IO boundary.
 agentX :: AgentS s a -> AgentX s a
-agentX sys = Step (K (\(s, d) -> atomically (runK (step sys) (s, d))))
+agentX (Body j k e) =
+  Body
+    (K (atomically . runK j))
+    (K (atomically . runK k))
+    (K (atomically . runK e))
 
 -- | Seat-level product / await in STM.
 awaitS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
-awaitS sys1 sys2 =
-  Step $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (step sys1) (s1, d)
-    (s2', (o2, ())) <- runK (step sys2) (s2, d)
-    pure ((s1', s2'), (o1 <> o2, ()))
+awaitS (Body j1 k1 e1) (Body j2 k2 e2) =
+  Body
+    (K (\a -> (,) <$> runK j1 a <*> runK j2 a))
+    ( K $ \((s1, s2), a) -> do
+        s1' <- runK k1 (s1, a)
+        s2' <- runK k2 (s2, a)
+        pure (s1', s2')
+    )
+    ( K $ \(s1, s2) -> do
+        (s1', o1) <- runK e1 s1
+        (s2', o2) <- runK e2 s2
+        pure ((s1', s2'), o1 <> o2)
+    )
 
--- | Seat-level coproduct / race in STM.
+-- | Seat-level coproduct / race in STM: the left non-empty emit wins.
 raceS :: AgentS s1 a -> AgentS s2 a -> AgentS (s1, s2) a
-raceS sys1 sys2 =
-  Step $ K $ \((s1, s2), d) -> do
-    (s1', (o1, ())) <- runK (step sys1) (s1, d)
-    (s2', (o2, ())) <- runK (step sys2) (s2, d)
-    let o = if null o1 then o2 else o1
-    pure ((s1', s2'), (o, ()))
+raceS (Body j1 k1 e1) (Body j2 k2 e2) =
+  Body
+    (K (\a -> (,) <$> runK j1 a <*> runK j2 a))
+    ( K $ \((s1, s2), a) -> do
+        s1' <- runK k1 (s1, a)
+        s2' <- runK k2 (s2, a)
+        pure (s1', s2')
+    )
+    ( K $ \(s1, s2) -> do
+        (s1', o1) <- runK e1 s1
+        (s2', o2) <- runK e2 s2
+        pure ((s1', s2'), if null o1 then o2 else o1)
+    )
 
--- | Temporal race under IO: run both branches concurrently, return the first
--- branch to emit a non-empty output, and cancel the loser. If the first branch
--- to finish emits nothing, wait for the other branch. If both emit nothing, the
--- right branch's (empty) result is returned.
---
--- This is the honest K-IO refinement of 'raceS': the winner is whichever
--- step produces a mark first, not the left-biased deterministic rule.
+-- | Temporal race under IO: commits initialise both channels; the emit leg
+-- returns the first non-empty output and cancels the losing observation.
 raceIO :: AgentX s1 a -> AgentX s2 a -> AgentX (s1, s2) a
-raceIO sys1 sys2 =
-  Step $ K $ \((s1, s2), d) ->
-    raceFirst (runK (step sys1) (s1, d)) (runK (step sys2) (s2, d)) >>= \case
-      Left (s1', outs) -> pure ((s1', s2), (outs, ()))
-      Right (s2', outs) -> pure ((s1, s2'), (outs, ()))
+raceIO (Body j1 k1 e1) (Body j2 k2 e2) =
+  Body
+    (K (\a -> (,) <$> runK j1 a <*> runK j2 a))
+    ( K $ \((s1, s2), a) -> do
+        s1' <- runK k1 (s1, a)
+        s2' <- runK k2 (s2, a)
+        pure (s1', s2')
+    )
+    (K (\(s1, s2) -> raceFirst s1 s2 (runK e1 s1) (runK e2 s2)))
   where
-    raceFirst act1 act2 = do
+    raceFirst s1 s2 act1 act2 = do
       a1 <- async act1
       a2 <- async act2
-      let finishLeft s1' outs = cancel a2 >> pure (Left (s1', outs))
-          finishRight s2' outs = cancel a1 >> pure (Right (s2', outs))
+      let finishLeft (s1', outs) = cancel a2 >> pure ((s1', s2), outs)
+          finishRight (s2', outs) = cancel a1 >> pure ((s1, s2'), outs)
       race (wait a1) (wait a2) >>= \case
-        Left (s1', (outs1, ()))
-          | not (null outs1) -> finishLeft s1' outs1
-          | otherwise -> do
-              (s2', (outs2, ())) <- wait a2
-              finishRight s2' outs2
-        Right (s2', (outs2, ()))
-          | not (null outs2) -> finishRight s2' outs2
-          | otherwise -> do
-              (s1', (outs1, ())) <- wait a1
-              finishLeft s1' outs1
+        Left (s1', outs1)
+          | not (null outs1) -> finishLeft (s1', outs1)
+          | otherwise -> wait a2 >>= finishRight
+        Right (s2', outs2)
+          | not (null outs2) -> finishRight (s2', outs2)
+          | otherwise -> wait a1 >>= finishLeft
 
 -- | Run one step of an STM agent.
 stepS :: AgentS s a -> s -> a -> STM (s, [a])
 stepS sys s i = do
-  (s', (outs, ())) <- runK (step sys) (s, monoIn i)
+  (outs, s') <- runAgentM sys s i
   pure (s', outs)
 
 -- | Fold an STM agent over a bundle of inputs within one transaction.
@@ -935,7 +969,7 @@ selfLoopL agent s0 ends = runK (eval (agentLoopL agent ends ends)) s0
 type Beh a = [Post a] -> [Post a]
 
 -- | Run an agent from an initial carrier to obtain its 'Beh'aviour.
-beh :: Agent (->) s (Post a) [Post a] -> s -> Beh a
+beh :: PureAgent s (Post a) [Post a] -> s -> Beh a
 beh _sys _s0 [] = []
 beh sys s0 (i : ins) =
   let (os, s') = run1 sys s0 i
@@ -948,39 +982,50 @@ beh sys s0 (i : ins) =
 -- predicate is evaluated on the carrier before the input is consumed, which
 -- is the honest Moore shape: output is a function of state, and the chosen
 -- branch's update function determines the next state.
-branchAgent :: (s -> Bool) -> Agent (->) s a b -> Agent (->) s a b -> Agent (->) s a b
-branchAgent cond sys1 sys2 =
-  Step $ \(state, d) ->
-    if cond state then step sys1 (state, d) else step sys2 (state, d)
+branchAgent :: (s -> Bool) -> PureAgent s a b -> PureAgent s a b -> PureAgent s a b
+branchAgent cond (Body i1 c1 e1) (Body _i2 c2 e2) =
+  Body
+    i1
+    (\(state, a) -> if cond state then c1 (state, a) else c2 (state, a))
+    (\state -> if cond state then e1 state else e2 state)
 
 -- | Seat-level product / await: both agents run on the same input; states are
 -- paired; emits are concatenated left-to-right.
 awaitA ::
-  Agent (->) s1 (Post a) [Post a] ->
-  Agent (->) s2 (Post a) [Post a] ->
-  Agent (->) (s1, s2) (Post a) [Post a]
-awaitA sys1 sys2 = Step $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = step sys1 (s1, d)
-      (s2', (o2, ())) = step sys2 (s2, d)
-   in ((s1', s2'), (o1 <> o2, ()))
+  PureAgent s1 (Post a) [Post a] ->
+  PureAgent s2 (Post a) [Post a] ->
+  PureAgent (s1, s2) (Post a) [Post a]
+awaitA (Body i1 c1 e1) (Body i2 c2 e2) =
+  Body
+    (\a -> (i1 a, i2 a))
+    (\((s1, s2), a) -> (c1 (s1, a), c2 (s2, a)))
+    ( \(s1, s2) ->
+        let (s1', o1) = e1 s1
+            (s2', o2) = e2 s2
+         in ((s1', s2'), o1 <> o2)
+    )
 
 -- | Seat-level coproduct / race: both agents run on the same input; states are
 -- paired; the left emit wins if non-empty, otherwise the right emit wins.
 raceA ::
-  Agent (->) s1 (Post a) [Post a] ->
-  Agent (->) s2 (Post a) [Post a] ->
-  Agent (->) (s1, s2) (Post a) [Post a]
-raceA sys1 sys2 = Step $ \((s1, s2), d) ->
-  let (s1', (o1, ())) = step sys1 (s1, d)
-      (s2', (o2, ())) = step sys2 (s2, d)
-      o = if null o1 then o2 else o1
-   in ((s1', s2'), (o, ()))
+  PureAgent s1 (Post a) [Post a] ->
+  PureAgent s2 (Post a) [Post a] ->
+  PureAgent (s1, s2) (Post a) [Post a]
+raceA (Body i1 c1 e1) (Body i2 c2 e2) =
+  Body
+    (\a -> (i1 a, i2 a))
+    (\((s1, s2), a) -> (c1 (s1, a), c2 (s2, a)))
+    ( \(s1, s2) ->
+        let (s1', o1) = e1 s1
+            (s2', o2) = e2 s2
+         in ((s1', s2'), if null o1 then o2 else o1)
+    )
 
 -- ---------------------------------------------------------------------------
--- Agent as Shard — change of base into K Ends
+-- Agent as Ends — change of base into K
 -- ---------------------------------------------------------------------------
 
--- | State behind an 'agentShard': free carrier plus a pending emit queue.
+-- | State behind an 'agentPoles': free carrier plus a pending emit queue.
 --
 -- Commit parses inputs into the carrier and enqueues one output list per
 -- input (the Moore step).  Emit flushes the queue — empty means quiet.
@@ -992,7 +1037,7 @@ data AgentSeat s a = AgentSeat
   deriving (Show, Eq)
 
 -- | Pure parse step: fold committed posts through the coalgebra.
-feedAgent :: Agent (->) s (Post a) [Post a] -> [Post a] -> AgentSeat s a -> AgentSeat s a
+feedAgent :: PureAgent s (Post a) [Post a] -> [Post a] -> AgentSeat s a -> AgentSeat s a
 feedAgent sys ins (AgentSeat s0 outs0) =
   let (outs1, s1) =
         foldl'
@@ -1008,32 +1053,32 @@ feedAgent sys ins (AgentSeat s0 outs0) =
 flushOutbox :: AgentSeat s a -> ([Post a], AgentSeat s a)
 flushOutbox (AgentSeat s outs) = (outs, AgentSeat s [])
 
--- | Reinterpret a pure 'Agent' as a list 'Shard'.
+-- | Reinterpret a pure meeting body as an @Ends@ pair.
 --
 -- @
--- agentShard get put sys  ::  Shard m [Post] [Post]
+-- agentPoles get put sys  ::  Poles () (K m) [Post] [Post]
 -- @
 --
 -- is the change of base from @(->)@ (the Moore coalgebra) into
 -- @K m@ ends: commit = parse inputs, emit = flush replies.  The
--- interior stays opaque at the 'Shard' boundary — only @[Post]@ in and out.
+-- interior stays opaque at the @Ends@ boundary — only @[Post]@ in and out.
 --
 -- @get@ \/ @put@ hold the 'AgentSeat' (e.g. 'Data.IORef' in @IO@, or
 -- @State@ in tests).  Example — reply agent over @State@:
 --
 -- @
 -- let sys = tape (\\hist -> (peek hist) { from = "j", to = [from (peek hist)], body = "ack: " <> body (peek hist) })
---     sh  = agentShard get put sys  :: Shard (State (AgentSeat [Post])) [Post] [Post]
--- in  evalState (runK (close sh) [humanPost]) (AgentSeat [] [])
+--     ends = agentPoles get put sys  :: Poles () (K (State (AgentSeat [Post]))) [Post] [Post]
+-- in  evalState (runK (close ends) [humanPost]) (AgentSeat [] [])
 -- @
-agentShard ::
+agentPoles ::
   (Monad m) =>
   m (AgentSeat s a) ->
   (AgentSeat s a -> m ()) ->
-  Agent (->) s (Post a) [Post a] ->
-  Shard m [Post a] [Post a]
-agentShard getSeat putSeat sys =
-  shard
+  PureAgent s (Post a) [Post a] ->
+  Poles () (K m) [Post a] [Post a]
+agentPoles getSeat putSeat sys =
+  polesK
     ( \ins -> do
         seat <- getSeat
         putSeat (feedAgent sys ins seat)
@@ -1045,19 +1090,20 @@ agentShard getSeat putSeat sys =
         pure outs
     )
 
--- | One closed turn of an agent-as-shard: commit @ins@, emit replies, new seat.
+-- | One closed turn of a meeting body as @Ends@: commit @ins@, emit replies,
+-- new seat.
 --
--- Pure form of @close@ on 'agentShard' without choosing a monad:
+-- Pure form of @close@ on 'agentPoles' without choosing a monad:
 --
--- @runAgentShard sys seat ins = runState (close (agentShard get put sys) ins) seat@
-runAgentShard :: Agent (->) s (Post a) [Post a] -> AgentSeat s a -> [Post a] -> ([Post a], AgentSeat s a)
-runAgentShard sys seat ins =
+-- @runAgentPoles sys seat ins = runState (close (agentPoles get put sys) ins) seat@
+runAgentPoles :: PureAgent s (Post a) [Post a] -> AgentSeat s a -> [Post a] -> ([Post a], AgentSeat s a)
+runAgentPoles sys seat ins =
   let seat1 = feedAgent sys ins seat
       (outs, seat2) = flushOutbox seat1
    in (outs, seat2)
 
 -- | Pure carrier for a 'Port' turn: the agent seat plus both stream
--- buffers of the @batchEnds@ \/ shard \/ @unbatchEnds@ composition.
+-- buffers of the @batchEnds@ \/ @Ends@ \/ @unbatchEnds@ composition.
 data PortSeat s a = PortSeat
   { psAgent :: AgentSeat s a,
     -- | Pending commit batch (drained by each 'runPort' turn).
@@ -1068,8 +1114,8 @@ data PortSeat s a = PortSeat
   deriving (Show, Eq)
 
 -- | One closed token turn of a pure port: commit the token, emit the reply
--- token. The pure form of @close@ on a 'portShard' composition without
--- choosing a monad:
+-- token. The pure form of @close@ on a @batchEnds@ \/ @Ends@ \/
+-- @unbatchEnds@ composition without choosing a monad:
 --
 -- @
 -- runPort sys (PortSeat seat [] []) p
@@ -1081,7 +1127,7 @@ data PortSeat s a = PortSeat
 -- 'batchEnds' \/ 'unbatchEnds'. 'Nothing' models a quiet agent: the composed
 -- emit would block, and quiet is observable here as absence instead.
 runPort ::
-  Agent (->) s (Post a) [Post a] ->
+  PureAgent s (Post a) [Post a] ->
   PortSeat s a ->
   Post a ->
   (Maybe (Post a), PortSeat s a)
@@ -1093,13 +1139,13 @@ runPort sys (PortSeat seat _ _) p =
         (r : rest) -> (Just r, PortSeat seat2 [] rest)
 
 -- ---------------------------------------------------------------------------
--- Token seat — stream coalgebra around a list Shard (parser dual)
+-- Token seat — stream coalgebra around an @Ends@ pair (parser dual)
 -- ---------------------------------------------------------------------------
 
 -- | Single-post ends: keyboard \/ one-out seat.
 --
--- Obtained by buffering a list 'Shard' on both sides, or by a bare queue
--- ('openSTM' \/ 'openIO').
+-- Obtained by buffering a @Poles () (K m) [Post] [Post]@ pair on both sides, or
+-- by a bare queue ('openSTM' \/ 'openIO').
 --
 -- A /tool call/ from an agent is just a 'Post': the 'to' list names the
 -- tool, 'body' carries the arguments. No extra type — emit that 'Post' on a
@@ -1121,7 +1167,7 @@ batchEnds ::
   (Monad m, Snoc f s) =>
   m f ->
   (f -> m ()) ->
-  Shard m s f
+  Poles () (K m) s f
 batchEnds getBuf putBuf =
   polesK
     ( \x -> do
@@ -1138,7 +1184,7 @@ batchEnds getBuf putBuf =
 -- (parser @next@ \/ 'uncons'). An empty stream blocks: the buffer is
 -- re-read until a token is available — quiet is not an opinion, matching
 -- the blocking read poles of the process ports. In practice the list
--- 'Shard' layer ensures quiet periods are represented by an empty stream,
+-- buffer ensures quiet periods are represented by an empty stream,
 -- so a composed port only blocks when its upstream genuinely has nothing
 -- to say.
 --
@@ -1148,7 +1194,7 @@ unbatchEnds ::
   (Monad m, Semigroup f, Uncons f s) =>
   m f ->
   (f -> m ()) ->
-  Shard m f s
+  Poles () (K m) f s
 unbatchEnds getBuf putBuf =
   polesK
     ( \ys -> do
@@ -1167,83 +1213,3 @@ unbatchEnds getBuf putBuf =
                 pure x
        in await
     )
-
--- | Token seat around a list 'Shard': buffer on both ends via stream coalgebra.
---
--- @
--- portShard getIn putIn getOut putOut sh
---   = batchEnds getIn putIn `pipe` sh `pipe` unbatchEnds getOut putOut
--- @
---
--- Flush\/drain is not a separate policy knob — it /is/ build-stream ('snoc')
--- and peel-stream ('uncons'), the same syntax as parsers over @[s]@.
-portShard ::
-  (Monad m) =>
-  m [Post a] ->
-  ([Post a] -> m ()) ->
-  m [Post a] ->
-  ([Post a] -> m ()) ->
-  Shard m [Post a] [Post a] ->
-  Port m a
-portShard getIn putIn getOut putOut sh =
-  composeShard (composeShard (batchEnds getIn putIn) sh) (unbatchEnds getOut putOut)
-
--- ---------------------------------------------------------------------------
--- Shard combinators
--- ---------------------------------------------------------------------------
-
--- | Adapt a shard on the commit side (contravariant).
---
--- Transform the input before it is committed.  One common use is
--- session assembly: @prefixShard session@ changes the payload that the
--- shard posts.
-prefixShard :: (Monad m) => (a' -> a) -> Shard m a b -> Shard m a' b
-prefixShard f = iomap (K $ pure . f) Cat.id
-
--- | Adapt a shard on the emit side (covariant).
---
--- Transform the output after it is emitted.  One common use is a
--- transport envelope: @suffixShard (map addHeader)@ decorates every
--- emitted post.
-suffixShard :: (Monad m) => (b -> b') -> Shard m a b -> Shard m a b'
-suffixShard g = iomap Cat.id (K $ pure . g)
-
--- | Adapt both sides of a shard at once.
---
--- @codecShard f g = prefixShard f . suffixShard g@.
-codecShard :: (Monad m) => (a' -> a) -> (b -> b') -> Shard m a b -> Shard m a' b'
-codecShard f g = iomap (K $ pure . f) (K $ pure . g)
-
--- | Sequential composition of shards.
---
--- The output of the first shard feeds the input of the second.  This is
--- the same shape as connecting two effectful agents in series.
-composeShard :: forall m a b c. (Monad m) => Shard m a b -> Shard m b c -> Shard m a c
-composeShard = pipe
-
--- ---------------------------------------------------------------------------
--- IO shards (the seat boundary)
--- ---------------------------------------------------------------------------
-
--- | An effectful agent shard with a @[Post Text]@ buffer threaded through the
--- arrow: commit stores the batch, emit computes outputs from it in 'IO'.
--- This is the closed seat shape hosts and bus agents run.
-type AgentShard a b = Poles () (Step (,) (,) [Post Text] [Post Text] (K IO)) a b
-
--- | Close a same-type shard once, exposing both the output and the residual
--- state.  Works for any state carrier @s@ and payload @a@.
-closeShardIO :: Poles () (Step (,) (,) s s (K IO)) a a -> a -> s -> IO (a, s)
-closeShardIO sh x s0 = do
-  let thread = close sh
-  (s', y) <- runK (step thread) (s0, x)
-  pure (y, s')
-
--- | Build an agent shard that stores the input batch, then computes outputs
--- from that batch in 'IO'.
-ioShard :: ([Post Text] -> IO [Post Text]) -> AgentShard [Post Text] [Post Text]
-ioShard emit = Poles writeBatch writeBatch read'
-  where
-    writeBatch = Step $ K $ \(_, xs) -> pure (xs, ())
-    read' = Step $ K $ \(s, ()) -> do
-      outs <- emit s
-      pure ([], outs)
