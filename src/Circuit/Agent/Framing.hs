@@ -64,7 +64,7 @@ module Circuit.Agent.Framing
   )
 where
 
-import Circuit.Agent (Post (..), PostId)
+import Circuit.Agent (Post, PostId, body, channel, from, pattern Post, thread, to)
 import Control.Applicative ((<|>))
 import Control.Monad (guard)
 import Data.Maybe (mapMaybe)

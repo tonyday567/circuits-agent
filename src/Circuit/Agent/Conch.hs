@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 -- | Conch custody over addressed posts.
 --
@@ -23,7 +24,7 @@ module Circuit.Agent.Conch
   )
 where
 
-import Circuit.Agent (Name, Post (..), PostId)
+import Circuit.Agent (Name, Post, PostId, body, channel, from, pattern Post, thread, to)
 import Circuit.Agent.Framing (PostBody (..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map

@@ -1,6 +1,9 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# OPTIONS_GHC -Wno-pattern-namespace-specifier #-}
 
 -- | Body-shaped agents on a shared, addressed log.
 --
@@ -51,7 +54,13 @@
 -- Design card: @coffee\/loom\/agent.md@.
 module Circuit.Agent
   ( -- * Posts and the log
-    Post (..),
+    Post,
+    pattern Post,
+    from,
+    channel,
+    to,
+    thread,
+    body,
     PostId,
     mkPost,
     mkChannelPost,
@@ -194,6 +203,7 @@ where
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, unitEndsSTM, writeHaltChannel)
 import Circuit.Category (K (..))
 import Circuit.Machine (Body (Body), Moore, Poles (..), close, polesK)
+import Circuit.Post qualified as Core
 import Circuit.Syntax (Syntax (Lift), eval)
 import Circuit.Tensor (Const (..), unConst)
 import Circuit.Trace (FreeTrace)
@@ -202,12 +212,10 @@ import Control.Concurrent.Async (async, cancel, race, wait)
 import Control.Concurrent.STM (STM, atomically, orElse)
 import Control.Monad (foldM)
 import Data.Foldable (traverse_)
-import Data.List (nub, sort)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text, empty)
-import Numeric.Natural (Natural)
 import "circuits" Circuit.Stream (Cons (..), Snoc (..), These (..), Uncons (..))
 import Prelude hiding (read)
 
@@ -224,46 +232,34 @@ type Name = Text
 -- oldest-first log, but 'branches' and 'cone' resolve by the id itself, not by
 -- position in the passed-in list.  Use 'indexToIdMap' to assign ids [0..] from
 -- a chronological list.
-type PostId = Natural
+type PostId = Core.PostId
 
 -- | A single entry on the shared log, polymorphic in payload.
 --
--- Routing is by name list: a post delivers to every agent whose name appears
--- in 'to' (the audience).  'thread' is the ancestry edges: @[]@ for a root
--- post, otherwise the 'PostId's of the posts being replied to or synthesised
--- from.  Parents are a set (duplicates discarded) in normalised (sorted)
--- order — the smart constructors keep it so.
-data Post a = Post
-  { from :: Name,
-    channel :: Maybe Name,
-    to :: [Name],
-    thread :: [PostId],
-    body :: a
-  }
-  deriving (Show, Eq, Ord, Functor)
+-- The structural post lives in 'Circuit.Post'; this alias specialises its
+-- address type to 'Name' for the agent execution vocabulary.
+type Post a = Core.Post Name a
+
+pattern Post :: Name -> Maybe Name -> [Name] -> [PostId] -> a -> Post a
+pattern Post {from, channel, to, thread, body} = Core.Post from channel to thread body
+
+{-# COMPLETE Post #-}
 
 -- | A fresh root post (no parents). No channel: address by the 'to' list.
 mkPost :: Name -> [Name] -> a -> Post a
-mkPost f t = Post f Nothing t []
+mkPost = Core.mkPost
 
 -- | A fresh root post in a named channel. The channel is the address; the
 -- 'to' list is the resolved membership at post time.
 mkChannelPost :: Name -> Name -> [Name] -> a -> Post a
-mkChannelPost f c t = Post f (Just c) t []
+mkChannelPost = Core.mkChannelPost
 
 -- | A reply: the audience is the parent's sender plus the rest of the
 -- parent's audience (minus self); the sole thread edge cites the parent's
 -- 'PostId'. The reply inherits the parent's channel: a reply lands in the
 -- channel it answers.
 replyTo :: Name -> PostId -> Post a -> b -> Post b
-replyTo who parentId p b =
-  Post
-    { from = who,
-      channel = channel p,
-      to = from p : filter (/= who) (to p),
-      thread = [parentId],
-      body = b
-    }
+replyTo = Core.replyTo
 
 -- | A synthesis: one descendant of several parents — the object-level
 -- wire-merge dual to merging agents.  The ancestry cites every parent id as
@@ -272,29 +268,18 @@ replyTo who parentId p b =
 -- the audience and the parent ids, never the parent posts, so there is no
 -- channel to inherit.
 synthesis :: Name -> [Name] -> [PostId] -> b -> Post b
-synthesis who audience parentIds b =
-  Post
-    { from = who,
-      channel = Nothing,
-      to = audience,
-      thread = sortNub parentIds,
-      body = b
-    }
+synthesis = Core.synthesis
 
 -- | Sorted, duplicate-free.  The normalised-set primitive of the thread
 -- design: parent sets, audiences, and cones are all kept in this form.
 sortNub :: (Ord a) => [a] -> [a]
-sortNub = nub . sort
+sortNub = Core.sortNub
 
 -- | Assign positional ids @[0..]@ to a chronological list of posts.  This is
 -- the convenience bridge from list-shaped logs to the id-resolved
 -- 'branches'/'cone' API.
 indexToIdMap :: [Post a] -> Map PostId (Post a)
-indexToIdMap = Map.fromList . zip [0 ..]
-
--- | The next id after the largest key in the map, or @0@ if empty.
-nextId :: Map PostId (Post a) -> PostId
-nextId m = if Map.null m then 0 else fst (Map.findMax m) + 1
+indexToIdMap = Core.indexToIdMap
 
 -- | The label-branches from a post to its conversation roots, resolved by
 -- exact 'PostId'.  The current post is not in the map; its id is inferred as
@@ -313,24 +298,12 @@ nextId m = if Map.null m then 0 else fst (Map.findMax m) + 1
 -- >>> let p1 = mkPost "tony" ["grok"] "hi" :: Post String; p2 = mkPost "grok" ["tony"] "hello"; r1 = replyTo "kimi" 1 p2 "a"; r2 = replyTo "tony" 2 r1 "b" in branchesByIndex [p1, p2, r1] r2
 -- [["tony","kimi","grok"]]
 branches :: Map PostId (Post a) -> Post a -> [[Name]]
-branches priorMap = go (nextId priorMap)
-  where
-    go selfId p =
-      case thread p of
-        [] -> [[from p]]
-        is -> concatMap (branchStep selfId p) is
-
-    branchStep selfId p i =
-      if i >= selfId
-        then []
-        else case Map.lookup i priorMap of
-          Nothing -> []
-          Just q -> map (from p :) (go i q)
+branches = Core.branches
 
 -- | Convenience wrapper: resolve branches from a chronological list, assigning
 -- ids @[0..]@.
 branchesByIndex :: [Post a] -> Post a -> [[Name]]
-branchesByIndex prior = branches (indexToIdMap prior)
+branchesByIndex = Core.branchesByIndex
 
 -- | The ancestry cone: every name appearing on any branch from a post to
 -- its roots, as a normalised set — the "who contributed to this" query,
@@ -347,12 +320,12 @@ branchesByIndex prior = branches (indexToIdMap prior)
 -- >>> let p1 = mkPost "tony" ["grok"] "hi" :: Post String; p2 = mkPost "grok" ["tony"] "hello"; r1 = replyTo "kimi" 1 p2 "a"; prior = [p2, p1, r1] in coneByIndex prior (synthesis "sum" [] [2, 0] "Σ")
 -- ["grok","kimi","sum","tony"]
 cone :: Map PostId (Post a) -> Post a -> [Name]
-cone priorMap p = sortNub (concat (branches priorMap p))
+cone = Core.cone
 
 -- | Convenience wrapper: resolve cone from a chronological list, assigning ids
 -- @[0..]@.
 coneByIndex :: [Post a] -> Post a -> [Name]
-coneByIndex prior = cone (indexToIdMap prior)
+coneByIndex = Core.coneByIndex
 
 -- | The shared append-only log, newest first.
 --
@@ -490,14 +463,7 @@ appendInbox p (Inbox (subs, f)) = Inbox (subs, snoc f p)
 -- small stepping stone toward a relational copy/discard delivery model
 -- ('FinRel'); the full wiring is future work.
 deliversTo :: Post a -> [Name] -> Bool
-deliversTo p subs =
-  case channel p of
-    Just c -> c `elem` subs
-    Nothing ->
-      case to p of
-        [] -> False
-        [t] | t == empty -> False
-        ts -> any (`elem` ts) subs
+deliversTo = Core.deliversTo
 
 -- | Peel the oldest addressed post from the inbox, returning the rest.
 --

@@ -43,7 +43,7 @@ module Circuit.Agent.Mark
   )
 where
 
-import Circuit.Agent (Post (..))
+import Circuit.Agent (Post, body)
 import Data.Text (Text)
 import Data.Text qualified as T
 

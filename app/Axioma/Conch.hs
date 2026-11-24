@@ -1,10 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 -- | Exact pure witnesses for Conch custody.
 module Axioma.Conch (conchTopic) where
 
 import Axioma.Common (assert)
-import Circuit.Agent (Name, Post (..), PostId)
+import Circuit.Agent (Name, Post, PostId, body, channel, from, pattern Post, thread, to)
 import Circuit.Agent.Conch
 import Circuit.Agent.Framing (PostBody (..), framePost, parsePost)
 import Data.Map.Strict qualified as Map

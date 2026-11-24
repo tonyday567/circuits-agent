@@ -19,7 +19,7 @@ module Circuit.Agent.Query
   )
 where
 
-import Circuit.Agent (Agent, Post (..), PostId, ioAgent, mkPost, replyTo, sortNub, synthesis)
+import Circuit.Agent (Agent, Post, PostId, from, ioAgent, mkPost, replyTo, sortNub, synthesis, to, body)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T

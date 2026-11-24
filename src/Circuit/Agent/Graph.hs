@@ -42,7 +42,8 @@ import Algebra.Graph.Labelled qualified as LG
 import Circuit.Agent
   ( AgentState (..),
     Name,
-    Post (..),
+    Post,
+    to,
     PureAgent,
     appendInbox,
     emptyInbox,
