@@ -12,10 +12,10 @@ where
 
 import Axioma.Common
 import Circuit.Agent
+import Circuit.Body (Body (Body), iomap, pipe)
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body), Moore, iomap, pipe)
+import Circuit.Machine (Moore (Moore))
 import Circuit.Stream (These (..), uncons)
-import Circuit.Tensor (unConst)
 import Control.Concurrent.STM
 import Control.Exception (IOException, try)
 import Data.Functor.Identity (Identity (..))
@@ -227,11 +227,11 @@ shardsTopic = do
   putStrLn "branch agent"
   do
     let liftAgent :: Bool -> Moore (,) [Post Text] (->) (Post Text) [Post Text] -> PureAgent (Bool, [Post Text]) (Post Text) [Post Text]
-        liftAgent tag (Body _ k o) =
+        liftAgent tag (Moore _ k o) =
           Body
             (\inp -> (tag, k ([], inp)))
             (\((tg, hist), inp) -> (tg, k (hist, inp)))
-            (\ch@(_, hist) -> (ch, unConst (o hist)))
+            (\ch@(_, hist) -> (ch, o hist))
         calcOnly :: Moore (,) [Post Text] (->) (Post Text) [Post Text]
         calcOnly = tape calc
         echoOnly :: Moore (,) [Post Text] (->) (Post Text) [Post Text]

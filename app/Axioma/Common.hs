@@ -41,7 +41,7 @@ where
 import Circuit.Agent
 import Circuit.Agent.Mark (Mark (..), markOf)
 import Circuit.Agent.StdPorts
-import Circuit.Machine (Body (Body), Moore, MooreT (..), scan)
+import Circuit.Machine (Moore (Moore), MooreT (..), scan)
 import Control.Monad (when)
 import Data.List (nub)
 import Data.Text (Text)
@@ -64,11 +64,11 @@ assert msg ok =
 -- | The runner 'iterateAgent' once was: a body is already observable, so
 -- this is 'scan' over a 'MooreT' at constant seed.
 iterateAgent :: Moore (,) s (->) i o -> s -> [i] -> [o]
-iterateAgent (Body _ k o) s0 = scan (MooreT (Body (\i -> k (s0, i)) k o))
+iterateAgent (Moore _ k o) s0 = scan (MooreT (Moore (\i -> k (s0, i)) k o))
 
 -- | The final state of the run — 'foldProcess' without the observation.
 finalAgent :: Moore (,) s (->) i o -> s -> [i] -> s
-finalAgent (Body _ k _) s0 is = foldl' (\s i -> k (s, i)) s0 is
+finalAgent (Moore _ k _) s0 is = foldl' (\s i -> k (s, i)) s0 is
 
 -- | Remove a file if present.
 wipe :: FilePath -> IO ()

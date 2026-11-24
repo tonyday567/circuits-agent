@@ -24,7 +24,7 @@ where
 
 import Circuit.Agent.Ends (unitEndsSTM)
 import Circuit.Category (K (..))
-import Circuit.Machine (Poles (..), close)
+import Circuit.Body (Poles (..), close)
 import Circuit.Syntax (Syntax (Lift))
 import Circuit.Trace (FreeTrace)
 import Circuit.Traced (trace)

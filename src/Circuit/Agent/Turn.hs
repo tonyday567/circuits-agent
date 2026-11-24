@@ -49,9 +49,9 @@ where
 import Circuit (FreeTrace, Syntax (Lift))
 import Circuit.Agent (PostId)
 import Circuit.Agent.StdPorts (NonceEvent (..), NoncePorts (..))
+import Circuit.Body (Poles (..))
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body), Moore, Poles (..))
-import Circuit.Tensor (Const (..))
+import Circuit.Machine (Moore (Moore))
 import Data.IORef
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -104,7 +104,7 @@ matchResponse st@TurnState {pending} resp =
 --   its thread equals a pending command's id, emitting the pair and leaving
 --   every other pending command in place.
 turnProcess :: Moore (,) (TurnState a, Maybe (TurnToken a, TurnToken a)) (->) (TurnToken a) (Maybe (TurnToken a, TurnToken a))
-turnProcess = Body (\tok -> step ((emptyTurnState, Nothing), tok)) step (Const . snd)
+turnProcess = Moore (\tok -> step ((emptyTurnState, Nothing), tok)) step snd
   where
     step ((st, _), tok) =
       if null (turnThread tok)

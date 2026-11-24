@@ -50,7 +50,7 @@ import Circuit.Agent
     loopWithSubs,
     watch,
   )
-import Circuit.Machine (Body (..))
+import Circuit.Body (Body (..))
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)

@@ -13,9 +13,8 @@ where
 import Axioma.Common
 import Circuit.Agent
 import Circuit.Agent.StdPorts
-import Circuit.Machine (Body (Body), Moore)
+import Circuit.Machine (Moore (Moore))
 import Circuit.Poly (Eval (..), evalAsCell)
-import Circuit.Tensor (Const (..))
 import Data.Text (Text)
 
 default (Text)
@@ -51,7 +50,7 @@ tapeTopic = do
   do
     let sumAgent :: Moore (,) Int (->) Int Int
         (k, o) = evalAsCell (\s -> EP (EK s, EE (+ s)))
-        sumAgent = Body (\i -> k (0, i)) k (Const . o)
+        sumAgent = Moore (\i -> k (0, i)) k o
     assert "tape sum == [1,3,6]" $
       iterateAgent (tape sum) [] [1, 2, 3 :: Int] == [1, 3, 6]
     assert "sumAgent == [1,3,6]" $

@@ -45,7 +45,7 @@ where
 
 import Circuit.Category (K (..))
 import Circuit.Category qualified as Cat
-import Circuit.Machine (Poles (..), close, polesK, unclose)
+import Circuit.Body (Poles (..), close, polesK, unclose)
 import Control.Applicative
 import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM

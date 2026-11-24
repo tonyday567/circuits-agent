@@ -90,10 +90,11 @@ where
 
 import Circuit.Agent (PostId)
 import Circuit.Agent.Ends (ChannelPolicy (..), openChannel)
+import Circuit.Body (Poles (..))
 import Circuit.Category (K (..), (.>))
-import Circuit.Machine (Body (Body), Moore, Poles (..))
+import Circuit.Machine (Moore (Moore))
 import Circuit.Syntax (Syntax (Lift))
-import Circuit.Tensor (Const (..), SemiTensor (..), unConst)
+import Circuit.Tensor (SemiTensor (..))
 import Circuit.Trace (FreeTrace)
 import Circuit.Traced (trace)
 import Control.Concurrent (forkIO, killThread, threadDelay)
@@ -362,7 +363,7 @@ sink q = runK (commit q)
 -- >>> scan (MooreT (frameAgent lineMarks decodeUtf8)) [Just "a\n", Just "b", Nothing]
 -- [["a"],[],["b"]]
 frameAgent :: ProcMarks -> (BS.ByteString -> a) -> Moore (,) (BS.ByteString, [a]) (->) (Maybe BS.ByteString) [a]
-frameAgent marks decode = Body (\i -> step ((BS.empty, []), i)) step (Const . snd)
+frameAgent marks decode = Moore (\i -> step ((BS.empty, []), i)) step snd
   where
     step ((buf, _), i) = case i of
       Just chunk ->
@@ -384,7 +385,7 @@ frameProcess = frameAgent
 
 -- | One body step: the observation of the post-step state, with the state.
 runCell :: Moore (,) s (->) i o -> s -> i -> (o, s)
-runCell (Body _ k o) s i = let s' = k (s, i) in (unConst (o s'), s')
+runCell (Moore _ k o) s i = let s' = k (s, i) in (o s', s')
 
 -- | The pumper: the IO interpretation of 'frameAgent' at a 'Handle'.
 -- Blocking reads deliver percepts; payloads are sunk into the queue as

@@ -201,11 +201,11 @@ module Circuit.Agent
 where
 
 import Circuit.Agent.Ends (ChannelPolicy (..), HaltChannel (..), IsLinear, Queue (..), openChannel, openChannelSTM, openHaltChannel, openIO, openLinearChannel, openLinearChannelSTM, openSTM, pipeEnds, readHaltChannel, unitEndsSTM, writeHaltChannel)
+import Circuit.Body (Body (Body), Poles (..), close, polesK)
 import Circuit.Category (K (..))
-import Circuit.Machine (Body (Body), Moore, Poles (..), close, polesK)
+import Circuit.Machine (Moore (Moore))
 import Circuit.Post qualified as Core
 import Circuit.Syntax (Syntax (Lift), eval)
-import Circuit.Tensor (Const (..), unConst)
 import Circuit.Trace (FreeTrace)
 import Circuit.Traced (trace)
 import Control.Concurrent.Async (async, cancel, race, wait)
@@ -370,7 +370,7 @@ type AgentM arr s a b = Body (,) (,) s s arr a b
 
 -- | Convert a Moore cell into the two-leg meeting body.
 cellToAgent :: Moore (,) s (->) a b -> PureAgent s a b
-cellToAgent (Body j k o) = Body j k (\s -> (s, unConst (o s)))
+cellToAgent (Moore j k o) = Body j k (\s -> (s, o s))
 
 -- | Drain ordered emissions through the first 'Done'. The final emission is
 -- always performed, even when the incoming channel already reports 'Done',
@@ -411,7 +411,7 @@ ioAgent action =
 -- >>> scan (MooreT (tape length)) [1,2,3 :: Int]
 -- [1,2,3]
 tape :: ([i] -> o) -> Moore (,) [i] (->) i o
-tape f = Body (\i -> [i]) (\(hist, i) -> i : hist) (Const . f)
+tape f = Moore (\i -> [i]) (\(hist, i) -> i : hist) f
 
 -- | Like 'tape', but also conses the agent's own output onto its history.
 --
